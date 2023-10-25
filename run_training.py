@@ -13,7 +13,7 @@ from nuplan.planning.script.utils import set_default_path
 from nuplan.planning.training.experiments.caching import cache_data
 from omegaconf import DictConfig
 
-from src.custom_training import (
+from src.custom_training.custom_training_builder import (
     TrainingEngine,
     build_training_engine,
     update_config_for_training,
@@ -102,3 +102,34 @@ def main(cfg: DictConfig) -> Optional[TrainingEngine]:
 
 if __name__ == "__main__":
     main()
+
+# command to cache data
+'''
+ export PYTHONPATH=$PYTHONPATH:$(pwd)
+
+ python run_training.py \
+    py_func=cache +training=train_planTF \
+    scenario_builder=nuplan \
+    cache.cache_path=/data1/nuplan/jiale2/exp/cache_plantf_1M \
+    cache.cleanup_cache=true \
+    scenario_filter=training_scenarios_1M \
+    worker.threads_per_node=16
+'''
+
+# command to train
+'''
+export CUDA_VISIBLE_DEVICES=0,1,2
+python run_training.py \
+  py_func=train +training=train_planTF \
+  worker=single_machine_thread_pool worker.max_workers=12 \
+  scenario_builder=nuplan cache.cache_path=/data1/nuplan/jiale2/exp/cache_plantf_1M cache.use_cache_without_dataset=true \
+  data_loader.params.batch_size=32 data_loader.params.num_workers=8 \
+  data_loader.datamodule.train_fraction=1.0 \
+  data_loader.datamodule.val_fraction=0.01 \
+  data_loader.datamodule.test_fraction=0.01 \
+  lr=1e-3 epochs=25 warmup_epochs=3 weight_decay=0.0001 \
+  lightning.trainer.params.check_val_every_n_epoch=5
+
+  '''  
+
+# wandb.mode=online wandb.project=nuplan wandb.name=plantf

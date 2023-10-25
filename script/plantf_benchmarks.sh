@@ -11,7 +11,7 @@ for challenge in $CHALLENGES; do
         planner=$planner \
         scenario_builder=nuplan_challenge \
         scenario_filter=$SPLIT \
-        worker.threads_per_node=20 \
+        worker.threads_per_node=12 \
         experiment_uid=$SPLIT/$planner \
         verbose=true \
         planner.imitation_planne.planner_ckpt="$CKPT_ROOT/$PLANNER.ckpt"
