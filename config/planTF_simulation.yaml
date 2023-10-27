@@ -29,7 +29,7 @@ defaults:
   # Hyperparameters need to be specified
   - observation: null
   - ego_controller: null
-  - planner: null
+  - planner: planTF
   - simulation_time_controller: step_simulation_time_controller
   - metric_aggregator:
       - default_weighted_average

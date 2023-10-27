@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 set_default_path()
 
 
-@hydra.main(config_path="./config", config_name="default_training")
+@hydra.main(config_path="./config", config_name="planTF_training")
 def main(cfg: DictConfig) -> Optional[TrainingEngine]:
     """
     Main entrypoint for training/validation experiments.
@@ -121,15 +121,15 @@ if __name__ == "__main__":
 export CUDA_VISIBLE_DEVICES=0,1,2
 python run_training.py \
   py_func=train +training=train_planTF \
-  worker=single_machine_thread_pool worker.max_workers=12 \
+  worker=single_machine_thread_pool worker.max_workers=16 \
   scenario_builder=nuplan cache.cache_path=/data1/nuplan/jiale2/exp/cache_plantf_1M cache.use_cache_without_dataset=true \
-  data_loader.params.batch_size=32 data_loader.params.num_workers=8 \
+  data_loader.params.batch_size=128 data_loader.params.num_workers=8 \
   data_loader.datamodule.train_fraction=1.0 \
   data_loader.datamodule.val_fraction=0.01 \
   data_loader.datamodule.test_fraction=0.01 \
-  lr=1e-3 epochs=25 warmup_epochs=3 weight_decay=0.0001 \
-  lightning.trainer.params.check_val_every_n_epoch=5
-
+  lr=1e-3 epochs=35 warmup_epochs=3 weight_decay=0.0001 \
+  lightning.trainer.params.check_val_every_n_epoch=4 \
+  wandb.mode=online wandb.project=nuplan wandb.name=plantf
   '''  
 
 # wandb.mode=online wandb.project=nuplan wandb.name=plantf
