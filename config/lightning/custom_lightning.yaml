@@ -12,12 +12,12 @@ trainer:
     # max_time: 00:16:00:00  # training time before the process is terminated
 
     max_epochs: ${epochs}  # maximum number of training epochs
-    check_val_every_n_epoch: 5  # run validation set every n training epochs
-    # val_check_interval: 1.0  # [%] run validation set every X% of training set
+    # check_val_every_n_epoch:   # run validation set every n training epochs
+    val_check_interval: 0.5  # [%] run validation set every X% of training set
 
     limit_train_batches:  # how much of training dataset to check (float = fraction, int = num_batches)
-    limit_val_batches: 20 # how much of validation dataset to check (float = fraction, int = num_batches)
-    limit_test_batches: 20 # how much of test dataset to check (float = fraction, int = num_batches)
+    limit_val_batches:  # how much of validation dataset to check (float = fraction, int = num_batches)
+    limit_test_batches:  # how much of test dataset to check (float = fraction, int = num_batches)
 
     devices: -1  # number of GPUs to utilize (-1 means all available GPUs)
     accelerator: gpu  # distribution method

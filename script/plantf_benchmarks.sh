@@ -16,7 +16,9 @@ for challenge in $CHALLENGES; do
         worker.threads_per_node=16 \
         experiment_uid=$SPLIT/$planner \
         verbose=true \
-        planner.imitation_planner.planner_ckpt="$CKPT_ROOT/$PLANNER.ckpt"
+        planner.imitation_planner.planner_ckpt="$CKPT_ROOT/planTF_epoch3.ckpt"
 done
 
 
+# sh ./script/plantf_benchmarks.sh test14-random
+# sh ./script/plantf_benchmarks.sh test14-hard

@@ -75,7 +75,7 @@ class PlanningModel(TorchModuleWrapper):
             future_steps=future_steps,
             out_channels=4,
         )
-        self.agent_predictor = build_mlp(dim, [dim * 2, future_steps * 2], norm="ln")
+        # self.agent_predictor = build_mlp(dim, [dim * 2, future_steps * 2], norm="ln")
 
         self.apply(self._init_weights)
 
@@ -116,23 +116,26 @@ class PlanningModel(TorchModuleWrapper):
         x_agent = self.agent_encoder(data)
         x_polygon = self.map_encoder(data)
 
-        x = torch.cat([x_agent, x_polygon], dim=1) + pos_embed
+        x = torch.cat([x_agent, x_polygon], dim=1) + pos_embed 
+        # x: [batch, n_elem, n_dim]. n_elem is not a fixed number, it depends on the number of agents and polygons in the scene
 
         for blk in self.encoder_blocks:
             x = blk(x, key_padding_mask=key_padding_mask)
         x = self.norm(x)
 
-        trajectory, probability = self.trajectory_decoder(x[:, 0])
-        prediction = self.agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2)
+        predictions, probabilities = self.trajectory_decoder(x[:, 0:A], x[:, A:], agent_key_padding, polygon_key_padding) # x: [batch, n_elem, 128], trajectory: [batch, modal, 80, 4], probability: [batch, 6]
+        # prediction = self.agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2)
 
         out = {
-            "trajectory": trajectory,
-            "probability": probability,
-            "prediction": prediction,
+            "trajectory": predictions[:, :, 0],
+            "probability": probabilities,
+            "prediction": predictions,
+            # "score_pred": score_pred,
         }
 
         if not self.training:
-            best_mode = probability.argmax(dim=-1)
+            trajectory = predictions[:, :, 0]
+            best_mode = probabilities.argmax(dim=-1)
             output_trajectory = trajectory[torch.arange(bs), best_mode]
             angle = torch.atan2(output_trajectory[..., 3], output_trajectory[..., 2])
             out["output_trajectory"] = torch.cat(
