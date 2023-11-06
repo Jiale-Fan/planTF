@@ -294,5 +294,5 @@ class LightningTrainer(pl.LightningModule):
         return {
             'optimizer': optimizer,
             'lr_scheduler': scheduler,
-            'gradient_clip_val': 5.0,  # Adjust this value to the desired gradient clipping value
+            'gradient_clip_val': 3.0,  # Adjust this value to the desired gradient clipping value
         }

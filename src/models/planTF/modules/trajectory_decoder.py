@@ -30,8 +30,11 @@ class TrajectoryDecoder(nn.Module):
 
         init_ = lambda m: init(m, nn.init.xavier_normal_, lambda x: nn.init.constant_(x, 0), np.sqrt(2))
 
-        self.learned_query = nn.Parameter(torch.randn(num_modes, embed_dim).to('cuda'), requires_grad=True)
-        self.learned_query_prob = nn.Parameter(torch.randn(num_modes, embed_dim).to('cuda'), requires_grad=True)
+        self.learned_query = nn.Parameter(torch.Tensor(num_modes, embed_dim).to('cuda'), requires_grad=True) # TODO: check if xavier init is possible
+        self.learned_query_prob = nn.Parameter(torch.Tensor(num_modes, embed_dim).to('cuda'), requires_grad=True)
+
+        nn.init.xavier_normal_(self.learned_query)
+        nn.init.xavier_normal_(self.learned_query_prob)
 
         self.transformer_decoder = TransformerDecoderLayer(
             d_model=embed_dim,
@@ -42,19 +45,6 @@ class TrajectoryDecoder(nn.Module):
             batch_first=True,
         )
 
-        # hidden = 2 * embed_dim
-        # self.loc = nn.Sequential(
-        #     nn.Linear(embed_dim, hidden),
-        #     nn.LayerNorm(hidden),
-        #     nn.ReLU(inplace=True),
-        #     nn.Linear(hidden, future_steps*out_channels),
-        # )
-        # self.pi = nn.Sequential(
-        #     nn.Linear(embed_dim, hidden),
-        #     nn.LayerNorm(hidden),
-        #     nn.ReLU(inplace=True),
-        #     nn.Linear(hidden, 1),
-        # )
         self.output_model = OutputModel(d_k=self.embed_dim, predict_yaw=True, future_steps=self.future_steps)
 
         self.mode_map_attn = nn.MultiheadAttention(self.embed_dim, num_heads=self.num_heads, dropout=self.dropout, batch_first=True)
@@ -77,10 +67,6 @@ class TrajectoryDecoder(nn.Module):
                                       tgt_mask=generate_tgt_masks(agent_mask, self.num_modes, self.num_heads), 
                                       memory_mask=generate_memory_masks(agent_mask, map_mask, self.num_modes, self.num_heads))
         x = x.view(B, self.num_modes, -1, self.embed_dim) # [B, num_modes, ego+agents, embed_dim]
-        
-        # loc = self.loc(x).view(B, self.num_modes, -1, self.future_steps, self.out_channels) # [B, num_modes, agents, future_steps, 2]
-        # pi = self.pi(x).squeeze(-1) # [B, num_modes, agents]
-        # score_pred = self.score_pred(x).squeeze(-1)
 
         predictions = self.output_model(x) # [B, num_modes, ego+agents, 6]
 
