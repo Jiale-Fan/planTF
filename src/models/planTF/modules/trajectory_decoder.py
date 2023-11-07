@@ -51,6 +51,9 @@ class TrajectoryDecoder(nn.Module):
         self.prob_decoder = nn.MultiheadAttention(self.embed_dim, num_heads=self.num_heads, dropout=self.dropout, batch_first=True)
 
         self.prob_predictor = init_(nn.Linear(self.embed_dim, 1))
+        self.metrics_decoder = nn.Sequential(
+            init_(nn.Linear(self.embed_dim, 1)), nn.Sigmoid(),
+        )
 
     def forward(self, agent_emb, map_emb, agent_mask, map_mask):
 
@@ -80,10 +83,12 @@ class TrajectoryDecoder(nn.Module):
         mode_probs = self.prob_predictor(mode_params_emb).squeeze(-1)
         mode_probs = F.softmax(mode_probs, dim=-1)
 
+        mode_metrics = self.metrics_decoder(mode_params_emb).squeeze(-1)
+
         # assert not torch.isnan(predictions).any()
         # assert not torch.isnan(mode_probs).any()
 
-        return predictions, mode_probs
+        return predictions, mode_probs, mode_metrics
 
 
 def init(module, weight_init, bias_init, gain=1):

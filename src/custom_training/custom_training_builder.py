@@ -31,6 +31,7 @@ from pytorch_lightning.callbacks import (
     ModelCheckpoint,
     RichModelSummary,
     RichProgressBar,
+    TQDMProgressBar
 )
 from pytorch_lightning.loggers.tensorboard import TensorBoardLogger
 from pytorch_lightning.loggers.wandb import WandbLogger
@@ -195,7 +196,8 @@ def build_custom_trainer(cfg: DictConfig) -> pl.Trainer:
             save_last=True,
         ),
         RichModelSummary(max_depth=1),
-        RichProgressBar(),
+        # RichProgressBar(),
+        TQDMProgressBar(),
         LearningRateMonitor(logging_interval="epoch"),
     ]
 

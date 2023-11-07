@@ -19,6 +19,7 @@ from torchmetrics import MetricCollection
 from src.metrics import MR, minADE, minFDE
 from src.optim.warmup_cos_lr import WarmupCosLR
 from src.models.planTF.training_objectives import nll_loss_multimodes_joint
+from src.models.planTF.metrics_computer import MetricsSupervisor
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ class LightningTrainer(pl.LightningModule):
         self.weight_decay = weight_decay
         self.epochs = epochs
         self.warmup_epochs = warmup_epochs
+        self.metrics_supervisor = MetricsSupervisor()
 
     def on_fit_start(self) -> None:
         metrics_collection = MetricCollection(
@@ -59,36 +61,26 @@ class LightningTrainer(pl.LightningModule):
     def _step(
         self, batch: Tuple[FeaturesType, TargetsType, ScenarioListType], prefix: str
     ) -> torch.Tensor:
-        features, _, _ = batch
+        features, _, scenarios = batch
         res = self.forward(features["feature"].data)
 
-        losses = self._compute_objectives(res, features["feature"].data)
+        losses = self._compute_objectives(res, features["feature"].data, scenarios)
         metrics = self._compute_metrics(res, features["feature"].data, prefix)
         self._log_step(losses["loss"], losses, metrics, prefix)
 
         return losses["loss"]
 
-    def _compute_objectives(self, res, data) -> Dict[str, torch.Tensor]:
-        probability, prediction = (
-            res["probability"], # [batch, num_modes, num_agents, time_steps, 5]
+    def _compute_objectives(self, res, data, scenarios) -> Dict[str, torch.Tensor]:
+        probability, prediction, trajectories, metrics_assessment = (
+            res["probability"], # [batch, num_modes, num_agents, time_steps, 6]
             res["prediction"], # [batch, num_modes]
-            # res["score_pred"],
+            res["trajectory"], # [batch, num_modes, time_steps, 5]
+            res["metrics_assessment"], # [batch, num_modes]
         )
 
+        # compute trajectory imitation and prediction loss
         targets = data["agent"]["target"]
         valid_mask = data["agent"]["valid_mask"][..., -targets.shape[-2]:]
-
-        # ego_target_pos, ego_target_heading = targets[:, 0, :, :2], targets[:, 0, :, 2]
-        # ego_target = torch.cat(
-        #     [
-        #         ego_target_pos,
-        #         torch.stack(
-        #             [ego_target_heading.cos(), ego_target_heading.sin()], dim=-1
-        #         ),
-        #     ],
-        #     dim=-1,
-        # )
-
 
         nll_loss, kl_loss, post_entropy, adefde_loss = \
             nll_loss_multimodes_joint(prediction.permute(1,3,0,2,4), targets.permute(0,2,1,3), probability, valid_mask.permute(0,2,1),
@@ -97,25 +89,12 @@ class LightningTrainer(pl.LightningModule):
                                         use_FDEADE_aux_loss=True,
                                         predict_yaw=True)
 
-        
-        # agent_target, agent_mask = targets[:, 1:], valid_mask[:, 1:]
-
-        # ade = torch.norm(trajectory[..., :2] - ego_target[:, None, :, :2], dim=-1)
-        # best_mode = torch.argmin(ade.sum(-1), dim=-1)
-        # best_traj = trajectory[torch.arange(trajectory.shape[0]), best_mode]
-        # ego_reg_loss = F.smooth_l1_loss(best_traj, ego_target)
-        # ego_cls_loss = F.cross_entropy(probability, best_mode.detach())
-
-        # agent_reg_loss = F.smooth_l1_loss(
-        #     prediction[agent_mask], agent_target[agent_mask][:, :2]
-        # )
-
-        # add score prediction loss
-        # scores_gt = torch.zeros_like(score_pred) # TODO: change to the real score
-        # score_weight = 0.1
-        # score_pred_loss = score_weight*F.smooth_l1_loss(score_pred, scores_gt)
-
         loss = nll_loss + adefde_loss + kl_loss
+
+        # compute metrics to supervise metrics assessor
+        metrics_mean, metrics_list = self.metrics_supervisor.compute_metrics_batch(trajectories, scenarios)
+        loss_metrics = F.mse_loss(metrics_list.to('cuda'), metrics_assessment) # TODO: add weight to loss_metrics
+        loss += loss_metrics
 
         return {
             "loss": loss,
@@ -126,6 +105,7 @@ class LightningTrainer(pl.LightningModule):
             "post_entropy": post_entropy,
             "ade_fde_loss": adefde_loss,
             "nll_loss": nll_loss,
+            "metrics_loss": loss_metrics,
         }
 
     def _compute_metrics(self, output, data, prefix) -> Dict[str, torch.Tensor]:

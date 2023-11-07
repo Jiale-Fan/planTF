@@ -144,3 +144,5 @@ CUDA_VISIBLE_DEVICES=0,1,2 python run_training.py \
   lightning.trainer.params.val_check_interval=0.5 \
   wandb.mode=online wandb.project=nuplan wandb.name=plantf
 '''
+
+# command to debug train

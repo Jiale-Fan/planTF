@@ -123,14 +123,14 @@ class PlanningModel(TorchModuleWrapper):
             x = blk(x, key_padding_mask=key_padding_mask)
         x = self.norm(x)
 
-        predictions, probabilities = self.trajectory_decoder(x[:, 0:A], x[:, A:], agent_key_padding, polygon_key_padding) # x: [batch, n_elem, 128], trajectory: [batch, modal, 80, 4], probability: [batch, 6]
+        predictions, probabilities, metrics_assessment = self.trajectory_decoder(x[:, 0:A], x[:, A:], agent_key_padding, polygon_key_padding) # x: [batch, n_elem, 128], trajectory: [batch, modal, 80, 4], probability: [batch, 6]
         # prediction = self.agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2)
 
         out = {
             "trajectory": predictions[:, :, 0],
             "probability": probabilities,
             "prediction": predictions,
-            # "score_pred": score_pred,
+            "metrics_assessment": metrics_assessment,
         }
 
         if not self.training:
