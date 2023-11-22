@@ -14,8 +14,32 @@ from .modules.agent_encoder import AgentEncoder
 from .modules.map_encoder import MapEncoder
 from .modules.trajectory_decoder import TrajectoryDecoder
 
+import numpy as np
+
 # no meaning, required by nuplan
 trajectory_sampling = TrajectorySampling(num_poses=8, time_horizon=8, interval_length=1)
+
+
+
+def init(module, weight_init, bias_init, gain=1):
+    weight_init(module.weight.data, gain=gain)
+    bias_init(module.bias.data)
+    return module
+
+class ProjHead(nn.Module):
+    '''
+    Nonlinear projection head that maps the extracted motion features to the embedding space
+    '''
+    def __init__(self, feat_dim, hidden_dim, head_dim):
+        super(ProjHead, self).__init__()
+        self.head = nn.Sequential(
+            nn.Linear(feat_dim, hidden_dim),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden_dim, head_dim)
+            )
+
+    def forward(self, feat):
+        return self.head(feat)
 
 
 class PlanningModel(TorchModuleWrapper):
@@ -77,6 +101,12 @@ class PlanningModel(TorchModuleWrapper):
         )
         # self.agent_predictor = build_mlp(dim, [dim * 2, future_steps * 2], norm="ln")
 
+        self.scenario_embedding = nn.Parameter(torch.randn(1, 1, dim))
+        nn.init.xavier_normal_(self.scenario_embedding)
+
+        init_ = lambda m: init(m, nn.init.xavier_normal_, lambda x: nn.init.constant_(x, 0), np.sqrt(2))
+        self.scenario_projector = ProjHead(feat_dim=dim, hidden_dim=dim//4, head_dim=8)
+
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
@@ -111,25 +141,37 @@ class PlanningModel(TorchModuleWrapper):
 
         agent_key_padding = ~(agent_mask.any(-1))
         polygon_key_padding = ~(polygon_mask.any(-1))
-        key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding], dim=-1)
+
+        # add fake key_padding_mask for scenario embedding TODO: check if mask should be inverse mask
+        scenario_emb_key_padding = torch.zeros(bs, 1, dtype=torch.bool, device=agent_key_padding.device)
+
+        key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding, scenario_emb_key_padding], dim=-1)
 
         x_agent = self.agent_encoder(data)
         x_polygon = self.map_encoder(data)
 
-        x = torch.cat([x_agent, x_polygon], dim=1) + pos_embed 
+        # add learnable initial scenario embedding
+        scenario_emb = self.scenario_embedding.repeat(bs, 1, 1)
+        
+        x = torch.cat([x_agent, x_polygon, scenario_emb], dim=1) + pos_embed 
         # x: [batch, n_elem, n_dim]. n_elem is not a fixed number, it depends on the number of agents and polygons in the scene
 
         for blk in self.encoder_blocks:
             x = blk(x, key_padding_mask=key_padding_mask)
         x = self.norm(x)
 
-        predictions, probabilities = self.trajectory_decoder(x[:, 0:A], x[:, A:], agent_key_padding, polygon_key_padding) # x: [batch, n_elem, 128], trajectory: [batch, modal, 80, 4], probability: [batch, 6]
+        predictions, probabilities = self.trajectory_decoder(x[:, 0:A], x[:, A:-1], agent_key_padding, polygon_key_padding) # x: [batch, n_elem, 128], trajectory: [batch, modal, 80, 4], probability: [batch, 6]
         # prediction = self.agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2)
+
+        # get the projection of the scenario embedding
+        scenario_emb_proj = self.scenario_projector(x[:,-1])
+
 
         out = {
             "trajectory": predictions[:, :, 0],
             "probability": probabilities,
             "prediction": predictions,
+            "scenario_emb_proj": scenario_emb_proj
             # "score_pred": score_pred,
         }
 

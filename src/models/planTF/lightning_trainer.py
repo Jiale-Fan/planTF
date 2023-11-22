@@ -117,6 +117,9 @@ class LightningTrainer(pl.LightningModule):
 
         loss = nll_loss + adefde_loss + kl_loss
 
+        # contrastive loss
+        
+
         return {
             "loss": loss,
             # "reg_loss": nll_loss,
