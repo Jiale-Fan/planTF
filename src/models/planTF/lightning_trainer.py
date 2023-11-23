@@ -31,6 +31,8 @@ class LightningTrainer(pl.LightningModule):
         weight_decay,
         epochs,
         warmup_epochs,
+        contrastive_weight = 1000.0,
+        contrastive_temperature = 0.1,
     ) -> None:
         super().__init__()
         self.save_hyperparameters(ignore=["model"])
@@ -40,8 +42,13 @@ class LightningTrainer(pl.LightningModule):
         self.weight_decay = weight_decay
         self.epochs = epochs
         self.warmup_epochs = warmup_epochs
+        self.temperature = contrastive_temperature # TODO: adjust temperature?
+        self.contrastive_criterion = nn.CrossEntropyLoss()
+        self.neg_num = 2 # TODO: adjust neg_num?
+        self.contrastive_weight = contrastive_weight # TODO: adjust contrastive_weight?
 
     def on_fit_start(self) -> None:
+        # self.model.train()
         metrics_collection = MetricCollection(
             {
                 "minADE1": minADE(k=1).to(self.device),
@@ -72,23 +79,10 @@ class LightningTrainer(pl.LightningModule):
         probability, prediction = (
             res["probability"], # [batch, num_modes, num_agents, time_steps, 5]
             res["prediction"], # [batch, num_modes]
-            # res["score_pred"],
         )
 
         targets = data["agent"]["target"]
         valid_mask = data["agent"]["valid_mask"][..., -targets.shape[-2]:]
-
-        # ego_target_pos, ego_target_heading = targets[:, 0, :, :2], targets[:, 0, :, 2]
-        # ego_target = torch.cat(
-        #     [
-        #         ego_target_pos,
-        #         torch.stack(
-        #             [ego_target_heading.cos(), ego_target_heading.sin()], dim=-1
-        #         ),
-        #     ],
-        #     dim=-1,
-        # )
-
 
         nll_loss, kl_loss, post_entropy, adefde_loss = \
             nll_loss_multimodes_joint(prediction.permute(1,3,0,2,4), targets.permute(0,2,1,3), probability, valid_mask.permute(0,2,1),
@@ -96,29 +90,22 @@ class LightningTrainer(pl.LightningModule):
                                         kl_weight=20.0,
                                         use_FDEADE_aux_loss=True,
                                         predict_yaw=True)
-
         
-        # agent_target, agent_mask = targets[:, 1:], valid_mask[:, 1:]
-
-        # ade = torch.norm(trajectory[..., :2] - ego_target[:, None, :, :2], dim=-1)
-        # best_mode = torch.argmin(ade.sum(-1), dim=-1)
-        # best_traj = trajectory[torch.arange(trajectory.shape[0]), best_mode]
-        # ego_reg_loss = F.smooth_l1_loss(best_traj, ego_target)
-        # ego_cls_loss = F.cross_entropy(probability, best_mode.detach())
-
-        # agent_reg_loss = F.smooth_l1_loss(
-        #     prediction[agent_mask], agent_target[agent_mask][:, :2]
-        # )
-
-        # add score prediction loss
-        # scores_gt = torch.zeros_like(score_pred) # TODO: change to the real score
-        # score_weight = 0.1
-        # score_pred_loss = score_weight*F.smooth_l1_loss(score_pred, scores_gt)
-
-        loss = nll_loss + adefde_loss + kl_loss
-
         # contrastive loss
-        
+        # 1. contrastive loss between scene understandings
+        # look up tables to get positive and negative pairs TODO
+
+        # pos_pairs, neg_pairs = self.get_positive_negative_pairs(data["scenario_type"])
+        # pos_emb = scenario_emb_proj[pos_pairs]
+        # neg_emb = torch.stack([scenario_emb_proj[neg_pairs[i]] for i in range(scenario_emb_proj.size(0))], dim=0)
+        # contrastive_loss = self._contrastive_loss(scenario_emb_proj, pos_emb, neg_emb)
+
+        # 2. contrastive loss between multi-modal plans
+        contrastive_loss = 0
+        if self.training:
+            contrastive_loss = self._contrastive_loss(res['scene_plan_emb_proj'], res["scene_pos_emb_proj"], res["scene_neg_emb_proj"])
+
+        loss = nll_loss + adefde_loss + kl_loss + self.contrastive_weight*contrastive_loss
 
         return {
             "loss": loss,
@@ -129,7 +116,57 @@ class LightningTrainer(pl.LightningModule):
             "post_entropy": post_entropy,
             "ade_fde_loss": adefde_loss,
             "nll_loss": nll_loss,
+            "contrastive_loss": contrastive_loss,
         }
+    
+    def get_positive_negative_pairs(self, scenario_types_ids):
+        '''
+        Input:
+            scenario_types_ids: [batch_size]
+        Output:
+            pos_pairs: [batch_size]
+            neg_pairs: [batch_size, num_neg]
+        '''
+        pass # TODO
+        b = scenario_types_ids.size(0)
+        pos_pairs = torch.zeros(b)
+        neg_pairs = torch.zeros(b, self.neg_num)
+
+        # temporary placeholders
+        return pos_pairs.to(torch.long), neg_pairs.to(torch.long)
+
+    
+    def _contrastive_loss(self, emb_query, emb_pos, emb_neg):
+        '''
+        Input:
+            emb_query: [batch, dim]
+            emb_pos: [batch, dim]
+            emb_neg: [batch, num_neg, dim]
+        Output:
+            loss: scalar
+        '''
+
+        emb_query = emb_query
+        query = nn.functional.normalize(emb_query, dim=-1)
+
+        # normalized embedding
+        key_pos = nn.functional.normalize(emb_pos, dim=-1)
+        key_neg = nn.functional.normalize(emb_neg, dim=-1)
+        # pairing
+        sim_pos = (query * key_pos).sum(dim=-1)
+        sim_neg = (query[:, None, :] * key_neg).sum(dim=-1)
+
+        # loss (social-nce)
+
+        # logits = (torch.cat([sim_pos.unsqueeze(1), sim_neg], dim=1) / self.temperature)
+        # labels = torch.zeros(logits.size(0), dtype=torch.long, device=self.device)
+        # loss = self.contrastive_criterion(logits, labels)
+
+        # loss
+        loss = -torch.log(torch.exp(sim_pos / self.temperature) / torch.sum(torch.exp(sim_neg / self.temperature), dim=-1)).mean()
+
+        return loss
+
 
     def _compute_metrics(self, output, data, prefix) -> Dict[str, torch.Tensor]:
         metrics = self.metrics[prefix](output, data["agent"]["target"][:, 0])
