@@ -29,6 +29,82 @@ from ..features.nuplan_feature import NuplanFeature
 from .common.route_utils import route_roadblock_correction
 from .common.utils import interpolate_polyline, rotate_round_z_axis
 
+SCENARIO_MAPPING_IDS = {
+		'unknown': 0,
+    'accelerating_at_crosswalk': 1,
+    'accelerating_at_stop_sign': 2,
+    'accelerating_at_stop_sign_no_crosswalk': 3,
+    'accelerating_at_traffic_light': 4,
+    'accelerating_at_traffic_light_with_lead': 5,
+    'accelerating_at_traffic_light_without_lead': 6,
+    'behind_bike': 7,
+    'behind_long_vehicle': 8,
+    'behind_pedestrian_on_driveable': 9,
+    'behind_pedestrian_on_pickup_dropoff': 10,
+    'changing_lane': 11,
+    'changing_lane_to_left': 12,
+    'changing_lane_to_right': 13,
+    'changing_lane_with_lead': 14,
+    'changing_lane_with_trail': 15,
+    'crossed_by_bike': 16,
+    'crossed_by_vehicle': 17,
+    'following_lane_with_lead': 18,
+    'following_lane_with_slow_lead': 19,
+    'following_lane_without_lead': 20,
+    'high_lateral_acceleration': 21,
+    'high_magnitude_jerk': 22,
+    'high_magnitude_speed': 23,
+    'low_magnitude_speed': 24,
+    'medium_magnitude_speed': 25,
+    'near_barrier_on_driveable': 26,
+    'near_construction_zone_sign': 27,
+    'near_high_speed_vehicle': 28,
+    'near_long_vehicle': 29,
+    'near_multiple_bikes': 30,
+    'near_multiple_pedestrians': 31,
+    'near_multiple_vehicles': 32,
+    'near_pedestrian_at_pickup_dropoff': 33,
+    'near_pedestrian_on_crosswalk': 34,
+    'near_pedestrian_on_crosswalk_with_ego': 35,
+    'near_trafficcone_on_driveable': 36,
+    'on_all_way_stop_intersection': 37,
+    'on_carpark': 38,
+    'on_intersection': 39,
+    'on_pickup_dropoff': 40,
+    'on_stopline_crosswalk': 41,
+    'on_stopline_stop_sign': 42,
+    'on_stopline_traffic_light': 43,
+    'on_traffic_light_intersection': 44,
+    'starting_high_speed_turn': 45,
+    'starting_left_turn': 46,
+    'starting_low_speed_turn': 47,
+    'starting_protected_cross_turn': 48,
+    'starting_protected_noncross_turn': 49,
+    'starting_right_turn': 50,
+    'starting_straight_stop_sign_intersection_traversal': 51,
+    'starting_straight_traffic_light_intersection_traversal': 52,
+    'starting_u_turn': 53,
+    'starting_unprotected_cross_turn': 54,
+    'starting_unprotected_noncross_turn': 55,
+    'stationary': 56,
+    'stationary_at_crosswalk': 57,
+    'stationary_at_traffic_light_with_lead': 58,
+    'stationary_at_traffic_light_without_lead': 59,
+    'stationary_in_traffic': 60,
+    'stopping_at_crosswalk': 61,
+    'stopping_at_stop_sign_no_crosswalk': 62,
+    'stopping_at_stop_sign_with_lead': 63,
+    'stopping_at_stop_sign_without_lead': 64,
+    'stopping_at_traffic_light_with_lead': 65,
+    'stopping_at_traffic_light_without_lead': 66,
+    'stopping_with_lead': 67,
+    'traversing_crosswalk': 68,
+    'traversing_intersection': 69,
+    'traversing_narrow_lane': 70,
+    'traversing_pickup_dropoff': 71,
+    'traversing_traffic_light_intersection': 72,
+    'waiting_for_pedestrian_to_cross': 73
+}
 
 class NuplanFeatureBuilder(AbstractFeatureBuilder):
     def __init__(
@@ -123,6 +199,7 @@ class NuplanFeatureBuilder(AbstractFeatureBuilder):
             map_api=scenario.map_api,
             mission_goal=scenario.get_mission_goal(),
             traffic_light_status=scenario.get_traffic_light_status_at_iteration(0),
+            scenario_type=scenario.scenario_type,
         )
 
     def get_features_from_simulation(
@@ -153,6 +230,7 @@ class NuplanFeatureBuilder(AbstractFeatureBuilder):
         map_api: AbstractMap,
         mission_goal: StateSE2,
         traffic_light_status: List[TrafficLightStatusData] = None,
+        scenario_type: str = None,
     ):
         present_ego_state = ego_state_list[present_idx]
         query_xy = present_ego_state.center
@@ -186,6 +264,9 @@ class NuplanFeatureBuilder(AbstractFeatureBuilder):
             traffic_light_status=traffic_light_status,
             radius=self.radius,
         )
+
+        scenario_type_id = 0 if scenario_type not in SCENARIO_MAPPING_IDS else SCENARIO_MAPPING_IDS[scenario_type]
+        data["scenario_type"] = np.array([scenario_type_id], dtype=np.int8)
 
         return NuplanFeature.normalize(data, first_time=True, radius=self.radius)
 

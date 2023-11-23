@@ -122,10 +122,10 @@ if __name__ == "__main__":
  python run_training.py \
     py_func=cache +training=train_planTF \
     scenario_builder=nuplan \
-    cache.cache_path=/data1/nuplan/jiale2/exp/cache_plantf_100k \
+    cache.cache_path=/data1/nuplan/jiale2/exp/cache_plantf_hundred\
     cache.cleanup_cache=true \
-    scenario_filter=training_scenarios_100k \
-    worker.threads_per_node=16
+    scenario_filter=training_scenarios_hundred \
+    worker.threads_per_node=2
 '''
 
 # command to train
@@ -141,4 +141,16 @@ python run_training.py \
   wandb.mode=online wandb.project=nuplan wandb.name=plantf_100k
   '''  
 
-# wandb.mode=online wandb.project=nuplan wandb.name=plantf
+# command to debug train
+
+'''
+export CUDA_VISIBLE_DEVICES=0,1,2
+python run_training.py \
+  py_func=train +training=train_planTF \
+  worker=single_machine_thread_pool worker.max_workers=2 \
+  scenario_builder=nuplan cache.cache_path=/data1/nuplan/jiale2/exp/cache_plantf_hundred cache.use_cache_without_dataset=true \
+  data_loader.params.batch_size=4 data_loader.params.num_workers=2 \
+  lr=1e-3 epochs=5 warmup_epochs=3 weight_decay=0.0001 \
+  lightning.trainer.params.check_val_every_n_epoch=5 \
+  wandb.mode=online wandb.project=nuplan wandb.name=plantf_100k
+  '''  
