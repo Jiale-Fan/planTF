@@ -144,6 +144,8 @@ python run_training.py \
 # command to debug train
 
 '''
+export PYTHONPATH=$PYTHONPATH:$(pwd)
+ulimit -n 102400
 export CUDA_VISIBLE_DEVICES=0,1,2
 python run_training.py \
   py_func=train +training=train_planTF \
