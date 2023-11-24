@@ -23,7 +23,7 @@ torch_model = hydra.utils.instantiate(cfg)
 torch_model.to(torch.device("cuda:0"))
 
 # Load the model from a checkpoint
-checkpoint_path = '/data1/nuplan/jiale/exp/exp/training/planTF/2023.11.24.16.47.44/checkpoints/last.ckpt'
+checkpoint_path = '/data1/nuplan/jiale/exp/exp/training/planTF/plantf_1kmodescon_100k/checkpoints/last.ckpt'
 model = LightningTrainer.load_from_checkpoint(checkpoint_path, model = torch_model)
 
 with open('./debug_files/nuplan_feature_data.pkl', 'rb') as f:
