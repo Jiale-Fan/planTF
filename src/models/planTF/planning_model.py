@@ -102,10 +102,13 @@ class PlanningModel(TorchModuleWrapper):
         )
         # self.agent_predictor = build_mlp(dim, [dim * 2, future_steps * 2], norm="ln")
 
-        self.scenario_embedding = nn.Parameter(torch.randn(1, 1, dim))
+        self.scenario_embedding = nn.Parameter(torch.randn(1, 4, dim))
         nn.init.xavier_normal_(self.scenario_embedding)
 
         # self.scenario_projector = ProjHead(feat_dim=dim, hidden_dim=dim//4, head_dim=8)
+        self.env_projector = ProjHead(feat_dim=dim, hidden_dim=dim//4, head_dim=8)
+        self.beh_projector = ProjHead(feat_dim=dim, hidden_dim=dim//4, head_dim=8)
+        self.obj_projector = ProjHead(feat_dim=dim, hidden_dim=dim//4, head_dim=8)
 
         self.scene_target_projector = ProjHead(feat_dim=dim*2, hidden_dim=dim//4, head_dim=8)
         self.target_encoder = init_(nn.Linear(future_steps*3, dim))
@@ -146,7 +149,7 @@ class PlanningModel(TorchModuleWrapper):
         polygon_key_padding = ~(polygon_mask.any(-1))
 
         # add fake key_padding_mask for scenario embedding TODO: check if mask should be inverse mask
-        scenario_emb_key_padding = torch.zeros(bs, 1, dtype=torch.bool, device=agent_key_padding.device)
+        scenario_emb_key_padding = torch.zeros(bs, self.scenario_embedding.shape[1], dtype=torch.bool, device=agent_key_padding.device)
 
         key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding, scenario_emb_key_padding], dim=-1)
 
@@ -164,18 +167,27 @@ class PlanningModel(TorchModuleWrapper):
             x = blk(x, key_padding_mask=key_padding_mask)
         x = self.norm(x)
 
-        predictions, probabilities = self.trajectory_decoder(x[:, 0:A], x[:, A:-1], agent_key_padding, polygon_key_padding) # x: [batch, n_elem, 128], trajectory: [batch, modal, 80, 4], probability: [batch, 6]
+        # predictions, probabilities = self.trajectory_decoder(x[:, 0:A], x[:, A:-4], agent_key_padding, polygon_key_padding) # x: [batch, n_elem, 128], trajectory: [batch, modal, 80, 4], probability: [batch, 6]
+        polygon_sceemb_key_padding = torch.cat([polygon_key_padding, scenario_emb_key_padding], dim=-1)
+        predictions, probabilities = self.trajectory_decoder(x[:, 0:A], x[:, A:], agent_key_padding, polygon_sceemb_key_padding)
         # prediction = self.agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2)
 
         # get the projection of the scenario embedding
-        # scenario_emb_proj = self.scenario_projector(x[:,-1])
+        scenario_emb = x[:,-1]
+
+        # get the projection of the scenario feature embeddings
+        beh_proj = self.beh_projector(x[:, -2])
+        env_proj = self.env_projector(x[:, -3])
+        obj_proj = self.obj_projector(x[:, -4])
+
 
         out = {
             "trajectory": predictions[:, :, 0],
             "probability": probabilities,
             "prediction": predictions,
-            # "scenario_emb_proj": scenario_emb_proj
-            # "score_pred": score_pred,
+            "beh_proj": beh_proj,
+            "env_proj": env_proj,
+            "obj_proj": obj_proj,
         }
 
         best_mode = probabilities.argmax(dim=-1)
@@ -185,19 +197,19 @@ class PlanningModel(TorchModuleWrapper):
 
         if self.training:
             target_emb = self.target_encoder(data["agent"]["target"][:,0].reshape(bs, -1))
-            scene_target_emb = torch.cat([target_emb, x[:,-1]], dim=-1)
+            scene_target_emb = torch.cat([target_emb, scenario_emb], dim=-1)
             scene_target_emb_proj = self.scene_target_projector(scene_target_emb)
             out["scene_pos_emb_proj"] = scene_target_emb_proj
             # project planned trajectories as well
 
             output_trajectory = predictions[:, :, 0][torch.arange(bs), best_mode]
             best_emb = self.target_encoder(output_trajectory[..., torch.Tensor([0,1,5]).to(torch.long)].reshape(bs, -1))
-            scene_best_emb = torch.cat([best_emb, x[:,-1]], dim=-1)
+            scene_best_emb = torch.cat([best_emb, scenario_emb], dim=-1)
             scene_best_emb_proj = self.scene_target_projector(scene_best_emb)
             out["scene_plan_emb_proj"] = scene_best_emb_proj
 
             plan_emb = self.target_encoder(sorted_trajectory[:, 1:, :, torch.Tensor([0,1,5]).to(torch.long)].reshape(bs, self.num_modes-1, -1)) # [B, num_modes, 128]
-            scene_target_emb = torch.cat([plan_emb, x[:,-1].unsqueeze(1).repeat(1,self.num_modes-1,1)], dim=-1)
+            scene_target_emb = torch.cat([plan_emb, scenario_emb.unsqueeze(1).repeat(1,self.num_modes-1,1)], dim=-1)
             scene_plan_emb_proj = self.scene_target_projector(scene_target_emb) # [B, num_modes, 8]
             out["scene_neg_emb_proj"] = scene_plan_emb_proj
 

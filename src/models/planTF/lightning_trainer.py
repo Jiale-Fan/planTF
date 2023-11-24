@@ -19,6 +19,9 @@ from torchmetrics import MetricCollection
 from src.metrics import MR, minADE, minFDE
 from src.optim.warmup_cos_lr import WarmupCosLR
 from src.models.planTF.training_objectives import nll_loss_multimodes_joint
+from src.models.planTF.pairing_matrix import OBJECT_MAT, ENVIRONMENT_MAT, BEHAVIOR_MAT
+
+from torch.nn.utils.rnn import pad_sequence
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +34,8 @@ class LightningTrainer(pl.LightningModule):
         weight_decay,
         epochs,
         warmup_epochs,
-        contrastive_weight = 1000.0,
+        modes_contrastive_weight = 0.0, # 100
+        scenario_type_contrastive_weight = 100.0,
         contrastive_temperature = 0.1,
     ) -> None:
         super().__init__()
@@ -44,8 +48,10 @@ class LightningTrainer(pl.LightningModule):
         self.warmup_epochs = warmup_epochs
         self.temperature = contrastive_temperature # TODO: adjust temperature?
         self.contrastive_criterion = nn.CrossEntropyLoss()
-        self.neg_num = 2 # TODO: adjust neg_num?
-        self.contrastive_weight = contrastive_weight # TODO: adjust contrastive_weight?
+
+        self.modes_contrastive_weight = modes_contrastive_weight # TODO: adjust contrastive_weight?
+        self.scenario_type_contrastive_weight = scenario_type_contrastive_weight
+
 
     def on_fit_start(self) -> None:
         # self.model.train()
@@ -93,54 +99,66 @@ class LightningTrainer(pl.LightningModule):
         
         # contrastive loss
         # 1. contrastive loss between scene understandings
-        # look up tables to get positive and negative pairs TODO
+        # look up tables to get positive and negative pairs TODO debug; examine if MASKS are needed!
 
-        # pos_pairs, neg_pairs = self.get_positive_negative_pairs(data["scenario_type"])
-        # pos_emb = scenario_emb_proj[pos_pairs]
-        # neg_emb = torch.stack([scenario_emb_proj[neg_pairs[i]] for i in range(scenario_emb_proj.size(0))], dim=0)
-        # contrastive_loss = self._contrastive_loss(scenario_emb_proj, pos_emb, neg_emb)
+        scene_type_loss_dict ={}
+        scene_type_loss_sum = 0
+
+        for proj_name in ["beh_proj", "env_proj", "obj_proj"]:
+            pos_embs, neg_embs = self.get_positive_negative_embs(data["scenario_type"], res[proj_name])
+            contrastive_loss_type = self._contrastive_loss_multi(res[proj_name], pos_embs, neg_embs)
+            scene_type_loss_dict[proj_name] = contrastive_loss_type
+            scene_type_loss_sum += contrastive_loss_type
 
         # 2. contrastive loss between multi-modal plans
-        contrastive_loss = 0
+        contrastive_loss_modes = 0
         if self.training:
-            contrastive_loss = self._contrastive_loss(res['scene_plan_emb_proj'], res["scene_pos_emb_proj"], res["scene_neg_emb_proj"])
+            contrastive_loss_modes = self._contrastive_loss(res['scene_plan_emb_proj'], res["scene_pos_emb_proj"], res["scene_neg_emb_proj"])
 
-        loss = nll_loss + adefde_loss + kl_loss + self.contrastive_weight*contrastive_loss
+        loss = nll_loss + adefde_loss + kl_loss + \
+                 self.modes_contrastive_weight * contrastive_loss_modes + \
+                 self.scenario_type_contrastive_weight * scene_type_loss_sum
 
         return {
             "loss": loss,
-            # "reg_loss": nll_loss,
-            # "cls_loss": 0,
-            # "prediction_loss": 0,
+
             "kl_loss": kl_loss,
             "post_entropy": post_entropy,
             "ade_fde_loss": adefde_loss,
             "nll_loss": nll_loss,
-            "contrastive_loss": contrastive_loss,
+
+            "contrastive_loss": contrastive_loss_modes,
+            "beh_contrastive_loss": scene_type_loss_dict["beh_proj"],
+            "env_contrastive_loss": scene_type_loss_dict["env_proj"],
+            "obj_contrastive_loss": scene_type_loss_dict["obj_proj"],
         }
     
-    def get_positive_negative_pairs(self, scenario_types_ids):
+    def get_positive_negative_embs(self, scenario_types_ids, projections):
         '''
         Input:
             scenario_types_ids: [batch_size]
+            projections: [batch_size, proj_dim(8)]
         Output:
-            pos_pairs: [batch_size]
-            neg_pairs: [batch_size, num_neg]
+            pos_pairs: [batch_size, num_pos, dim]
+            neg_pairs: [batch_size, num_neg, dim]
         '''
-        pass # TODO
-        b = scenario_types_ids.size(0)
-        pos_pairs = torch.zeros(b)
-        neg_pairs = torch.zeros(b, self.neg_num)
 
-        # temporary placeholders
-        return pos_pairs.to(torch.long), neg_pairs.to(torch.long)
+        bs = scenario_types_ids.size(0)
+        scenario_types_ids = scenario_types_ids.to(torch.long)
+        # get positive and negative pairs of behavior embeddings
+        pairing_beh = BEHAVIOR_MAT[scenario_types_ids[:, None], scenario_types_ids].squeeze()*(~torch.eye(bs).to(torch.bool)) # exclude self
+        
+        pos_embs = pad_sequence([projections[torch.where(pairing_beh[i]>0)] for i in range(bs)], batch_first=True) # [batch, pairs, dim]
+        neg_embs = pad_sequence([projections[torch.where(pairing_beh[i]<0)] for i in range(bs)], batch_first=True)
+        
+        return pos_embs, neg_embs
 
     
     def _contrastive_loss(self, emb_query, emb_pos, emb_neg):
         '''
         Input:
             emb_query: [batch, dim]
-            emb_pos: [batch, dim]
+            emb_pos: [batch, num_pos, dim]
             emb_neg: [batch, num_neg, dim]
         Output:
             loss: scalar
@@ -164,6 +182,35 @@ class LightningTrainer(pl.LightningModule):
 
         # loss
         loss = -torch.log(torch.exp(sim_pos / self.temperature) / torch.sum(torch.exp(sim_neg / self.temperature), dim=-1)).mean()
+
+        return loss
+    
+    def _contrastive_loss_multi(self, emb_query, emb_pos, emb_neg):
+        '''
+        Input:
+            emb_query: [batch, dim]
+            emb_pos: [batch, max_pairs, dim]
+            emb_neg: [batch, max_pairs, dim]
+            mask_pos: [batch, max_pairs]
+            mask_neg: [batch, max_pairs]
+        Output:
+            loss: scalar
+        '''
+
+        emb_query = emb_query
+        query = nn.functional.normalize(emb_query, dim=-1)
+
+        # normalized embedding
+        key_pos = nn.functional.normalize(emb_pos, dim=-1)
+        key_neg = nn.functional.normalize(emb_neg, dim=-1)
+        # pairing
+        sim_pos = (query[:, None, :] * key_pos).sum(dim=-1)
+        sim_neg = (query[:, None, :] * key_neg).sum(dim=-1) 
+        # I think it is not necessary to exclude padding embeddings, since the padding embeddings are all zeros
+        # and the dot product between query and zero embeddings would produce zero gradients for the query embedding
+
+        # loss
+        loss = -torch.log(torch.sum(torch.exp(sim_pos / self.temperature), dim=-1) / torch.sum(torch.exp(sim_neg / self.temperature), dim=-1)).mean()
 
         return loss
 
