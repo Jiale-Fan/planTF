@@ -34,9 +34,9 @@ class LightningTrainer(pl.LightningModule):
         weight_decay,
         epochs,
         warmup_epochs,
-        modes_contrastive_weight = 0.0, # 100
+        modes_contrastive_weight = 500.0, # 100
         scenario_type_contrastive_weight = 100.0,
-        contrastive_temperature = 0.1,
+        contrastive_temperature = 0.3,
     ) -> None:
         super().__init__()
         self.save_hyperparameters(ignore=["model"])

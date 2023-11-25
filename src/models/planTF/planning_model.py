@@ -190,25 +190,30 @@ class PlanningModel(TorchModuleWrapper):
             "obj_proj": obj_proj,
         }
 
-        best_mode = probabilities.argmax(dim=-1)
+        most_probable_mode = probabilities.argmax(dim=-1)
 
-        sort_idx = probabilities.argsort(dim=-1, descending=True)
-        sorted_trajectory = predictions[:, :, 0][torch.arange(bs)[:, None], sort_idx]
+        
 
         if self.training:
+            ego_target = data["agent"]["target"][:, 0]
+            errors = (ego_target[:, None, :, :2] - predictions[:, :, 0, :, :2]).norm(dim=-1).sum(dim=(-1))
+            closest_mode = errors.argmin(dim=-1)
+            sort_idx = errors.argsort(dim=-1, descending=False)
+            sorted_trajectory = predictions[:, :, 0][torch.arange(bs)[:, None], sort_idx]
+
             target_emb = self.target_encoder(data["agent"]["target"][:,0].reshape(bs, -1))
             scene_target_emb = torch.cat([target_emb, scenario_emb], dim=-1)
             scene_target_emb_proj = self.scene_target_projector(scene_target_emb)
             out["scene_pos_emb_proj"] = scene_target_emb_proj
             # project planned trajectories as well
 
-            output_trajectory = predictions[:, :, 0][torch.arange(bs), best_mode]
+            output_trajectory = predictions[:, :, 0][torch.arange(bs), closest_mode]
             best_emb = self.target_encoder(output_trajectory[..., torch.Tensor([0,1,5]).to(torch.long)].reshape(bs, -1))
             scene_best_emb = torch.cat([best_emb, scenario_emb], dim=-1)
             scene_best_emb_proj = self.scene_target_projector(scene_best_emb)
             out["scene_plan_emb_proj"] = scene_best_emb_proj
 
-            plan_emb = self.target_encoder(sorted_trajectory[:, 1:, :, torch.Tensor([0,1,5]).to(torch.long)].reshape(bs, self.num_modes-1, -1)) # [B, num_modes, 128]
+            plan_emb = self.target_encoder(sorted_trajectory[:, 1: , :, torch.Tensor([0,1,5]).to(torch.long)].reshape(bs, self.num_modes-1, -1)) # [B, num_modes, 128]
             scene_target_emb = torch.cat([plan_emb, scenario_emb.unsqueeze(1).repeat(1,self.num_modes-1,1)], dim=-1)
             scene_plan_emb_proj = self.scene_target_projector(scene_target_emb) # [B, num_modes, 8]
             out["scene_neg_emb_proj"] = scene_plan_emb_proj
@@ -216,7 +221,7 @@ class PlanningModel(TorchModuleWrapper):
         if not self.training:
             trajectory = predictions[:, :, 0]
             
-            output_trajectory = trajectory[torch.arange(bs), best_mode]
+            output_trajectory = trajectory[torch.arange(bs), most_probable_mode]
             angle = torch.atan2(output_trajectory[..., 3], output_trajectory[..., 2])
             out["output_trajectory"] = torch.cat(
                 [output_trajectory[..., :2], angle.unsqueeze(-1)], dim=-1
