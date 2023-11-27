@@ -5,6 +5,7 @@ from src.models.planTF.lightning_trainer import LightningTrainer
 import pickle
 import hydra
 import os
+from src.features.nuplan_feature import NuplanFeature
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
@@ -30,5 +31,6 @@ with open('./debug_files/nuplan_feature_data.pkl', 'rb') as f:
         data = pickle.load(f)
 
 out = model(data)
+deserialized_input = NuplanFeature.deserialize(data=data)[0]
 
-plot_sample_elements(data, 0, out)
+plot_sample_elements(deserialized_input, out[0])
