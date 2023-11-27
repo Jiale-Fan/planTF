@@ -1337,6 +1337,12 @@ OBJECT_MAT = torch.Tensor([[ 0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0.,  0
         -1., -1., -1., -1., -1., -1., -1., -1., -1., -1., -1., -1., -1.,
         -1., -1., -1., -1., -1., -1., -1., -1.,  1.]])
 
+proj_name_to_mat = {
+    "beh_proj": BEHAVIOR_MAT,
+    "env_proj": ENVIRONMENT_MAT,
+    "obj_proj": OBJECT_MAT
+}
+
 if __name__=="__main__":
     # Create a figure with subplots
     fig, axes = plt.subplots(1, 3, figsize=(12, 4))

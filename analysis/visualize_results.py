@@ -5,6 +5,7 @@ from src.models.planTF.lightning_trainer import LightningTrainer
 import pickle
 import hydra
 import os
+from src.features.nuplan_feature import NuplanFeature
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
@@ -23,12 +24,13 @@ torch_model = hydra.utils.instantiate(cfg)
 torch_model.to(torch.device("cuda:0"))
 
 # Load the model from a checkpoint
-checkpoint_path = '/data1/nuplan/jiale/exp/exp/training/planTF/2023.11.24.16.47.44/checkpoints/last.ckpt'
+checkpoint_path = '/data1/nuplan/jiale/exp/exp/training/planTF/plantf_1kmodescon_100k/checkpoints/last.ckpt'
 model = LightningTrainer.load_from_checkpoint(checkpoint_path, model = torch_model)
 
 with open('./debug_files/nuplan_feature_data.pkl', 'rb') as f:
         data = pickle.load(f)
 
 out = model(data)
+deserialized_input = NuplanFeature.deserialize(data=data)[0]
 
-plot_sample_elements(data, 0, out)
+plot_sample_elements(deserialized_input, out[0])
