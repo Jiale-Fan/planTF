@@ -29,6 +29,8 @@ from ..features.nuplan_feature import NuplanFeature
 from .common.route_utils import route_roadblock_correction
 from .common.utils import interpolate_polyline, rotate_round_z_axis
 
+from nuplan.common.maps.maps_datatypes import RasterLayer, RasterMap, SemanticMapLayer, StopLineType, VectorLayer
+
 SCENARIO_MAPPING_IDS = {
 		'unknown': 0,
     'accelerating_at_crosswalk': 1,
@@ -191,6 +193,8 @@ class NuplanFeatureBuilder(AbstractFeatureBuilder):
             past_tracked_objects + [present_tracked_objects] + future_tracked_objects
         )
 
+        drivable_raster = scenario.map_api.get_raster_map_layer(SemanticMapLayer.DRIVABLE_AREA)
+
         return self._build_feature(
             present_idx=self.history_samples,
             ego_state_list=ego_state_list,
@@ -200,6 +204,7 @@ class NuplanFeatureBuilder(AbstractFeatureBuilder):
             mission_goal=scenario.get_mission_goal(),
             traffic_light_status=scenario.get_traffic_light_status_at_iteration(0),
             scenario_type=scenario.scenario_type,
+            drivable_raster=drivable_raster,
         )
 
     def get_features_from_simulation(
@@ -231,6 +236,7 @@ class NuplanFeatureBuilder(AbstractFeatureBuilder):
         mission_goal: StateSE2,
         traffic_light_status: List[TrafficLightStatusData] = None,
         scenario_type: str = None,
+        drivable_raster: RasterLayer = None,
     ):
         present_ego_state = ego_state_list[present_idx]
         query_xy = present_ego_state.center
@@ -265,8 +271,16 @@ class NuplanFeatureBuilder(AbstractFeatureBuilder):
             radius=self.radius,
         )
 
-        scenario_type_id = 0 if scenario_type not in SCENARIO_MAPPING_IDS else SCENARIO_MAPPING_IDS[scenario_type]
-        data["scenario_type"] = np.array([scenario_type_id], dtype=np.int8)
+        if scenario_type is not None:
+            scenario_type_id = 0 if scenario_type not in SCENARIO_MAPPING_IDS else SCENARIO_MAPPING_IDS[scenario_type]
+            data["scenario_type"] = np.array([scenario_type_id], dtype=np.int8)
+        
+        if drivable_raster is not None:
+            drivable_raster_dict = {}
+            drivable_raster_dict["data"] = drivable_raster.data
+            drivable_raster_dict["precision"] = drivable_raster.precision
+            drivable_raster_dict["transform"] = drivable_raster.transform
+            data["drivable_raster"] = drivable_raster_dict
 
         return NuplanFeature.normalize(data, first_time=True, radius=self.radius)
 

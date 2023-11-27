@@ -29,6 +29,14 @@ class NuplanFeature(AbstractModelFeature):
             }
         for key in ["current_state", "origin", "angle", "scenario_type"]:
             batch_data[key] = torch.stack([f.data[key] for f in feature_list], dim=0)
+            
+        for key in ["drivable_raster"]:
+            batch_data[key] = {
+                k: torch.stack(
+                    [f.data[key][k] for f in feature_list], dim=0
+                )
+                for k in feature_list[0].data[key].keys()
+            }
 
         return NuplanFeature(data=batch_data)
 
@@ -57,8 +65,23 @@ class NuplanFeature(AbstractModelFeature):
     def deserialize(cls, data: Dict[str, Any]) -> NuplanFeature:
         return NuplanFeature(data=data)
 
-    def unpack(self) -> List[AbstractModelFeature]:
-        raise NotImplementedError
+    def unpack(self) -> List[NuplanFeature]:
+        bs = self.data["current_state"].shape[0]
+        list_dict = [{} for _ in range(bs)]
+        for k, v in self.data.items():
+            if isinstance(v, dict):
+                for i in range(bs):
+                    list_dict[i][k] = {}
+                for kk, vv in v.items():
+                    for i in range(bs):
+                        list_dict[i][k][kk] = vv[i]
+            else:
+                for i in range(bs):
+                    list_dict[i][k] = v[i]
+
+        return [NuplanFeature(data=d) for d in list_dict]
+
+
 
     def is_valid(self) -> bool:
         return self.data["polylines"].shape[0] > 0
@@ -130,5 +153,12 @@ class NuplanFeature(AbstractModelFeature):
 
             data["origin"] = center_xy
             data["angle"] = center_angle
+
+        # normalize the drivable area raster
+
+        norm_trans = np.eye(4)
+        norm_trans[:2, :2] = rotate_mat
+        data["drivable_raster"]["transform"] = np.matmul(norm_trans, data["drivable_raster"]["transform"])
+        print(rotate_mat)
 
         return NuplanFeature(data=data)
