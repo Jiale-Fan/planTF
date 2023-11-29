@@ -22,6 +22,8 @@ from src.models.planTF.training_objectives import nll_loss_multimodes_joint
 from src.models.planTF.pairing_matrix import proj_name_to_mat
 
 from torch.nn.utils.rnn import pad_sequence
+from src.models.planTF.automatic_weighted_loss import AutomaticWeightedLoss
+from pytorch_lightning import Trainer
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +36,6 @@ class LightningTrainer(pl.LightningModule):
         weight_decay,
         epochs,
         warmup_epochs,
-        modes_contrastive_weight = 10.0, # 100
-        scenario_type_contrastive_weight = 0,
         contrastive_temperature = 0.3,
         modes_contrastive_negative_threshold = 2.0,
     ) -> None:
@@ -48,12 +48,10 @@ class LightningTrainer(pl.LightningModule):
         self.epochs = epochs
         self.warmup_epochs = warmup_epochs
         self.temperature = contrastive_temperature # TODO: adjust temperature?
-        self.contrastive_criterion = nn.CrossEntropyLoss()
 
-        self.modes_contrastive_weight = modes_contrastive_weight # TODO: adjust contrastive_weight?
-        self.scenario_type_contrastive_weight = scenario_type_contrastive_weight
         self.modes_contrastive_negative_threshold = modes_contrastive_negative_threshold
 
+        self.awl = AutomaticWeightedLoss(3)
 
     def on_fit_start(self) -> None:
         # self.model.train()
@@ -99,6 +97,8 @@ class LightningTrainer(pl.LightningModule):
                                         use_FDEADE_aux_loss=True,
                                         predict_yaw=True)
         
+        autobot_loss = nll_loss + adefde_loss + kl_loss
+
         # contrastive loss
         # 1. contrastive loss between scene understandings
         # look up tables to get positive and negative pairs TODO debug; examine if MASKS are needed!
@@ -122,9 +122,13 @@ class LightningTrainer(pl.LightningModule):
                                                             res["scene_target_emb_proj"],
                                                             res["scene_plan_emb_proj"], neg_masks)
 
-        loss = nll_loss + adefde_loss + kl_loss + \
-                 self.modes_contrastive_weight * contrastive_loss_modes + \
-                 self.scenario_type_contrastive_weight * scene_type_loss_sum
+        
+        # loss = nll_loss + adefde_loss + kl_loss + \
+        #          self.modes_contrastive_weight * contrastive_loss_modes + \
+        #          self.scenario_type_contrastive_weight * scene_type_loss_sum
+        
+        # loss = autobot_loss + scene_type_loss_sum + contrastive_loss_modes
+        loss = self.awl(autobot_loss, scene_type_loss_sum, contrastive_loss_modes)
 
         return {
             "loss": loss,
@@ -430,6 +434,13 @@ class LightningTrainer(pl.LightningModule):
                 ],
                 "weight_decay": 0.0,
             },
+            # following would cause parameter in more than one parameter group error. Save 
+            # for later if we have to disable weight decay for AutomaticWeightedLoss
+            
+            # {
+            #     "params": self.awl.parameters(),
+            #     "weight_decay": 0.0,
+            # }
         ]
 
         # Get optimizer
@@ -450,5 +461,4 @@ class LightningTrainer(pl.LightningModule):
         return {
             'optimizer': optimizer,
             'lr_scheduler': scheduler,
-            'gradient_clip_val': 3.0,  # Adjust this value to the desired gradient clipping value
         }
