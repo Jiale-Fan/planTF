@@ -34,7 +34,7 @@ class LightningTrainer(pl.LightningModule):
         weight_decay,
         epochs,
         warmup_epochs,
-        modes_contrastive_weight = 300.0, # 100
+        modes_contrastive_weight = 10.0, # 100
         scenario_type_contrastive_weight = 0,
         contrastive_temperature = 0.3,
         modes_contrastive_negative_threshold = 2.0,
@@ -117,7 +117,7 @@ class LightningTrainer(pl.LightningModule):
         # 2. contrastive loss between multi-modal plans
         contrastive_loss_modes = 0
         if self.training:
-            neg_masks = self.get_negative_embs_masks(res["trajectory"], targets[:, 0]) 
+            neg_masks = self.get_negative_embs_masks(targets[:, 0], criterion="fde") 
             contrastive_loss_modes = self._contrastive_loss(res["scene_best_emb_proj"], 
                                                             res["scene_target_emb_proj"],
                                                             res["scene_plan_emb_proj"], neg_masks)
@@ -140,7 +140,7 @@ class LightningTrainer(pl.LightningModule):
             "obj_contrastive_loss": scene_type_loss_dict["obj_proj"],
         }
 
-    def get_negative_embs_masks(self, multimodal_trajs, ego_target):
+    def get_negative_embs_masks(self, ego_targets, criterion="fde"):
         '''
         Input:
             multimodal_trajs: [batch, num_modes, time_steps, 6]
@@ -149,11 +149,21 @@ class LightningTrainer(pl.LightningModule):
             neg_masks: [batch, num_modes]
         '''
         # calculate the ade and fde of each mode
-        bs = multimodal_trajs.size(0)
-        multimodal_trajs = multimodal_trajs.view((-1, multimodal_trajs.size(-2), multimodal_trajs.size(-1))).unsqueeze(0).repeat(bs, 1, 1, 1)  # [batch, batch*num_modes, time_steps, 6]
-        fde = torch.norm(multimodal_trajs[:, :, -1, :2] - ego_target[:, None, -1, :2], dim=-1) # [batch, batch*num_modes]
+        if criterion == "ade":
+            errors_mat = (ego_targets[:, None, :, :2] - ego_targets[None, :, :, :2]).norm(dim=-1).sum(-1)
+        elif criterion == "fde":
+            errors_mat = (ego_targets[:, None, -1, :2] - ego_targets[None, :, -1, :2]).norm(dim=-1) # [batch_size, batch_size]
+        else: 
+            raise NotImplementedError
+        
+        errors_mat = errors_mat + torch.eye(errors_mat.size(0)).to(errors_mat.device)*1e6 # exclude self
+        # least_error = torch.argmin(errors_mat, dim=-1) # [batch_valid]
 
-        neg_masks = (fde > self.modes_contrastive_negative_threshold).to(torch.bool) # [batch, batch*num_modes]
+        # bs = multimodal_trajs.size(0)
+        # multimodal_trajs = multimodal_trajs.view((-1, multimodal_trajs.size(-2), multimodal_trajs.size(-1))).unsqueeze(0).repeat(bs, 1, 1, 1)  # [batch, batch*num_modes, time_steps, 6]
+        # fde = torch.norm(multimodal_trajs[:, :, -1, :2] - ego_target[:, None, -1, :2], dim=-1) # [batch, batch*num_modes]
+
+        neg_masks = (errors_mat > self.modes_contrastive_negative_threshold).to(torch.bool) # [batch, batch*num_modes]
         return neg_masks
 
 

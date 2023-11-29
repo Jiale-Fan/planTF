@@ -195,20 +195,18 @@ class PlanningModel(TorchModuleWrapper):
         
 
         if self.training:
-            trajectory = predictions[:, :, 0, :, torch.Tensor([0,1,5]).to(torch.long)] # [B, num_modes, timestep, states_dim]
-            trajectory_embs = self.target_encoder(trajectory.view(bs, self.num_modes, -1)) # [B, num_modes, 128]
-            trajectory_embs = trajectory_embs.view((-1, self.dim)).unsqueeze(0).repeat(bs, 1, 1) # [B, B*num_modes, 128]
-
-            scene_target_emb = torch.cat([trajectory_embs, scenario_emb.unsqueeze(1).repeat(1,bs*self.num_modes,1)], dim=-1) # [B, B*num_modes, 256]
-            scene_target_emb_projs = self.scene_target_projector(scene_target_emb) # [B, B*num_modes, 8]
-            out["scene_plan_emb_proj"] = scene_target_emb_projs# [B, B*num_modes, 8]
 
             target_emb = self.target_encoder(data["agent"]["target"][:,0].reshape(bs, -1))
             scene_target_emb = torch.cat([target_emb, scenario_emb], dim=-1)
             scene_target_emb_proj = self.scene_target_projector(scene_target_emb)
             out["scene_target_emb_proj"] = scene_target_emb_proj # [B, 8]
 
-            ego_target = data["agent"]["target"][:, 0]
+            ego_target = data["agent"]["target"][:, 0] # [B, timestep, states_dim]
+            trajectory_embs = self.target_encoder(ego_target.view(bs, -1)) # [B, 128]
+            scene_target_emb = torch.cat([trajectory_embs.unsqueeze(0).repeat(bs, 1, 1), scenario_emb.unsqueeze(1).repeat(1,bs,1)], dim=-1) # [B, B*num_modes, 256]
+            scene_target_emb_projs = self.scene_target_projector(scene_target_emb) # [B, B*B, 8]
+            out["scene_plan_emb_proj"] = scene_target_emb_projs# [B, B*B, 8]
+            
             errors = (ego_target[:, None, :, :2] - predictions[:, :, 0, :, :2]).norm(dim=-1).sum(dim=(-1))
             closest_mode = errors.argmin(dim=-1)
 
