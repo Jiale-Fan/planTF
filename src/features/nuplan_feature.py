@@ -157,8 +157,8 @@ class NuplanFeature(AbstractModelFeature):
         # normalize the drivable area raster
 
         norm_trans = np.eye(4)
+        norm_trans[:2, 2] = center_xy
         norm_trans[:2, :2] = rotate_mat
-        data["drivable_raster"]["transform"] = np.matmul(norm_trans, data["drivable_raster"]["transform"])
-        print(rotate_mat)
+        data["drivable_raster"]["transform"] = np.matmul(data["drivable_raster"]["transform"], norm_trans)
 
         return NuplanFeature(data=data)

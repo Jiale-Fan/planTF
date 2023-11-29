@@ -122,7 +122,7 @@ if __name__ == "__main__":
  python run_training.py \
     py_func=cache +training=train_planTF \
     scenario_builder=nuplan \
-    cache.cache_path=/data1/nuplan/jiale2/exp/cache_plantf_1k\
+    cache.cache_path=/data1/nuplan/jiale2/exp/cache_plantf_raster\
     cache.cleanup_cache=true \
     scenario_filter=training_scenarios_1M \
     scenario_filter.limit_total_scenarios=100 \

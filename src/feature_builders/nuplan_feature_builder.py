@@ -277,9 +277,58 @@ class NuplanFeatureBuilder(AbstractFeatureBuilder):
         
         if drivable_raster is not None:
             drivable_raster_dict = {}
-            drivable_raster_dict["data"] = drivable_raster.data
+            # since the size of raster.data is too large, we only take the raster map
+            # within the 200 meters radius of the ego vehicle
+
+            crop_rad = int(2*self.radius / drivable_raster.precision)
+            curr_xy = data["current_state"][:2]
+            center_pixel = (drivable_raster.transform@np.array([curr_xy[0], curr_xy[1], 0, 1]))[:2]
+            center_pixel = center_pixel.astype(np.int32)
+
+            # Assuming you have an array named 'image'
+            # and the center pixel coordinates and crop radius are given
+
+            # Calculate the starting and ending indices for the slice
+            image = drivable_raster.data
+            start_row = max(center_pixel[0] - crop_rad, 0)
+            end_row = min(center_pixel[0] + crop_rad + 1, image.shape[0])
+            start_col = max(center_pixel[1] - crop_rad, 0)
+            end_col = min(center_pixel[1] + crop_rad + 1, image.shape[1])
+
+            # Extract the slice from the image
+            slice = image[start_row:end_row, start_col:end_col]
+
+            # Calculate the padding sizes
+            pad_top = max(crop_rad - center_pixel[0], 0)
+            pad_bottom = max(center_pixel[0] + crop_rad + 1 - image.shape[0], 0)
+            pad_left = max(crop_rad - center_pixel[1], 0)
+            pad_right = max(center_pixel[1] + crop_rad + 1 - image.shape[1], 0)
+
+            # Pad the slice with zeros for out-of-bound pixels
+            padded_slice = np.pad(slice, ((pad_top, pad_bottom), (pad_left, pad_right)), mode='constant')
+
+            # debug printing
+            print("original_raster_shape", drivable_raster.data.shape)
+            print("center_pixel", center_pixel)
+            print("slice_dimensions", ((start_row, end_row), (start_col, end_col)))
+            print("paddings shape", ((pad_top, pad_bottom), (pad_left, pad_right)))
+            print("pad_dimensions", padded_slice.shape)
+            print(padded_slice.shape)
+
+            # cropped = np.zeros((2*crop_rad, 2*crop_rad), dtype=np.uint8)
+            # cropped[max(0, crop_rad-center_pixel[0]):min(2*crop_rad, crop_rad-center_pixel[0]+drivable_raster.data.shape[0]),
+            #         max(0, crop_rad-center_pixel[1]):min(2*crop_rad, crop_rad-center_pixel[1]+drivable_raster.data.shape[1])]\
+            #             = \
+            #      drivable_raster.data\
+            #     [max(0, center_pixel[0]-crop_rad):min(drivable_raster.data.shape[0],center_pixel[0]+crop_rad), 
+            #      max(0, center_pixel[1]-crop_rad):min(drivable_raster.data.shape[1], center_pixel[1]+crop_rad)]
+
+            new_transform = drivable_raster.transform
+            new_transform[0:2, -1] = new_transform[0:2, -1] - center_pixel + crop_rad
+
+            drivable_raster_dict["data"] = padded_slice
             drivable_raster_dict["precision"] = drivable_raster.precision
-            drivable_raster_dict["transform"] = drivable_raster.transform
+            drivable_raster_dict["transform"] = new_transform
             data["drivable_raster"] = drivable_raster_dict
 
         return NuplanFeature.normalize(data, first_time=True, radius=self.radius)
