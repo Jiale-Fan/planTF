@@ -29,6 +29,8 @@ class NuplanFeature(AbstractModelFeature):
             }
         for key in ["current_state", "origin", "angle", "scenario_type"]:
             batch_data[key] = torch.stack([f.data[key] for f in feature_list], dim=0)
+        for key in ["reconstructable"]:
+            batch_data[key] = [f.data[key] for f in feature_list]
 
         return NuplanFeature(data=batch_data)
 

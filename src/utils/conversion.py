@@ -13,8 +13,9 @@ def to_tensor(data):
     elif isinstance(data, numpy.number):
         return torch.tensor(data).float()
     else:
-        print(type(data))
-        raise NotImplementedError
+        return data
+        # print(type(data))
+        # raise NotImplementedError
 
 
 def to_numpy(data):
@@ -26,7 +27,8 @@ def to_numpy(data):
         else:
             return data.cpu().numpy()
     else:
-        raise NotImplementedError
+        return data
+    #     raise NotImplementedError
 
 
 def to_device(data, device):
@@ -35,4 +37,5 @@ def to_device(data, device):
     elif isinstance(data, torch.Tensor):
         return data.to(device)
     else:
-        raise NotImplementedError
+        return data
+    #     raise NotImplementedError

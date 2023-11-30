@@ -30,8 +30,8 @@ class TrajectoryDecoder(nn.Module):
 
         init_ = lambda m: init(m, nn.init.xavier_normal_, lambda x: nn.init.constant_(x, 0), np.sqrt(2))
 
-        self.learned_query = nn.Parameter(torch.Tensor(num_modes, embed_dim).to('cuda'), requires_grad=True) # TODO: check if xavier init is possible
-        self.learned_query_prob = nn.Parameter(torch.Tensor(num_modes, embed_dim).to('cuda'), requires_grad=True)
+        self.learned_query = nn.Parameter(torch.Tensor(num_modes, embed_dim), requires_grad=True) # TODO: check if xavier init is possible
+        self.learned_query_prob = nn.Parameter(torch.Tensor(num_modes, embed_dim), requires_grad=True)
 
         nn.init.xavier_normal_(self.learned_query)
         nn.init.xavier_normal_(self.learned_query_prob)

@@ -29,6 +29,8 @@ from nuplan.database.maps_db.map_api import NuPlanMapWrapper
 from nuplan.common.maps.maps_datatypes import RasterLayer, RasterMap, SemanticMapLayer
 from nuplan.common.actor_state.state_representation import Point2D
 from nuplan.database.maps_db.gpkg_mapsdb import GPKGMapsDB
+import time
+from nuplan.planning.scenario_builder.nuplan_db.nuplan_scenario import NuPlanScenario
 
 logger = logging.getLogger(__name__)
 NUPLAN_MAPS_ROOT = os.environ["NUPLAN_MAPS_ROOT"]
@@ -57,15 +59,15 @@ class LightningTrainer(pl.LightningModule):
 
         self.modes_contrastive_negative_threshold = modes_contrastive_negative_threshold
 
-        self.awl = AutomaticWeightedLoss(3)
+        # self.awl = AutomaticWeightedLoss(3)
 
         # initialize map_api objects 
         
-        maps_db = GPKGMapsDB(map_version="nuplan-maps-v1.0", map_root=NUPLAN_MAPS_ROOT)
-        self.nuplan_maps = dict()
-        for location in maps_db.get_locations():
-            self.nuplan_maps[location] = NuPlanMapWrapper(maps_db=maps_db, map_name=location)
-            print("Loaded map: ", location)
+        # maps_db = GPKGMapsDB(map_version="nuplan-maps-v1.0", map_root=NUPLAN_MAPS_ROOT)
+        # self.nuplan_maps = dict()
+        # for location in maps_db.get_locations():
+        #     self.nuplan_maps[location] = NuPlanMapWrapper(maps_db=maps_db, map_name=location)
+        #     print("Loaded map: ", location)
 
     def on_fit_start(self) -> None:
         # self.model.train()
@@ -111,7 +113,7 @@ class LightningTrainer(pl.LightningModule):
                                         use_FDEADE_aux_loss=True,
                                         predict_yaw=True)
         
-        autobot_loss = (nll_loss + adefde_loss + kl_loss)*1e-4+3
+        autobot_loss = nll_loss + adefde_loss + kl_loss
 
         # contrastive loss
         # 1. contrastive loss between scene understandings
@@ -143,14 +145,22 @@ class LightningTrainer(pl.LightningModule):
 
         # TODO: Get the map name of the current batch
         # temporarily we just assume it to be of singapore
-        map_name = "sg-one-north"
-        # we need the original physical coordinates of the ego states to transform the planned
-        # trajectory in the ego-centric from back to the map frame
-        # TODO:
-        self.nuplan_maps[map_name].is_in_layer(Point2D(x=100.0, y=100.0), SemanticMapLayer.DRIVABLE_AREA)
+        # map_name = "sg-one-north"
+        # # we need the original physical coordinates of the ego states to transform the planned
+        # # trajectory in the ego-centric from back to the map frame
+        # # TODO:
+        # self.nuplan_maps[map_name].is_in_layer(Point2D(x=100.0, y=100.0), SemanticMapLayer.DRIVABLE_AREA)
+
+        start_time = time.time()
+
+        scenarios = []
+        for scecls, attr in data["reconstructable"]:
+            scenarios.append(scecls(*attr))
+
+        scenario_recon_time = time.time() - start_time
         
-        # loss = autobot_loss + scene_type_loss_sum + contrastive_loss_modes
-        loss = self.awl(autobot_loss, scene_type_loss_sum, contrastive_loss_modes)
+        loss = autobot_loss + 10*scene_type_loss_sum + 10*contrastive_loss_modes
+        # loss = self.awl(autobot_loss, scene_type_loss_sum, contrastive_loss_modes)
 
         return {
             "loss": loss,
@@ -164,6 +174,8 @@ class LightningTrainer(pl.LightningModule):
             "beh_contrastive_loss": scene_type_loss_dict["beh_proj"],
             "env_contrastive_loss": scene_type_loss_dict["env_proj"],
             "obj_contrastive_loss": scene_type_loss_dict["obj_proj"],
+
+            "batch_reconstruction_time": scenario_recon_time,
         }
 
     def get_negative_embs_masks(self, ego_targets, criterion="fde"):

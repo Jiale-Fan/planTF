@@ -1,4 +1,4 @@
-from typing import List, Type
+from typing import List, Type, Tuple, Any
 
 import numpy as np
 import shapely
@@ -28,6 +28,9 @@ from nuplan.planning.training.preprocessing.features.abstract_model_feature impo
 from ..features.nuplan_feature import NuplanFeature
 from .common.route_utils import route_roadblock_correction
 from .common.utils import interpolate_polyline, rotate_round_z_axis
+
+
+# SCENARIO_RECON: Tuple[Type[AbstractScenario], Tuple[Any, ...]]
 
 SCENARIO_MAPPING_IDS = {
 		'unknown': 0,
@@ -200,6 +203,7 @@ class NuplanFeatureBuilder(AbstractFeatureBuilder):
             mission_goal=scenario.get_mission_goal(),
             traffic_light_status=scenario.get_traffic_light_status_at_iteration(0),
             scenario_type=scenario.scenario_type,
+            reconstruction_hints=scenario.__reduce__()
         )
 
     def get_features_from_simulation(
@@ -231,6 +235,7 @@ class NuplanFeatureBuilder(AbstractFeatureBuilder):
         mission_goal: StateSE2,
         traffic_light_status: List[TrafficLightStatusData] = None,
         scenario_type: str = None,
+        reconstruction_hints = None,
     ):
         present_ego_state = ego_state_list[present_idx]
         query_xy = present_ego_state.center
@@ -267,6 +272,9 @@ class NuplanFeatureBuilder(AbstractFeatureBuilder):
 
         scenario_type_id = 0 if scenario_type not in SCENARIO_MAPPING_IDS else SCENARIO_MAPPING_IDS[scenario_type]
         data["scenario_type"] = np.array([scenario_type_id], dtype=np.int8)
+
+        if reconstruction_hints is not None:
+            data["reconstructable"] = reconstruction_hints
 
         return NuplanFeature.normalize(data, first_time=True, radius=self.radius)
 
