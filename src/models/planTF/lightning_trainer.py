@@ -31,6 +31,7 @@ from nuplan.common.actor_state.state_representation import Point2D
 from nuplan.database.maps_db.gpkg_mapsdb import GPKGMapsDB
 import time
 from nuplan.planning.scenario_builder.nuplan_db.nuplan_scenario import NuPlanScenario
+from src.models.planTF.metrics_computer import MetricsSupervisor
 
 logger = logging.getLogger(__name__)
 NUPLAN_MAPS_ROOT = os.environ["NUPLAN_MAPS_ROOT"]
@@ -68,6 +69,7 @@ class LightningTrainer(pl.LightningModule):
         # for location in maps_db.get_locations():
         #     self.nuplan_maps[location] = NuPlanMapWrapper(maps_db=maps_db, map_name=location)
         #     print("Loaded map: ", location)
+        self.metrics_supervisor = MetricsSupervisor()
 
     def on_fit_start(self) -> None:
         # self.model.train()
@@ -88,21 +90,22 @@ class LightningTrainer(pl.LightningModule):
     def _step(
         self, batch: Tuple[FeaturesType, TargetsType, ScenarioListType], prefix: str
     ) -> torch.Tensor:
-        features, _, _ = batch
+        features, _, scenarios = batch
         res = self.forward(features["feature"].data)
 
-        losses = self._compute_objectives(res, features["feature"].data)
+        losses = self._compute_objectives(res, features["feature"].data, scenarios)
         metrics = self._compute_metrics(res, features["feature"].data, prefix)
         self._log_step(losses["loss"], losses, metrics, prefix)
 
         return losses["loss"]
 
-    def _compute_objectives(self, res, data) -> Dict[str, torch.Tensor]:
-        probability, prediction = (
-            res["probability"], # [batch, num_modes, num_agents, time_steps, 5]
+    def _compute_objectives(self, res, data, scenarios) -> Dict[str, torch.Tensor]:
+        probability, prediction= (
+            res["probability"], # [batch, num_modes, num_agents, time_steps, 6]
             res["prediction"], # [batch, num_modes]
         )
 
+        # compute trajectory imitation and prediction loss
         targets = data["agent"]["target"]
         valid_mask = data["agent"]["valid_mask"][..., -targets.shape[-2]:]
 
@@ -157,10 +160,18 @@ class LightningTrainer(pl.LightningModule):
         for scecls, attr in data["reconstructable"]:
             scenarios.append(scecls(*attr))
 
+        trajectories, metrics_assessment = res["trajectory"], res["pred_metrics"]
+
+        metrics_mean, metrics_list = self.metrics_supervisor.compute_metrics_batch(trajectories, scenarios)
+        loss_metrics = F.mse_loss(metrics_list.to(metrics_assessment.device), metrics_assessment) # TODO: add weight to loss_metrics
+
         scenario_recon_time = time.time() - start_time
         
-        loss = autobot_loss + 10*scene_type_loss_sum + 10*contrastive_loss_modes
+        loss = autobot_loss + 10*scene_type_loss_sum + 10*contrastive_loss_modes + loss_metrics
         # loss = self.awl(autobot_loss, scene_type_loss_sum, contrastive_loss_modes)
+
+        # compute metrics to supervise metrics assessor
+        
 
         return {
             "loss": loss,
@@ -176,6 +187,7 @@ class LightningTrainer(pl.LightningModule):
             "obj_contrastive_loss": scene_type_loss_dict["obj_proj"],
 
             "batch_reconstruction_time": scenario_recon_time,
+            "loss_metrics": loss_metrics,
         }
 
     def get_negative_embs_masks(self, ego_targets, criterion="fde"):
