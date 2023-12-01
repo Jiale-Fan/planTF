@@ -59,6 +59,7 @@ class PlanningModel(TorchModuleWrapper):
         state_attn_encoder=True,
         state_dropout=0.75,
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
+        projection_dim = 64
     ) -> None:
         super().__init__(
             feature_builders=[feature_builder],
@@ -106,11 +107,11 @@ class PlanningModel(TorchModuleWrapper):
         nn.init.xavier_normal_(self.scenario_embedding)
 
         # self.scenario_projector = ProjHead(feat_dim=dim, hidden_dim=dim//4, head_dim=8)
-        self.env_projector = ProjHead(feat_dim=dim, hidden_dim=dim//4, head_dim=8)
-        self.beh_projector = ProjHead(feat_dim=dim, hidden_dim=dim//4, head_dim=8)
-        self.obj_projector = ProjHead(feat_dim=dim, hidden_dim=dim//4, head_dim=8)
+        self.env_projector = ProjHead(feat_dim=dim, hidden_dim=dim, head_dim=projection_dim)
+        self.beh_projector = ProjHead(feat_dim=dim, hidden_dim=dim, head_dim=projection_dim)
+        self.obj_projector = ProjHead(feat_dim=dim, hidden_dim=dim, head_dim=projection_dim)
 
-        self.scene_target_projector = ProjHead(feat_dim=dim*2, hidden_dim=dim//4, head_dim=8)
+        self.scene_target_projector = ProjHead(feat_dim=dim*2, hidden_dim=dim, head_dim=projection_dim)
         self.target_encoder = init_(nn.Linear(future_steps*3, dim))
 
         self.apply(self._init_weights)

@@ -35,7 +35,7 @@ class LightningTrainer(pl.LightningModule):
         epochs,
         warmup_epochs,
         modes_contrastive_weight = 300.0, # 100
-        scenario_type_contrastive_weight = 0,
+        scenario_type_contrastive_weight = 50,
         contrastive_temperature = 0.3,
         modes_contrastive_negative_threshold = 2.0,
     ) -> None:
@@ -122,7 +122,10 @@ class LightningTrainer(pl.LightningModule):
                                                             res["scene_target_emb_proj"],
                                                             res["scene_plan_emb_proj"], neg_masks)
 
-        loss = nll_loss + adefde_loss + kl_loss + \
+        if self.current_epoch < 10:
+            loss = nll_loss + adefde_loss + kl_loss
+        else:
+            loss = nll_loss + adefde_loss + kl_loss + \
                  self.modes_contrastive_weight * contrastive_loss_modes + \
                  self.scenario_type_contrastive_weight * scene_type_loss_sum
 
