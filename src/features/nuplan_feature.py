@@ -72,6 +72,9 @@ class NuplanFeature(AbstractModelFeature):
         cur_state = data["current_state"]
         center_xy, center_angle = cur_state[:2].copy(), cur_state[2].copy()
 
+        data["origin"] += center_xy
+        data["angle"] += center_angle
+
         rotate_mat = np.array(
             [
                 [np.cos(center_angle), -np.sin(center_angle)],
@@ -130,7 +133,6 @@ class NuplanFeature(AbstractModelFeature):
             for k, v in data["map"].items():
                 data["map"][k] = v[valid_polygon]
 
-            data["origin"] = center_xy
-            data["angle"] = center_angle
+            
 
         return NuplanFeature(data=data)

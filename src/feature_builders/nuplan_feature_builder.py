@@ -276,6 +276,9 @@ class NuplanFeatureBuilder(AbstractFeatureBuilder):
         if reconstruction_hints is not None:
             data["reconstructable"] = reconstruction_hints
 
+        data["origin"] = np.zeros(2)
+        data["angle"] = np.zeros(1)
+
         return NuplanFeature.normalize(data, first_time=True, radius=self.radius)
 
     def _get_ego_current_state(self, ego_state: EgoState, prev_state: EgoState):

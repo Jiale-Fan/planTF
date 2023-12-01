@@ -49,6 +49,7 @@ class LightningTrainer(pl.LightningModule):
         warmup_epochs,
         contrastive_temperature = 0.3,
         modes_contrastive_negative_threshold = 2.0,
+        drivable_sub_interval = 10,
     ) -> None:
         super().__init__()
         self.save_hyperparameters(ignore=["model"])
@@ -61,6 +62,7 @@ class LightningTrainer(pl.LightningModule):
         self.temperature = contrastive_temperature # TODO: adjust temperature?
 
         self.modes_contrastive_negative_threshold = modes_contrastive_negative_threshold
+        self.drivable_sub_interval = drivable_sub_interval
 
         # self.awl = AutomaticWeightedLoss(3)
 
@@ -139,12 +141,12 @@ class LightningTrainer(pl.LightningModule):
             scene_type_loss_sum += contrastive_loss_type
 
         # 2. contrastive loss between multi-modal plans
-        contrastive_loss_modes = 0
-        if self.training:
-            neg_masks = self.get_negative_embs_masks(targets[:, 0], criterion="fde") 
-            contrastive_loss_modes = self._contrastive_loss(res["scene_best_emb_proj"], 
-                                                            res["scene_target_emb_proj"],
-                                                            res["scene_plan_emb_proj"], neg_masks)
+        # contrastive_loss_modes = 0
+        # if self.training:
+        #     neg_masks = self.get_negative_embs_masks(targets[:, 0], criterion="fde") 
+        #     contrastive_loss_modes = self._contrastive_loss(res["scene_best_emb_proj"], 
+        #                                                     res["scene_target_emb_proj"],
+        #                                                     res["scene_plan_emb_proj"], neg_masks)
 
         
         # loss = nll_loss + adefde_loss + kl_loss + \
@@ -176,10 +178,15 @@ class LightningTrainer(pl.LightningModule):
         # 3(2). metrics contrastive loss, currently only drivable area
         drivable_contrastive_loss = 0
         if self.training:
-            neg_embs, neg_masks = self.get_positive_negative_masks_drivable_area(targets[:, 0], recon_scenarios, res["scene_best_emb_proj"])
+            neg_embs, neg_masks = self.get_positive_negative_masks_drivable_area(targets[:, 0], data["origin"], data["angle"], 
+                                                                                 recon_scenarios, res["scene_best_emb_proj"],
+                                                                                 )
+            drivable_contrastive_loss = self._contrastive_loss(res["scene_best_emb_proj"], 
+                                                            res["scene_target_emb_proj"],
+                                                            res["scene_plan_emb_proj"], neg_masks)
 
         
-        loss = autobot_loss + 10*scene_type_loss_sum + 10*contrastive_loss_modes + drivable_contrastive_loss
+        loss = autobot_loss + 100*scene_type_loss_sum + 100*drivable_contrastive_loss
 
         # loss = self.awl(autobot_loss, scene_type_loss_sum, contrastive_loss_modes)
 
@@ -194,7 +201,7 @@ class LightningTrainer(pl.LightningModule):
             "ade_fde_loss": adefde_loss,
             "nll_loss": nll_loss,
 
-            "contrastive_loss": contrastive_loss_modes,
+            "drivable_contrastive_loss": drivable_contrastive_loss,
             "beh_contrastive_loss": scene_type_loss_dict["beh_proj"],
             "env_contrastive_loss": scene_type_loss_dict["env_proj"],
             "obj_contrastive_loss": scene_type_loss_dict["obj_proj"],
@@ -204,10 +211,12 @@ class LightningTrainer(pl.LightningModule):
             "drivable_contrastive_loss": drivable_contrastive_loss,
         }
     
-    def get_positive_negative_masks_drivable_area(self, ego_targets, scenario_lists, projections):
+    def get_positive_negative_masks_drivable_area(self, ego_targets, origins, angles, scenario_list, projections):
         '''
         Input:
             ego_targets: [batch_size, time_steps, 3]
+            origins: [batch_size, 2]
+            angles: [batch_size]
             scenario_lists: list of NuPlanScenario
             projections: [batch_size, proj_dim(8)]
         Output:
@@ -215,18 +224,24 @@ class LightningTrainer(pl.LightningModule):
             neg_masks: [batch_size, num_neg]
         '''
 
-        # using the ground truth ego targets in the same batch
-        
-        drivable = np.stack([self.metrics_calculator.calculate_metric_drivable_area(scenario, ego_targets) for scenario in scenario_lists])
-        # drivable (batch_size, batch_size) 1 indicates the trajectory is in the drivable area, 0 otherwise
-        if np.prod(np.diag(drivable)) != 1:
-            raise RuntimeError("There exist scenario where the target does not satisfy the drivable area constraint")
-            # TODO: if later it proves this is not nessary, remove this exception
+        # transform all ego targets to their map frame
 
-        # drivable = np.multiply(drivable-1, ~np.eye(drivable.shape[0], dtype=np.bool)) # exclude self (should be not necessary)
+        # self.metrics_calculator._sanity_check(scenario_list, ego_targets, origins, angles)
+
+        # using the ground truth ego targets in the same batch
+        bs = ego_targets.size(0)
+        query_trajectories = ego_targets.unsqueeze(0).repeat(bs, 1, 1, 1)
+        
+        drivable = self.metrics_calculator.calculate_metric_drivable_area_batch(scenario_list, 
+                                                                                query_trajectories[:,:,::self.drivable_sub_interval,:],
+                                                                                origins, angles) # [batch_size, num_trajs, num_timesteps]
+        # drivable (batch_size, batch_size) 1 indicates the trajectory is in the drivable area, 0 otherwise
+
+        # if torch.prod(torch.diag(drivable)) != 1:
+        #     raise RuntimeError("There exist scenario where the target does not satisfy the drivable area constraint")
 
         neg_embs = projections.unsqueeze(0).repeat(ego_targets.size(0), 1, 1) # [batch_size, batch_size, dim]
-        neg_masks = torch.Tensor(~drivable.astype(np.bool)) # [batch_size, batch_size]
+        neg_masks = ~drivable.to(neg_embs.device) # [batch_size, batch_size]
 
         return neg_embs, neg_masks
 
