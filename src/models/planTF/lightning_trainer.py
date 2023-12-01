@@ -48,7 +48,6 @@ class LightningTrainer(pl.LightningModule):
         self.epochs = epochs
         self.warmup_epochs = warmup_epochs
         self.temperature = contrastive_temperature # TODO: adjust temperature?
-        self.contrastive_criterion = nn.CrossEntropyLoss()
 
         self.modes_contrastive_weight = modes_contrastive_weight # TODO: adjust contrastive_weight?
         self.scenario_type_contrastive_weight = scenario_type_contrastive_weight
@@ -123,7 +122,9 @@ class LightningTrainer(pl.LightningModule):
                                                             res["scene_plan_emb_proj"], neg_masks)
 
         if self.current_epoch < 10:
-            loss = nll_loss + adefde_loss + kl_loss
+            loss = nll_loss + adefde_loss + kl_loss + \
+                 1e-10 * contrastive_loss_modes + \
+                 1e-10 * scene_type_loss_sum
         else:
             loss = nll_loss + adefde_loss + kl_loss + \
                  self.modes_contrastive_weight * contrastive_loss_modes + \
