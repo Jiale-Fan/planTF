@@ -169,7 +169,10 @@ class PlanningModel(TorchModuleWrapper):
 
         # predictions, probabilities = self.trajectory_decoder(x[:, 0:A], x[:, A:-4], agent_key_padding, polygon_key_padding) # x: [batch, n_elem, 128], trajectory: [batch, modal, 80, 4], probability: [batch, 6]
         polygon_sceemb_key_padding = torch.cat([polygon_key_padding, scenario_emb_key_padding], dim=-1)
-        predictions, probabilities, pred_metrics = self.trajectory_decoder(x[:, 0:A], x[:, A:], agent_key_padding, polygon_sceemb_key_padding)
+        # predictions, probabilities, pred_metrics = self.trajectory_decoder(x[:, 0:A], x[:, A:], agent_key_padding, polygon_sceemb_key_padding)
+        
+        predictions, probabilities = self.trajectory_decoder(x[:, 0:A], x[:, A:], agent_key_padding, polygon_sceemb_key_padding)
+
         # prediction = self.agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2)
 
         # get the projection of the scenario embedding
@@ -188,7 +191,7 @@ class PlanningModel(TorchModuleWrapper):
             "beh_proj": beh_proj,
             "env_proj": env_proj,
             "obj_proj": obj_proj,
-            "pred_metrics": pred_metrics,
+            # "pred_metrics": pred_metrics,
         }
 
         most_probable_mode = probabilities.argmax(dim=-1)

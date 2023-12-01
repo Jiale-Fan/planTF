@@ -32,6 +32,8 @@ from nuplan.database.maps_db.gpkg_mapsdb import GPKGMapsDB
 import time
 from nuplan.planning.scenario_builder.nuplan_db.nuplan_scenario import NuPlanScenario
 from src.models.planTF.metrics_computer import MetricsSupervisor
+from src.models.planTF.faster_metrics_computer import FasterMetricsComputer
+import numpy as np
 
 logger = logging.getLogger(__name__)
 NUPLAN_MAPS_ROOT = os.environ["NUPLAN_MAPS_ROOT"]
@@ -69,7 +71,10 @@ class LightningTrainer(pl.LightningModule):
         # for location in maps_db.get_locations():
         #     self.nuplan_maps[location] = NuPlanMapWrapper(maps_db=maps_db, map_name=location)
         #     print("Loaded map: ", location)
-        self.metrics_supervisor = MetricsSupervisor()
+
+        # self.metrics_supervisor = MetricsSupervisor()
+
+        self.metrics_calculator = FasterMetricsComputer()
 
     def on_fit_start(self) -> None:
         # self.model.train()
@@ -154,20 +159,28 @@ class LightningTrainer(pl.LightningModule):
         # # TODO:
         # self.nuplan_maps[map_name].is_in_layer(Point2D(x=100.0, y=100.0), SemanticMapLayer.DRIVABLE_AREA)
 
-        start_time = time.time()
+        # 3(1). metrics prediction
+        # start_time = time.time()
 
-        scenarios = []
+        recon_scenarios = []
         for scecls, attr in data["reconstructable"]:
-            scenarios.append(scecls(*attr))
+            recon_scenarios.append(scecls(*attr))
 
-        trajectories, metrics_assessment = res["trajectory"], res["pred_metrics"]
+        # trajectories, metrics_assessment = res["trajectory"], res["pred_metrics"]
+        # metrics_mean, metrics_list = self.metrics_supervisor.compute_metrics_batch(trajectories, scenarios)
+        # loss_metrics = F.mse_loss(metrics_list.to(metrics_assessment.device), metrics_assessment) # TODO: add weight to loss_metrics
 
-        metrics_mean, metrics_list = self.metrics_supervisor.compute_metrics_batch(trajectories, scenarios)
-        loss_metrics = F.mse_loss(metrics_list.to(metrics_assessment.device), metrics_assessment) # TODO: add weight to loss_metrics
+        # scenario_recon_time = time.time() - start_time
 
-        scenario_recon_time = time.time() - start_time
+
+        # 3(2). metrics contrastive loss, currently only drivable area
+        drivable_contrastive_loss = 0
+        if self.training:
+            neg_embs, neg_masks = self.get_positive_negative_masks_drivable_area(targets[:, 0], recon_scenarios, res["scene_best_emb_proj"])
+
         
-        loss = autobot_loss + 10*scene_type_loss_sum + 10*contrastive_loss_modes + loss_metrics
+        loss = autobot_loss + 10*scene_type_loss_sum + 10*contrastive_loss_modes + drivable_contrastive_loss
+
         # loss = self.awl(autobot_loss, scene_type_loss_sum, contrastive_loss_modes)
 
         # compute metrics to supervise metrics assessor
@@ -186,9 +199,36 @@ class LightningTrainer(pl.LightningModule):
             "env_contrastive_loss": scene_type_loss_dict["env_proj"],
             "obj_contrastive_loss": scene_type_loss_dict["obj_proj"],
 
-            "batch_reconstruction_time": scenario_recon_time,
-            "loss_metrics": loss_metrics,
+            # "batch_reconstruction_time": scenario_recon_time,
+            # "loss_metrics": loss_metrics,
+            "drivable_contrastive_loss": drivable_contrastive_loss,
         }
+    
+    def get_positive_negative_masks_drivable_area(self, ego_targets, scenario_lists, projections):
+        '''
+        Input:
+            ego_targets: [batch_size, time_steps, 3]
+            scenario_lists: list of NuPlanScenario
+            projections: [batch_size, proj_dim(8)]
+        Output:
+            neg_embs: [batch_size, num_neg, dim]
+            neg_masks: [batch_size, num_neg]
+        '''
+
+        # using the ground truth ego targets in the same batch
+        
+        drivable = np.stack([self.metrics_calculator.calculate_metric_drivable_area(scenario, ego_targets) for scenario in scenario_lists])
+        # drivable (batch_size, batch_size) 1 indicates the trajectory is in the drivable area, 0 otherwise
+        if np.prod(np.diag(drivable)) != 1:
+            raise RuntimeError("There exist scenario where the target does not satisfy the drivable area constraint")
+            # TODO: if later it proves this is not nessary, remove this exception
+
+        # drivable = np.multiply(drivable-1, ~np.eye(drivable.shape[0], dtype=np.bool)) # exclude self (should be not necessary)
+
+        neg_embs = projections.unsqueeze(0).repeat(ego_targets.size(0), 1, 1) # [batch_size, batch_size, dim]
+        neg_masks = torch.Tensor(~drivable.astype(np.bool)) # [batch_size, batch_size]
+
+        return neg_embs, neg_masks
 
     def get_negative_embs_masks(self, ego_targets, criterion="fde"):
         '''
