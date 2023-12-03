@@ -59,7 +59,7 @@ class PlanningModel(TorchModuleWrapper):
         state_attn_encoder=True,
         state_dropout=0.75,
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
-        projection_dim = 64
+        projection_dim = 256
     ) -> None:
         super().__init__(
             feature_builders=[feature_builder],

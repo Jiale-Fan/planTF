@@ -34,7 +34,7 @@ class LightningTrainer(pl.LightningModule):
         weight_decay,
         epochs,
         warmup_epochs,
-        modes_contrastive_weight = 300.0, # 100
+        modes_contrastive_weight = 10.0, # 100
         scenario_type_contrastive_weight = 50,
         contrastive_temperature = 0.3,
         modes_contrastive_negative_threshold = 2.0,
