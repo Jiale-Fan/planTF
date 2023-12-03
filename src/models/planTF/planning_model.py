@@ -59,6 +59,7 @@ class PlanningModel(TorchModuleWrapper):
         state_attn_encoder=True,
         state_dropout=0.75,
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
+        projection_dim=256
     ) -> None:
         super().__init__(
             feature_builders=[feature_builder],
@@ -106,15 +107,29 @@ class PlanningModel(TorchModuleWrapper):
         nn.init.xavier_normal_(self.scenario_embedding)
 
         # self.scenario_projector = ProjHead(feat_dim=dim, hidden_dim=dim//4, head_dim=8)
-        self.env_projector = ProjHead(feat_dim=dim, hidden_dim=dim//4, head_dim=8)
-        self.beh_projector = ProjHead(feat_dim=dim, hidden_dim=dim//4, head_dim=8)
-        self.obj_projector = ProjHead(feat_dim=dim, hidden_dim=dim//4, head_dim=8)
+        self.env_projector = ProjHead(feat_dim=dim, hidden_dim=dim, head_dim=projection_dim)
+        self.beh_projector = ProjHead(feat_dim=dim, hidden_dim=dim, head_dim=projection_dim)
+        self.obj_projector = ProjHead(feat_dim=dim, hidden_dim=dim, head_dim=projection_dim)
 
-        self.scene_target_projector = ProjHead(feat_dim=dim*2, hidden_dim=dim//4, head_dim=8)
+        self.scene_target_projector = ProjHead(feat_dim=dim*2, hidden_dim=dim, head_dim=projection_dim)
         self.target_encoder = init_(nn.Linear(future_steps*3, dim))
 
         self.apply(self._init_weights)
 
+    def freeze_contrastive(self):
+        for module in [self.env_projector, self.beh_projector, self.obj_projector, self.scene_target_projector, self.target_encoder]:
+            for param in module.parameters():
+                param.requires_grad = False
+
+        print("INFO: Contrastive modules are frozen")
+
+    def unfreeze_contrastive(self):
+        for module in [self.env_projector, self.beh_projector, self.obj_projector, self.scene_target_projector, self.target_encoder]:
+            for param in module.parameters():
+                param.requires_grad = True
+
+        print("INFO: Contrastive modules are unfrozen")
+    
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
             torch.nn.init.xavier_uniform_(m.weight)
@@ -207,7 +222,7 @@ class PlanningModel(TorchModuleWrapper):
 
             ego_target = data["agent"]["target"][:, 0] # [B, timestep, states_dim]
             trajectory_embs = self.target_encoder(ego_target.view(bs, -1)) # [B, 128]
-            scene_target_emb = torch.cat([trajectory_embs.unsqueeze(0).repeat(bs, 1, 1), scenario_emb.unsqueeze(1).repeat(1,bs,1)], dim=-1) # [B, B*num_modes, 256]
+            scene_target_emb = torch.cat([trajectory_embs.unsqueeze(0).repeat(bs, 1, 1), scenario_emb.unsqueeze(1).repeat(1,bs,1)], dim=-1) # [B, B*B, 256]
             scene_target_emb_projs = self.scene_target_projector(scene_target_emb) # [B, B*B, 8]
             out["scene_plan_emb_proj"] = scene_target_emb_projs# [B, B*B, 8]
             

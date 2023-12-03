@@ -21,19 +21,19 @@ from src.optim.warmup_cos_lr import WarmupCosLR
 from src.models.planTF.training_objectives import nll_loss_multimodes_joint
 from src.models.planTF.pairing_matrix import proj_name_to_mat
 
-from torch.nn.utils.rnn import pad_sequence
-from src.models.planTF.automatic_weighted_loss import AutomaticWeightedLoss
-from pytorch_lightning import Trainer
+# from torch.nn.utils.rnn import pad_sequence
+# from src.models.planTF.automatic_weighted_loss import AutomaticWeightedLoss
 
-from nuplan.database.maps_db.map_api import NuPlanMapWrapper
-from nuplan.common.maps.maps_datatypes import RasterLayer, RasterMap, SemanticMapLayer
-from nuplan.common.actor_state.state_representation import Point2D
-from nuplan.database.maps_db.gpkg_mapsdb import GPKGMapsDB
-import time
-from nuplan.planning.scenario_builder.nuplan_db.nuplan_scenario import NuPlanScenario
-from src.models.planTF.metrics_computer import MetricsSupervisor
+# from nuplan.database.maps_db.map_api import NuPlanMapWrapper
+# from nuplan.common.maps.maps_datatypes import RasterLayer, RasterMap, SemanticMapLayer
+# from nuplan.common.actor_state.state_representation import Point2D
+# from nuplan.database.maps_db.gpkg_mapsdb import GPKGMapsDB
+# import time
+# from nuplan.planning.scenario_builder.nuplan_db.nuplan_scenario import NuPlanScenario
+# from src.models.planTF.metrics_computer import MetricsSupervisor
+
 from src.models.planTF.faster_metrics_computer import FasterMetricsComputer
-import numpy as np
+
 
 logger = logging.getLogger(__name__)
 NUPLAN_MAPS_ROOT = os.environ["NUPLAN_MAPS_ROOT"]
@@ -47,9 +47,13 @@ class LightningTrainer(pl.LightningModule):
         weight_decay,
         epochs,
         warmup_epochs,
+        modes_contrastive_weight = 100.0, # 100
+        scenario_type_contrastive_weight = 50,
         contrastive_temperature = 0.3,
         modes_contrastive_negative_threshold = 2.0,
         drivable_sub_interval = 10,
+        finetune_start_epoch = 10,
+        
     ) -> None:
         super().__init__()
         self.save_hyperparameters(ignore=["model"])
@@ -63,6 +67,11 @@ class LightningTrainer(pl.LightningModule):
 
         self.modes_contrastive_negative_threshold = modes_contrastive_negative_threshold
         self.drivable_sub_interval = drivable_sub_interval
+        self.finetune_start_epoch = finetune_start_epoch
+
+        self.freeze_contrastive_flag = False
+        self.modes_contrastive_weight = modes_contrastive_weight
+        self.scenario_type_contrastive_weight = scenario_type_contrastive_weight
 
         # self.awl = AutomaticWeightedLoss(3)
 
@@ -93,6 +102,9 @@ class LightningTrainer(pl.LightningModule):
             "train": metrics_collection.clone(prefix="train/"),
             "val": metrics_collection.clone(prefix="val/"),
         }
+
+        self.model.freeze_contrastive()
+        self.freeze_contrastive_flag = True
 
     def _step(
         self, batch: Tuple[FeaturesType, TargetsType, ScenarioListType], prefix: str
@@ -125,75 +137,61 @@ class LightningTrainer(pl.LightningModule):
         
         autobot_loss = nll_loss + adefde_loss + kl_loss
 
-        # contrastive loss
-        # 1. contrastive loss between scene understandings
-        # look up tables to get positive and negative pairs TODO debug; examine if MASKS are needed!
+        if self.current_epoch < self.finetune_start_epoch:
 
-        scene_type_loss_dict ={}
-        scene_type_loss_sum = 0
+            loss = autobot_loss
 
-        for proj_name in ["beh_proj", "env_proj", "obj_proj"]:
-            query_embs, pos_embs, neg_embs, neg_masks = \
-                self.get_positive_negative_embs_scenario_types(targets[:, 0], data["scenario_type"], res[proj_name], proj_name)
-            contrastive_loss_type = self._contrastive_loss(query_embs, pos_embs, neg_embs, neg_masks) \
-                                    if pos_embs is not None else 0
-            scene_type_loss_dict[proj_name] = contrastive_loss_type
-            scene_type_loss_sum += contrastive_loss_type
+            return {
+            "loss": loss,
 
-        # 2. contrastive loss between multi-modal plans
-        # contrastive_loss_modes = 0
-        # if self.training:
-        #     neg_masks = self.get_negative_embs_masks(targets[:, 0], criterion="fde") 
-        #     contrastive_loss_modes = self._contrastive_loss(res["scene_best_emb_proj"], 
-        #                                                     res["scene_target_emb_proj"],
-        #                                                     res["scene_plan_emb_proj"], neg_masks)
+            "kl_loss": kl_loss,
+            "post_entropy": post_entropy,
+            "ade_fde_loss": adefde_loss,
+            "nll_loss": nll_loss,
+            }
 
+        else:
+
+            if self.freeze_contrastive_flag:
+                self.model.unfreeze_contrastive()
+                self.freeze_contrastive_flag = False
+
+            # contrastive loss
+            # 1. contrastive loss between scene understandings
+            # look up tables to get positive and negative pairs TODO debug; examine if MASKS are needed!
+
+            scene_type_loss_dict ={}
+            scene_type_loss_sum = 0
+
+            for proj_name in ["beh_proj", "env_proj", "obj_proj"]:
+                query_embs, pos_embs, neg_embs, neg_masks = \
+                    self.get_positive_negative_embs_scenario_types(targets[:, 0], data["scenario_type"], res[proj_name], proj_name)
+                contrastive_loss_type = self._contrastive_loss(query_embs, pos_embs, neg_embs, neg_masks) \
+                                        if pos_embs is not None else 0
+                scene_type_loss_dict[proj_name] = contrastive_loss_type
+                scene_type_loss_sum += contrastive_loss_type
+
+            # 2. contrastive loss between trajectory compliant with drivable area and non-compliant ones
+            recon_scenarios = []
+            for scecls, attr in data["reconstructable"]:
+                        recon_scenarios.append(scecls(*attr))
+
+            # 3(2). metrics contrastive loss, currently only drivable area
+            
+            if self.training:
+                neg_embs, neg_masks = self.get_positive_negative_masks_drivable_area(targets[:, 0], data["origin"], data["angle"], 
+                                                                                    recon_scenarios, res["scene_best_emb_proj"],
+                                                                                    )
+                drivable_contrastive_loss = self._contrastive_loss(res["scene_best_emb_proj"], 
+                                                                res["scene_target_emb_proj"],
+                                                                res["scene_plan_emb_proj"], neg_masks)
+
+            
+            loss = autobot_loss + \
+                self.modes_contrastive_weight*scene_type_loss_sum +\
+                self.scenario_type_contrastive_weight*drivable_contrastive_loss# 2. contrastive loss between multi-modal plans
         
-        # loss = nll_loss + adefde_loss + kl_loss + \
-        #          self.modes_contrastive_weight * contrastive_loss_modes + \
-        #          self.scenario_type_contrastive_weight * scene_type_loss_sum
-
-        # TODO: Get the map name of the current batch
-        # temporarily we just assume it to be of singapore
-        # map_name = "sg-one-north"
-        # # we need the original physical coordinates of the ego states to transform the planned
-        # # trajectory in the ego-centric from back to the map frame
-        # # TODO:
-        # self.nuplan_maps[map_name].is_in_layer(Point2D(x=100.0, y=100.0), SemanticMapLayer.DRIVABLE_AREA)
-
-        # 3(1). metrics prediction
-        # start_time = time.time()
-
-        recon_scenarios = []
-        for scecls, attr in data["reconstructable"]:
-            recon_scenarios.append(scecls(*attr))
-
-        # trajectories, metrics_assessment = res["trajectory"], res["pred_metrics"]
-        # metrics_mean, metrics_list = self.metrics_supervisor.compute_metrics_batch(trajectories, scenarios)
-        # loss_metrics = F.mse_loss(metrics_list.to(metrics_assessment.device), metrics_assessment) # TODO: add weight to loss_metrics
-
-        # scenario_recon_time = time.time() - start_time
-
-
-        # 3(2). metrics contrastive loss, currently only drivable area
-        drivable_contrastive_loss = 0
-        if self.training:
-            neg_embs, neg_masks = self.get_positive_negative_masks_drivable_area(targets[:, 0], data["origin"], data["angle"], 
-                                                                                 recon_scenarios, res["scene_best_emb_proj"],
-                                                                                 )
-            drivable_contrastive_loss = self._contrastive_loss(res["scene_best_emb_proj"], 
-                                                            res["scene_target_emb_proj"],
-                                                            res["scene_plan_emb_proj"], neg_masks)
-
-        
-        loss = autobot_loss + 100*scene_type_loss_sum + 100*drivable_contrastive_loss
-
-        # loss = self.awl(autobot_loss, scene_type_loss_sum, contrastive_loss_modes)
-
-        # compute metrics to supervise metrics assessor
-        
-
-        return {
+            return {
             "loss": loss,
 
             "kl_loss": kl_loss,
@@ -205,11 +203,7 @@ class LightningTrainer(pl.LightningModule):
             "beh_contrastive_loss": scene_type_loss_dict["beh_proj"],
             "env_contrastive_loss": scene_type_loss_dict["env_proj"],
             "obj_contrastive_loss": scene_type_loss_dict["obj_proj"],
-
-            # "batch_reconstruction_time": scenario_recon_time,
-            # "loss_metrics": loss_metrics,
-            "drivable_contrastive_loss": drivable_contrastive_loss,
-        }
+            }
     
     def get_positive_negative_masks_drivable_area(self, ego_targets, origins, angles, scenario_list, projections):
         '''
