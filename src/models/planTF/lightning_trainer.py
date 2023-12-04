@@ -177,7 +177,9 @@ class LightningTrainer(pl.LightningModule):
                         recon_scenarios.append(scecls(*attr))
 
             # 3(2). metrics contrastive loss, currently only drivable area
-            
+
+
+            drivable_contrastive_loss = 0
             if self.training:
                 neg_embs, neg_masks = self.get_positive_negative_masks_drivable_area(targets[:, 0], data["origin"], data["angle"], 
                                                                                     recon_scenarios, res["scene_best_emb_proj"],
