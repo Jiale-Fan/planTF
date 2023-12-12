@@ -57,7 +57,7 @@ def plot_sample_elements(data, sample_index):
     point_vector = data['point_vector'][sample_index]
     point_orientation = data['point_orientation'][sample_index]
     point_side = data['point_side'][sample_index]
-    polygon_center = data['polygon_center'][sample_index]
+    polygon_center = data['polygon_center'][sample_index].to('cpu').numpy()
     polygon_position = data['polygon_position'][sample_index].to('cpu').numpy()
     polygon_orientation = data['polygon_orientation'][sample_index]
     polygon_type = data['polygon_type'][sample_index]
@@ -75,7 +75,9 @@ def plot_sample_elements(data, sample_index):
     # plt.scatter(point_position[:, 1, :, 0].flatten(), point_position[:, 1, :, 1].flatten(), c='r')
     # plt.scatter(point_position[:, 2, :, 0].flatten(), point_position[:, 2, :, 1].flatten(), c='g')
 
-    plt.scatter(polygon_position[:, 0], polygon_position[:, 1], c='k')
+    # plt.scatter(polygon_position[:, 0], polygon_position[:, 1], c='k')
+
+    plt.scatter(polygon_center[:, 0], polygon_center[:, 1], c='k')
 
     plt.scatter(point_position[polygon_on_route!=0, 0, :, 0].flatten(), point_position[polygon_on_route!=0, 0, :, 1].flatten(), c='r')
 

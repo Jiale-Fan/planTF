@@ -18,7 +18,7 @@ from torchmetrics import MetricCollection
 
 from src.metrics import MR, minADE, minFDE
 from src.optim.warmup_cos_lr import WarmupCosLR
-from src.models.planTF.training_objectives import nll_loss_multimodes_joint
+from src.models.planTF.training_objectives import nll_loss_multimodes_joint, nll_loss_multimodes
 from src.models.planTF.pairing_matrix import proj_name_to_mat
 
 from torch.nn.utils.rnn import pad_sequence
@@ -91,8 +91,14 @@ class LightningTrainer(pl.LightningModule):
         targets = data["agent"]["target"]
         valid_mask = data["agent"]["valid_mask"][..., -targets.shape[-2]:]
 
-        nll_loss, kl_loss, post_entropy, adefde_loss = \
+        nll_loss_pred, kl_loss_pred, post_entropy_pred, adefde_loss_pred = \
             nll_loss_multimodes_joint(prediction.permute(1,3,0,2,4), targets.permute(0,2,1,3), probability, valid_mask.permute(0,2,1),
+                                        entropy_weight=40.0,
+                                        kl_weight=20.0,
+                                        use_FDEADE_aux_loss=True,
+                                        predict_yaw=True)
+        
+        nll_loss_plan, kl_loss_plan, post_entropy_plan, adefde_loss_plan = nll_loss_multimodes_joint(res["trajectory"].unsqueeze(2).permute(1,3,0,2,4), targets[:, 0:1].permute(0,2,1,3), probability, valid_mask.permute(0,2,1),
                                         entropy_weight=40.0,
                                         kl_weight=20.0,
                                         use_FDEADE_aux_loss=True,
@@ -122,21 +128,22 @@ class LightningTrainer(pl.LightningModule):
                                                             res["scene_plan_emb_proj"], neg_masks)
 
         if self.current_epoch < 10:
-            loss = nll_loss + adefde_loss + kl_loss + \
-                 1e-10 * contrastive_loss_modes + \
-                 1e-10 * scene_type_loss_sum
+            loss = adefde_loss_pred*100
+                # + nll_loss + kl_loss + \
+                #  1e-10 * contrastive_loss_modes + \
+                #  1e-10 * scene_type_loss_sum
         else:
-            loss = nll_loss + adefde_loss + kl_loss + \
+            loss = nll_loss_plan + adefde_loss_plan + kl_loss_plan + \
                  self.modes_contrastive_weight * contrastive_loss_modes + \
                  self.scenario_type_contrastive_weight * scene_type_loss_sum
 
         return {
             "loss": loss,
 
-            "kl_loss": kl_loss,
-            "post_entropy": post_entropy,
-            "ade_fde_loss": adefde_loss,
-            "nll_loss": nll_loss,
+            # "kl_loss": kl_loss,
+            # "post_entropy": post_entropy,
+            "ade_fde_loss": adefde_loss_pred,
+            # "nll_loss": nll_loss,
 
             "contrastive_loss": contrastive_loss_modes,
             "beh_contrastive_loss": scene_type_loss_dict["beh_proj"],

@@ -19,14 +19,14 @@ class MapEncoder(nn.Module):
         )
 
         self.type_emb = nn.Embedding(3, dim)
-        self.on_route_emb = nn.Embedding(2, dim)
+        self.on_route_emb = nn.Embedding(3, dim)
         self.traffic_light_emb = nn.Embedding(4, dim)
         self.unknown_speed_emb = nn.Embedding(1, dim)
 
-    def forward(self, data) -> torch.Tensor:
+    def forward(self, data, on_route_embedding=False) -> torch.Tensor:
         polygon_center = data["map"]["polygon_center"]
         polygon_type = data["map"]["polygon_type"].long()
-        polygon_on_route = data["map"]["polygon_on_route"].long()
+        polygon_on_route = data["map"]["polygon_on_route"].long() # [B, elements]
         polygon_tl_status = data["map"]["polygon_tl_status"].long()
         polygon_has_speed_limit = data["map"]["polygon_has_speed_limit"]
         polygon_speed_limit = data["map"]["polygon_speed_limit"]
@@ -65,6 +65,9 @@ class MapEncoder(nn.Module):
         )
         x_speed_limit[~polygon_has_speed_limit] = self.unknown_speed_emb.weight
 
-        x_polygon += x_type + x_on_route + x_tl_status + x_speed_limit
+        if on_route_embedding:
+            x_polygon += x_type + x_on_route + x_tl_status + x_speed_limit
+        else:
+            x_polygon += x_type + x_tl_status + x_speed_limit + self.on_route_emb(torch.Tensor([2]).long().to(x_polygon.device))
 
         return x_polygon
