@@ -59,7 +59,8 @@ class PlanningModel(TorchModuleWrapper):
         state_attn_encoder=True,
         state_dropout=0.75,
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
-        projection_dim = 256
+        projection_dim = 256,
+        decoder_depth = 2
     ) -> None:
         super().__init__(
             feature_builders=[feature_builder],
@@ -95,12 +96,18 @@ class PlanningModel(TorchModuleWrapper):
         )
         self.norm = nn.LayerNorm(dim)
 
-        self.trajectory_decoder = TrajectoryDecoder(
+        self.decoder_blocks = nn.ModuleList(
+            TrajectoryDecoder(
             embed_dim=dim,
             num_modes=num_modes,
             future_steps=future_steps,
             out_channels=4,
         )
+        for _ in range(decoder_depth))
+
+        self.learned_query = nn.Parameter(torch.Tensor(num_modes, dim).to('cuda'), requires_grad=True) # TODO: check if xavier init is possible
+        nn.init.xavier_normal_(self.learned_query)
+
         # self.agent_predictor = build_mlp(dim, [dim * 2, future_steps * 2], norm="ln")
 
         self.scenario_embedding = nn.Parameter(torch.randn(1, 4, dim))
@@ -170,7 +177,13 @@ class PlanningModel(TorchModuleWrapper):
 
         # predictions, probabilities = self.trajectory_decoder(x[:, 0:A], x[:, A:-4], agent_key_padding, polygon_key_padding) # x: [batch, n_elem, 128], trajectory: [batch, modal, 80, 4], probability: [batch, 6]
         polygon_sceemb_key_padding = torch.cat([polygon_key_padding, scenario_emb_key_padding], dim=-1)
-        predictions, probabilities = self.trajectory_decoder(x[:, 0:A], x[:, A:], agent_key_padding, polygon_sceemb_key_padding)
+
+
+        for i, blk in enumerate(self.decoder_blocks):
+            if i == 0:
+                predictions, context, probabilities = blk(x[:, 0:A], x[:, A:], agent_key_padding, polygon_sceemb_key_padding, self.learned_query)
+            else:
+                predictions, context, probabilities = blk(x[:, 0:A], x[:, A:], agent_key_padding, polygon_sceemb_key_padding, context[:, :, 0, :])
         # prediction = self.agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2)
 
         # get the projection of the scenario embedding

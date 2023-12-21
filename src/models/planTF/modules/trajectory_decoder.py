@@ -30,11 +30,11 @@ class TrajectoryDecoder(nn.Module):
 
         init_ = lambda m: init(m, nn.init.xavier_normal_, lambda x: nn.init.constant_(x, 0), np.sqrt(2))
 
-        self.learned_query = nn.Parameter(torch.Tensor(num_modes, embed_dim).to('cuda'), requires_grad=True) # TODO: check if xavier init is possible
-        self.learned_query_prob = nn.Parameter(torch.Tensor(num_modes, embed_dim).to('cuda'), requires_grad=True)
+        # self.learned_query = nn.Parameter(torch.Tensor(num_modes, embed_dim).to('cuda'), requires_grad=True) # TODO: check if xavier init is possible
+        # self.learned_query_prob = nn.Parameter(torch.Tensor(num_modes, embed_dim).to('cuda'), requires_grad=True)
 
-        nn.init.xavier_normal_(self.learned_query)
-        nn.init.xavier_normal_(self.learned_query_prob)
+        # nn.init.xavier_normal_(self.learned_query)
+        # nn.init.xavier_normal_(self.learned_query_prob)
 
         self.transformer_decoder = TransformerDecoderLayer(
             d_model=embed_dim,
@@ -47,43 +47,38 @@ class TrajectoryDecoder(nn.Module):
 
         self.output_model = OutputModel(d_k=self.embed_dim, predict_yaw=True, future_steps=self.future_steps)
 
-        self.mode_map_attn = nn.MultiheadAttention(self.embed_dim, num_heads=self.num_heads, dropout=self.dropout, batch_first=True)
-        self.prob_decoder = nn.MultiheadAttention(self.embed_dim, num_heads=self.num_heads, dropout=self.dropout, batch_first=True)
+        # self.mode_map_attn = nn.MultiheadAttention(self.embed_dim, num_heads=self.num_heads, dropout=self.dropout, batch_first=True)
+        # self.prob_decoder = nn.MultiheadAttention(self.embed_dim, num_heads=self.num_heads, dropout=self.dropout, batch_first=True)
 
         self.prob_predictor = init_(nn.Linear(self.embed_dim, 1))
 
-    def forward(self, agent_emb, map_emb, agent_mask, map_mask):
+    def forward(self, agent_emb, map_emb, agent_mask, map_mask, query):
 
         # assert not torch.isnan(agent_emb).any()
         # assert not torch.isnan(map_emb).any()
 
         B, A = agent_emb.shape[:2]
-        modal_specific_agent_emb = self.learned_query[None,:,None,:]+agent_emb[:,None,:,:] # [B, num_modes, ego+agents, embed_dim]
+        if query.dim() == 2:
+            modal_specific_agent_emb = query[None,:,None,:]+agent_emb[:,None,:,:] # [B, num_modes, ego+agents, embed_dim]
+        elif query.dim() == 3:
+            modal_specific_agent_emb = query[:,:,None,:]+agent_emb[:,None,:,:] # [B, num_modes, ego+agents, embed_dim]
+        else:
+            raise Exception("Query dimension is not 2 or 3")
+        
         modal_specific_agent_emb = modal_specific_agent_emb.view(-1, A, self.embed_dim)
 
         memory_map_emb = map_emb.unsqueeze(1).repeat(1, self.num_modes, 1, 1).view(-1, map_emb.shape[-2], map_emb.shape[-1])
 
         x = self.transformer_decoder(tgt=modal_specific_agent_emb, memory=memory_map_emb,
-                                      tgt_mask=generate_tgt_masks(agent_mask, self.num_modes, self.num_heads), 
-                                      memory_mask=generate_memory_masks(agent_mask, map_mask, self.num_modes, self.num_heads))
-        x = x.view(B, self.num_modes, -1, self.embed_dim) # [B, num_modes, ego+agents, embed_dim]
+                                      tgt_mask=generate_tgt_masks(agent_mask, self.num_modes, self.num_heads),  # [336, 33, 33]
+                                      memory_mask=generate_memory_masks(agent_mask, map_mask, self.num_modes, self.num_heads)) # [336, 33, 217]
+        context = x.view(B, self.num_modes, -1, self.embed_dim) # [B, num_modes, ego+agents, embed_dim]
 
-        predictions = self.output_model(x) # [B, num_modes, ego+agents, 6]
+        predictions = self.output_model(context) # [B, num_modes, ego+agents, 6]
 
-        P = self.learned_query_prob.unsqueeze(0).repeat(B, 1, 1)
+        probs = F.softmax(self.prob_predictor(context[:, :, 0, :]).squeeze(-1), dim=-1) # [B, num_modes]
 
-        mode_params_emb = self.prob_decoder(query=P, key=agent_emb,
-                                            value=agent_emb, key_padding_mask=agent_mask)[0] # TODO: add valid masks
-        mode_params_emb = self.mode_map_attn(query=mode_params_emb, key=map_emb, value=map_emb,
-                                                key_padding_mask=map_mask
-                                                )[0] + mode_params_emb
-        mode_probs = self.prob_predictor(mode_params_emb).squeeze(-1)
-        mode_probs = F.softmax(mode_probs, dim=-1)
-
-        # assert not torch.isnan(predictions).any()
-        # assert not torch.isnan(mode_probs).any()
-
-        return predictions, mode_probs
+        return predictions, context, probs
 
 
 def init(module, weight_init, bias_init, gain=1):
