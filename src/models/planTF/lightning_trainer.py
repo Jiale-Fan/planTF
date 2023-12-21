@@ -166,6 +166,67 @@ class LightningTrainer(pl.LightningModule):
 
         neg_masks = (fde > self.modes_contrastive_negative_threshold).to(torch.bool) # [batch, batch*num_modes]
         return neg_masks
+    
+    def _rank_n_contrast_scenario_types(self, ego_targets, scenario_types_ids, projections):
+        '''
+        Input:
+            ego_targets: [batch_size, time_steps, 3]
+            scenario_types_ids: [batch_size]
+            projections: [batch_size, proj_dim(8)]
+            proj_name: str
+        Output:
+            query_embs: [batch_size, dim]
+            pos_embs: [batch_size, dim]
+            neg_embs: [batch_size, num_neg, dim]
+            neg_masks: [batch_size, num_neg]
+        '''
+
+        bs = scenario_types_ids.size(0)
+        scenario_types_ids = scenario_types_ids.to(torch.long)
+        # get positive and negative pairs of behavior embeddings
+
+        pairing_mat_sum = torch.zeros(bs, bs).to(projections.device)
+
+        for proj_name in ["beh_proj", "env_proj", "obj_proj"]:
+            pairing_mat = proj_name_to_mat[proj_name][scenario_types_ids[:, None], scenario_types_ids].squeeze()*(~torch.eye(bs).to(torch.bool)) # exclude self
+            pairing_mat_sum = pairing_mat_sum + (pairing_mat>0)
+
+        pivot_value = torch.max(pairing_mat_sum)
+        pairing_mat_new_list = []
+
+        while pivot_value > 0:
+            pairing_mat_new = torch.zeros(bs, bs).to(projections.device)
+            pairing_mat_new = torch.where(pairing_mat < pivot_value, -1, pairing_mat_new)
+            pairing_mat_new = torch.where(pairing_mat == pivot_value, 1, pairing_mat_new)
+            pairing_mat_new = torch.where(pairing_mat > pivot_value, 0, pairing_mat_new)
+
+            pairing_mat_new_list.append(pairing_mat_new)
+
+            pivot_value -= 1
+
+        for pairing_mat_rnc in pairing_mat_new_list:
+
+            # exclude rows where there is no positive pair
+            valid_idx = torch.nonzero(torch.any(pairing_mat_rnc>0, dim=-1) & torch.any(pairing_mat_rnc<0, dim=-1), as_tuple=True)[0]
+            pairing_mat_valid = pairing_mat_rnc[valid_idx] # [batch_valid, batch]
+            # pos_embs = pad_sequence([projections[torch.where(pairing_mat_valid[i]>0)] for i in range(bs)], batch_first=True) # [batch, pairs, dim]
+            # neg_embs = pad_sequence([projections[torch.where(pairing_mat_valid[i]<0)] for i in range(bs)], batch_first=True)
+    
+            if valid_idx.size(0) == 0:
+                continue
+            else: 
+                neg_embs = projections.unsqueeze(0).repeat(valid_idx.size(0), 1, 1) # [batch_valid, batch, dim]
+                neg_masks = pairing_mat_valid < 0 # [batch_valid, batch]
+                neg_masks = neg_masks.to(projections.device)
+
+                errors_mat = (ego_targets[valid_idx, None, :, :2] - ego_targets[None, valid_idx, :, :2]).norm(dim=-1).sum(-1) # [batch_valid, batch_valid]
+                errors_mat = errors_mat + torch.eye(errors_mat.size(0)).to(errors_mat.device)*1e6 # exclude self
+                least_error = torch.argmin(errors_mat, dim=-1) # [batch_valid]
+
+                pos_embs = projections[valid_idx[least_error]] # [batch_valid, dim]
+                query_embs = projections[valid_idx] # [batch_valid, dim]
+            
+        return query_embs, pos_embs, neg_embs, neg_masks
 
 
     def get_positive_negative_embs_scenario_types(self, ego_targets, scenario_types_ids, projections, proj_name):
@@ -174,7 +235,9 @@ class LightningTrainer(pl.LightningModule):
             ego_targets: [batch_size, time_steps, 3]
             scenario_types_ids: [batch_size]
             projections: [batch_size, proj_dim(8)]
+            proj_name: str
         Output:
+            query_embs: [batch_size, dim]
             pos_embs: [batch_size, dim]
             neg_embs: [batch_size, num_neg, dim]
             neg_masks: [batch_size, num_neg]
