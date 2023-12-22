@@ -4,6 +4,57 @@ import torch.nn as nn
 from ..layers.common_layers import build_mlp
 from ..layers.embedding import NATSequenceEncoder
 
+class AgentInteractionEncoder(nn.Module):
+    def __init__(
+            self,
+            future_channel, 
+            future_steps,
+            dim,
+            drop_path=0.2,
+            num_heads=8,
+    ) -> None:
+        super().__init__()
+        self.dim = dim
+        self.future_steps = future_steps
+        self.num_heads = num_heads
+
+        self.trajectory_encoder = NATSequenceEncoder(
+            in_chans=future_channel, embed_dim=dim // 4, drop_path_rate=drop_path
+        )
+        self.attn = torch.nn.MultiheadAttention(
+            dim,
+            num_heads=num_heads,
+            batch_first=True,
+        )
+
+    def forward(self, predictions, agent_mask):
+        """
+        predictions: [B, M, A, T_future, 6]
+        agent_mask: [B, A, T_history]
+        """
+        bs, M, A, T, _ = predictions.shape
+        valid_agent_mask = agent_mask.any(-1).flatten()
+        agent_feature = predictions.permute(1, 0, 2, 3, 4).reshape(M*bs*A, self.future_steps, -1)
+
+        x_agent_tmp = self.trajectory_encoder(
+            agent_feature[valid_agent_mask.repeat(M)].permute(0, 2, 1).contiguous()
+        ) # [M, B*A, D]
+        x_agent = torch.zeros(M*bs*A, self.dim, device=predictions.device)
+        x_agent[valid_agent_mask.repeat(M)] = x_agent_tmp
+        x_agent = x_agent.view(M*bs, A, self.dim)
+
+        attn_mask = ~agent_mask.any(-1).repeat(M*self.num_heads, 1).unsqueeze(1)
+
+        x_agent_attn, _ = self.attn(
+            query=x_agent[:, 0:1],
+            key=x_agent,
+            value=x_agent,
+            attn_mask=attn_mask,
+            need_weights=False)
+   
+        return x_agent_attn.squeeze(0).view(M, bs, self.dim).permute(1, 0, 2) # [B, M, D]
+
+
 
 class AgentEncoder(nn.Module):
     def __init__(

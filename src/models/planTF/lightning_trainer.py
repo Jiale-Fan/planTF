@@ -108,24 +108,24 @@ class LightningTrainer(pl.LightningModule):
         # 1. contrastive loss between scene understandings
         # look up tables to get positive and negative pairs TODO debug; examine if MASKS are needed!
 
-        scene_type_loss_dict ={}
-        scene_type_loss_sum = 0
+        # scene_type_loss_dict ={}
+        # scene_type_loss_sum = 0
 
-        for proj_name in ["beh_proj", "env_proj", "obj_proj"]:
-            query_embs, pos_embs, neg_embs, neg_masks = \
-                self.get_positive_negative_embs_scenario_types(targets[:, 0], data["scenario_type"], res[proj_name], proj_name)
-            contrastive_loss_type = self._contrastive_loss(query_embs, pos_embs, neg_embs, neg_masks) \
-                                    if pos_embs is not None else 0
-            scene_type_loss_dict[proj_name] = contrastive_loss_type
-            scene_type_loss_sum += contrastive_loss_type
+        # for proj_name in ["beh_proj", "env_proj", "obj_proj"]:
+        #     query_embs, pos_embs, neg_embs, neg_masks = \
+        #         self.get_positive_negative_embs_scenario_types(targets[:, 0], data["scenario_type"], res[proj_name], proj_name)
+        #     contrastive_loss_type = self._contrastive_loss(query_embs, pos_embs, neg_embs, neg_masks) \
+        #                             if pos_embs is not None else 0
+        #     scene_type_loss_dict[proj_name] = contrastive_loss_type
+        #     scene_type_loss_sum += contrastive_loss_type
 
-        # 2. contrastive loss between multi-modal plans
-        contrastive_loss_modes = 0
-        if self.training:
-            neg_masks = self.get_negative_embs_masks(res["trajectory"], targets[:, 0]) 
-            contrastive_loss_modes = self._contrastive_loss(res["scene_best_emb_proj"], 
-                                                            res["scene_target_emb_proj"],
-                                                            res["scene_plan_emb_proj"], neg_masks)
+        # # 2. contrastive loss between multi-modal plans
+        # contrastive_loss_modes = 0
+        # if self.training:
+        #     neg_masks = self.get_negative_embs_masks(res["trajectory"], targets[:, 0]) 
+        #     contrastive_loss_modes = self._contrastive_loss(res["scene_best_emb_proj"], 
+        #                                                     res["scene_target_emb_proj"],
+        #                                                     res["scene_plan_emb_proj"], neg_masks)
 
         if self.current_epoch < 10:
             loss = adefde_loss_pred*100
@@ -133,9 +133,11 @@ class LightningTrainer(pl.LightningModule):
                 #  1e-10 * contrastive_loss_modes + \
                 #  1e-10 * scene_type_loss_sum
         else:
-            loss = nll_loss_plan + adefde_loss_plan + kl_loss_plan + \
-                 self.modes_contrastive_weight * contrastive_loss_modes + \
-                 self.scenario_type_contrastive_weight * scene_type_loss_sum
+            # loss = nll_loss_plan + adefde_loss_plan + kl_loss_plan + \
+            #      self.modes_contrastive_weight * contrastive_loss_modes + \
+            #      self.scenario_type_contrastive_weight * scene_type_loss_sum
+            
+            loss = adefde_loss_plan*100 + adefde_loss_pred*100
 
         return {
             "loss": loss,
@@ -145,10 +147,10 @@ class LightningTrainer(pl.LightningModule):
             "ade_fde_loss": adefde_loss_pred,
             # "nll_loss": nll_loss,
 
-            "contrastive_loss": contrastive_loss_modes,
-            "beh_contrastive_loss": scene_type_loss_dict["beh_proj"],
-            "env_contrastive_loss": scene_type_loss_dict["env_proj"],
-            "obj_contrastive_loss": scene_type_loss_dict["obj_proj"],
+            # "contrastive_loss": contrastive_loss_modes,
+            # "beh_contrastive_loss": scene_type_loss_dict["beh_proj"],
+            # "env_contrastive_loss": scene_type_loss_dict["env_proj"],
+            # "obj_contrastive_loss": scene_type_loss_dict["obj_proj"],
         }
 
     def get_negative_embs_masks(self, multimodal_trajs, ego_target):
