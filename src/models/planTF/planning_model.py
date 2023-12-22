@@ -7,6 +7,7 @@ from nuplan.planning.training.preprocessing.target_builders.ego_trajectory_targe
 )
 
 from src.feature_builders.nuplan_feature_builder import NuplanFeatureBuilder
+from src.features.nuplan_feature import NuplanFeature
 
 from .layers.common_layers import build_mlp
 from .layers.transformer_encoder_layer import TransformerEncoderLayer
@@ -15,6 +16,8 @@ from .modules.map_encoder import MapEncoder
 from .modules.trajectory_decoder import TrajectoryDecoder
 
 import numpy as np
+from analysis.visualization import plot_sample_elements
+import os
 
 # no meaning, required by nuplan
 trajectory_sampling = TrajectorySampling(num_poses=8, time_horizon=8, interval_length=1)
@@ -59,7 +62,8 @@ class PlanningModel(TorchModuleWrapper):
         state_attn_encoder=True,
         # state_dropout=0.75, # not in effect now
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
-        projection_dim = 256
+        projection_dim = 256,
+        plot=False,
     ) -> None:
         super().__init__(
             feature_builders=[feature_builder],
@@ -71,6 +75,8 @@ class PlanningModel(TorchModuleWrapper):
         self.history_steps = history_steps
         self.future_steps = future_steps
         self.num_modes = num_modes
+        self.plot = plot
+        self.sample_index = 0
 
         self.pos_emb = build_mlp(4, [dim] * 2)
         self.pos_emb_route = build_mlp(4, [dim] * 2)
@@ -270,5 +276,15 @@ class PlanningModel(TorchModuleWrapper):
             output_trajectory = trajectory[torch.arange(bs), most_probable_mode]
             output_trajectory = output_trajectory[..., torch.Tensor([0,1,5]).to(torch.long)] # [B, timestep, states_dim]
             out["output_trajectory"] = output_trajectory
+
+            if self.plot:
+                # examine whether the path exists
+                save_path = './debug_files/scenario_2/'
+                if not os.path.exists(save_path):
+                    os.makedirs(save_path)
+                np_data = NuplanFeature(data=data).to_numpy().data
+                plot_sample_elements(np_data, out, sample_index=self.sample_index, save_path=save_path)
+                self.sample_index += 1
+                print('plotting: ', self.sample_index)
 
         return out

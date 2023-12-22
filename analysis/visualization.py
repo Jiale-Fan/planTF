@@ -47,10 +47,10 @@ scenario_type: torch.Size([2, 1])
 '''
 
 
-def plot_sample_elements(data, out=None):
+def plot_sample_elements(data, out=None, sample_index=0, save_path=None):
 
     map = data['map']
-    target = data['agent']['target'][0]
+    target = data['agent']['target'][0,0]
 
     
     # point_vector = data['point_vector'][sample_index]
@@ -65,11 +65,10 @@ def plot_sample_elements(data, out=None):
     # polygon_has_speed_limit = data['polygon_has_speed_limit'][sample_index]
     # polygon_speed_limit = data['polygon_speed_limit'][sample_index]
 
-    valid_mask = map['valid_mask']
-    target = target
-    polygon_on_route = map['polygon_on_route']
-    polygon_position = map['polygon_position']
-    point_position = map['point_position'] # points position of lane object and crosswalk object
+    valid_mask = map['valid_mask'][0]
+    polygon_on_route = map['polygon_on_route'][0]
+    polygon_position = map['polygon_position'][0]
+    point_position = map['point_position'][0] # points position of lane object and crosswalk object
 
     # Plotting code for each element
     plt.figure(figsize=(10, 6))
@@ -81,16 +80,17 @@ def plot_sample_elements(data, out=None):
 
     plt.scatter(polygon_position[:, 0], polygon_position[:, 1], c='k', s=0.5)
 
-    plt.scatter(point_position[polygon_on_route!=0, 0, :, 0].flatten(), point_position[polygon_on_route!=0, 0, :, 1].flatten(), c='r', s=2)
+    plt.scatter(point_position[polygon_on_route!=0, 0, :, 0].flatten(), point_position[polygon_on_route!=0, 0, :, 1].flatten(), c='r', s=1)
     
 
     # plot the planned trajectories
     if out is not None:
-        planned_trajectories = out['trajectory'][:, :, :2]
-        
+        planned_trajectories = out['trajectory'][0, :, :, :2].detach().cpu().numpy()
+        output_predictions = out['prediction'][0, :, 0, :, :2].detach().cpu().numpy()
         for j in range(planned_trajectories.shape[0]):
-            plt.plot(planned_trajectories[j, :, 0], planned_trajectories[j, :, 1], c='g', linewidth=2)
-        plt.plot(target[:, 0], target[:, 1], c='b', linewidth=3)
+            plt.plot(planned_trajectories[j, :, 0], planned_trajectories[j, :, 1], c='b', linewidth=1, alpha=0.5)
+            plt.plot(output_predictions[j, :, 0], output_predictions[j, :, 1], c='r', linewidth=1, alpha=0.5)
+        plt.plot(target[:, 0], target[:, 1], c='g', linewidth=1, alpha=0.5)
 
     # equal axis
     plt.axis('equal')
@@ -102,7 +102,10 @@ def plot_sample_elements(data, out=None):
     # Add more plotting code for other elements...
 
     plt.tight_layout()
-    plt.show()
+    if save_path is not None:
+        plt.savefig(save_path+'sample_{}.png'.format(sample_index), dpi=600)
+    # else:
+    #     plt.show()
 
 if __name__ == "__main__":
     # read the pickle file
