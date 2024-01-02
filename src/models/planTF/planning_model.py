@@ -106,11 +106,11 @@ class PlanningModel(TorchModuleWrapper):
         nn.init.xavier_normal_(self.scenario_embedding)
 
         # self.scenario_projector = ProjHead(feat_dim=dim, hidden_dim=dim//4, head_dim=8)
-        self.env_projector = ProjHead(feat_dim=dim, hidden_dim=dim//4, head_dim=8)
-        self.beh_projector = ProjHead(feat_dim=dim, hidden_dim=dim//4, head_dim=8)
-        self.obj_projector = ProjHead(feat_dim=dim, hidden_dim=dim//4, head_dim=8)
+        self.env_projector = ProjHead(feat_dim=dim, hidden_dim=dim//2, head_dim=dim)
+        self.beh_projector = ProjHead(feat_dim=dim, hidden_dim=dim//2, head_dim=dim)
+        self.obj_projector = ProjHead(feat_dim=dim, hidden_dim=dim//2, head_dim=dim)
 
-        self.scene_target_projector = ProjHead(feat_dim=dim*2, hidden_dim=dim//4, head_dim=8)
+        self.scene_target_projector = ProjHead(feat_dim=dim*2, hidden_dim=dim//2, head_dim=dim)
         self.target_encoder = init_(nn.Linear(future_steps*3, dim))
 
         self.apply(self._init_weights)
