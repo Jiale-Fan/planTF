@@ -154,5 +154,5 @@ python run_training.py \
   data_loader.params.batch_size=42 data_loader.params.num_workers=16 \
   lr=1e-3 epochs=25 warmup_epochs=3 weight_decay=0.0001 \
   lightning.trainer.params.check_val_every_n_epoch=2 \
-  wandb.mode=online wandb.project=nuplan wandb.name=plantf_typecon_100k
+  wandb.mode=online wandb.project=nuplan wandb.name=plantf_con1_proj128
   '''  
