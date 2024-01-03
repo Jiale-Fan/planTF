@@ -51,7 +51,7 @@ class LightningTrainer(pl.LightningModule):
 
         self.modes_contrastive_negative_threshold = modes_contrastive_negative_threshold
 
-        self.awl = AutomaticWeightedLoss(3)
+        # self.awl = AutomaticWeightedLoss(3)
 
     def on_fit_start(self) -> None:
         # self.model.train()
@@ -127,8 +127,8 @@ class LightningTrainer(pl.LightningModule):
         #          self.modes_contrastive_weight * contrastive_loss_modes + \
         #          self.scenario_type_contrastive_weight * scene_type_loss_sum
         
-        # loss = autobot_loss + scene_type_loss_sum + contrastive_loss_modes
-        loss = self.awl(autobot_loss, scene_type_loss_sum, contrastive_loss_modes)
+        loss = autobot_loss + 50*scene_type_loss_sum + 50*contrastive_loss_modes
+        # loss = self.awl(autobot_loss, scene_type_loss_sum, contrastive_loss_modes)
 
         return {
             "loss": loss,
