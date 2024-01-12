@@ -260,8 +260,6 @@ class PlanningModel(TorchModuleWrapper):
             # "obj_proj": obj_proj,
         }
 
-        most_probable_mode = probabilities.argmax(dim=-1)
-
         
 
         # if self.training:
@@ -290,9 +288,8 @@ class PlanningModel(TorchModuleWrapper):
 
 
         if not self.training:
-            trajectory = plans[:, :, 0]
-            
-            output_trajectory = trajectory[torch.arange(bs), most_probable_mode]
+      
+            output_trajectory = plans[:, 0]
             output_trajectory = output_trajectory[..., torch.Tensor([0,1,5]).to(torch.long)] # [B, timestep, states_dim]
             out["output_trajectory"] = output_trajectory
 

@@ -21,7 +21,7 @@ imitation_planner:
     # state_dropout: 0.75
     use_ego_history: false
     state_attn_encoder: true
-    plot: true
+    plot: false
 
     feature_builder:
       _target_: src.feature_builders.nuplan_feature_builder.NuplanFeatureBuilder
