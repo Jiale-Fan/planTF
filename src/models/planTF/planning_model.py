@@ -139,6 +139,13 @@ class PlanningModel(TorchModuleWrapper):
         x = self.norm(x)
 
         masks_sup = self.adv_masker(x.detach(), key_padding_mask) # [batch, n_elem]
+
+        # note that the masks here are not bool, but float. it should be multiplied with the tensors to approximate the masked tensor
+        # during training. 
+        # reference: https://arxiv.org/pdf/1802.07814.pdf
+
+        # but since we need to explicitly separate the causal factors, we need to convert the masks to bool
+        
         sup_mask = key_padding_mask | masks_sup.bool() # TODO: positive-negative needs to be checked. Now assume 1 would be masked
         inf_mask = key_padding_mask | (~masks_sup.bool())
 
