@@ -17,8 +17,46 @@ def generate_memory_masks(agent_mask, map_mask, num_modes, num_heads):
     memory_mask = memory_mask.unsqueeze(1).repeat(1,num_heads*num_modes,1,1).view(B*num_heads*num_modes, -1, memory_mask.shape[-1])
     return memory_mask
 
-class TrajectoryDecoder(nn.Module):
-    def __init__(self, embed_dim, num_modes, future_steps, out_channels, num_heads=8, dropout=0.1) -> None:
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+
+class MLPTrajectoryDecoder(nn.Module):
+    def __init__(self, embed_dim, num_modes, future_steps, out_channels) -> None:
+        super().__init__()
+
+        self.embed_dim = embed_dim
+        self.num_modes = num_modes
+        self.future_steps = future_steps
+        self.out_channels = out_channels
+
+        self.multimodal_proj = nn.Linear(embed_dim, num_modes * embed_dim)
+
+        hidden = 2 * embed_dim
+        self.loc = nn.Sequential(
+            nn.Linear(embed_dim, hidden),
+            nn.LayerNorm(hidden),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden, future_steps * out_channels),
+        )
+        self.pi = nn.Sequential(
+            nn.Linear(embed_dim, hidden),
+            nn.LayerNorm(hidden),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden, 1),
+        )
+
+    def forward(self, x):
+        x = self.multimodal_proj(x).view(-1, self.num_modes, self.embed_dim)
+        loc = self.loc(x).view(-1, self.num_modes, self.future_steps, self.out_channels)
+        pi = self.pi(x).squeeze(-1)
+
+        return loc, pi
+
+
+class TransformerTrajectoryDecoder(nn.Module):
+    def __init__(self, embed_dim, num_modes, future_steps, out_channels, num_heads=8, dropout=0.1, internal_seed=True) -> None:
         super().__init__()
 
         self.embed_dim = embed_dim
@@ -27,6 +65,7 @@ class TrajectoryDecoder(nn.Module):
         self.out_channels = out_channels
         self.num_heads = num_heads
         self.dropout = dropout
+        self.internal_agent_seed = internal_seed
 
         init_ = lambda m: init(m, nn.init.xavier_normal_, lambda x: nn.init.constant_(x, 0), np.sqrt(2))
 
@@ -52,26 +91,40 @@ class TrajectoryDecoder(nn.Module):
 
         self.prob_predictor = init_(nn.Linear(self.embed_dim, 1))
 
-    def forward(self, agent_emb, map_emb, agent_mask, map_mask, query):
+        self.learned_mode_query = nn.Parameter(torch.Tensor(num_modes, embed_dim).to('cuda'), requires_grad=True)
+        nn.init.xavier_normal_(self.learned_mode_query)
+
+
+    def forward(self, agent_emb, encoder_output, encoder_output_mask):
+
+        '''
+        input:
+            agent_emb: [B, 1, embed_dim]
+            map_emb: [B, E, embed_dim]
+            agent_mask: [B, 1]
+            map_mask: [B, E]
+            query: [B, num_modes, embed_dim] or [B, embed_dim]
+        output:
+            predictions: [B, num_modes, ego+agents, 6]
+            context: [B, num_modes, ego+agents, embed_dim]
+            probs: [B, num_modes]
+        '''
 
         # assert not torch.isnan(agent_emb).any()
         # assert not torch.isnan(map_emb).any()
 
+        agent_mask = torch.ones(agent_emb.shape[0], 1).to('cuda')
         B, A = agent_emb.shape[:2]
-        if query.dim() == 2:
-            modal_specific_agent_emb = query[None,:,None,:]+agent_emb[:,None,:,:] # [B, num_modes, ego+agents, embed_dim]
-        elif query.dim() == 3:
-            modal_specific_agent_emb = query[:,:,None,:]+agent_emb[:,None,:,:] # [B, num_modes, ego+agents, embed_dim]
-        else:
-            raise Exception("Query dimension is not 2 or 3")
+
+        modal_specific_agent_emb = self.learned_mode_query[None,:,None,:]+agent_emb[:,None,:,:] # [B, num_modes, ego+agents, embed_dim]
         
         modal_specific_agent_emb = modal_specific_agent_emb.view(-1, A, self.embed_dim)
 
-        memory_map_emb = map_emb.unsqueeze(1).repeat(1, self.num_modes, 1, 1).view(-1, map_emb.shape[-2], map_emb.shape[-1])
+        memory_map_emb = encoder_output.unsqueeze(1).repeat(1, self.num_modes, 1, 1).view(-1, encoder_output.shape[-2], encoder_output.shape[-1])
 
         x = self.transformer_decoder(tgt=modal_specific_agent_emb, memory=memory_map_emb,
                                       tgt_mask=generate_tgt_masks(agent_mask, self.num_modes, self.num_heads),  # [336, 33, 33]
-                                      memory_mask=generate_memory_masks(agent_mask, map_mask, self.num_modes, self.num_heads)) # [336, 33, 217]
+                                      memory_mask=generate_memory_masks(agent_mask, encoder_output_mask, self.num_modes, self.num_heads)) # [336, 33, 217]
         context = x.view(B, self.num_modes, -1, self.embed_dim) # [B, num_modes, ego+agents, embed_dim]
 
         predictions = self.output_model(context) # [B, num_modes, ego+agents, 6]

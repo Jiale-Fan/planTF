@@ -7,43 +7,16 @@ from nuplan.planning.training.preprocessing.target_builders.ego_trajectory_targe
 )
 
 from src.feature_builders.nuplan_feature_builder import NuplanFeatureBuilder
-from src.features.nuplan_feature import NuplanFeature
 
 from .layers.common_layers import build_mlp
 from .layers.transformer_encoder_layer import TransformerEncoderLayer
 from .modules.agent_encoder import AgentEncoder
 from .modules.map_encoder import MapEncoder
-from .modules.trajectory_decoder import TrajectoryDecoder
-
-import numpy as np
-from analysis.visualization import plot_sample_elements
-import os
+from .modules.trajectory_decoder import TransformerTrajectoryDecoder, MLPTrajectoryDecoder
+from .modules.adversarial_masker import TransformerMasker
 
 # no meaning, required by nuplan
 trajectory_sampling = TrajectorySampling(num_poses=8, time_horizon=8, interval_length=1)
-
-init_ = lambda m: init(m, nn.init.xavier_normal_, lambda x: nn.init.constant_(x, 0), np.sqrt(2))
-
-def init(module, weight_init, bias_init, gain=1):
-    weight_init(module.weight.data, gain=gain)
-    bias_init(module.bias.data)
-    return module
-
-class ProjHead(nn.Module):
-    '''
-    Nonlinear projection head that maps the extracted motion features to the embedding space
-    '''
-    def __init__(self, feat_dim, hidden_dim, head_dim):
-        super(ProjHead, self).__init__()
-        self.head = nn.Sequential(
-            init_(nn.Linear(feat_dim, hidden_dim)),
-            nn.ReLU(inplace=True),
-            init_(nn.Linear(hidden_dim, head_dim))
-            )
-
-    def forward(self, feat):
-        return self.head(feat)
-
 
 class PlanningModel(TorchModuleWrapper):
     def __init__(
@@ -60,10 +33,8 @@ class PlanningModel(TorchModuleWrapper):
         num_modes=6,
         use_ego_history=False,
         state_attn_encoder=True,
-        # state_dropout=0.75, # not in effect now
+        state_dropout=0.75,
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
-        projection_dim = 256,
-        plot=False,
     ) -> None:
         super().__init__(
             feature_builders=[feature_builder],
@@ -74,33 +45,17 @@ class PlanningModel(TorchModuleWrapper):
         self.dim = dim
         self.history_steps = history_steps
         self.future_steps = future_steps
-        self.num_modes = num_modes
-        self.plot = plot
-        self.sample_index = 0
 
         self.pos_emb = build_mlp(4, [dim] * 2)
-        self.pos_emb_route = build_mlp(4, [dim] * 2)
-
-        self.agent_encoder_pred = AgentEncoder(
-            state_channel=6,
+        self.agent_encoder = AgentEncoder(
+            state_channel=state_channel,
             history_channel=history_channel,
             dim=dim,
             hist_steps=history_steps,
             drop_path=drop_path,
-            use_ego_history=True,
+            use_ego_history=use_ego_history,
             state_attn_encoder=state_attn_encoder,
-            state_dropout=0,
-        )
-
-        self.agent_encoder_plan = AgentEncoder(
-            state_channel=3,
-            history_channel=history_channel,
-            dim=dim,
-            hist_steps=history_steps,
-            drop_path=drop_path,
-            use_ego_history=False,
-            state_attn_encoder=state_attn_encoder,
-            state_dropout=0,
+            state_dropout=state_dropout,
         )
 
         self.map_encoder = MapEncoder(
@@ -112,37 +67,29 @@ class PlanningModel(TorchModuleWrapper):
             TransformerEncoderLayer(dim=dim, num_heads=num_heads, drop_path=dp)
             for dp in [x.item() for x in torch.linspace(0, drop_path, encoder_depth)]
         )
+
         self.norm = nn.LayerNorm(dim)
 
-        self.trajectory_decoder_pred = TrajectoryDecoder(
+        self.full_trajectory_decoder = TransformerTrajectoryDecoder(
             embed_dim=dim,
             num_modes=num_modes,
             future_steps=future_steps,
             out_channels=4,
+            internal_seed=True,
         )
 
-        self.trajectory_decoder_plan = TrajectoryDecoder(
+        self.sup_trajectory_decoder = TransformerTrajectoryDecoder(
             embed_dim=dim,
             num_modes=num_modes,
             future_steps=future_steps,
             out_channels=4,
+            internal_seed=True,
         )
 
-        self.learned_query = nn.Parameter(torch.Tensor(num_modes, dim).to('cuda'), requires_grad=True) # TODO: check if xavier init is possible
-        nn.init.xavier_normal_(self.learned_query)
+        self.adv_masker = TransformerMasker(in_dim=dim, num_heads=16, mask_rate=0.5, dropout=0.1)
 
-        # self.agent_predictor = build_mlp(dim, [dim * 2, future_steps * 2], norm="ln")
-
-        self.scenario_embedding = nn.Parameter(torch.randn(1, 4, dim))
-        nn.init.xavier_normal_(self.scenario_embedding)
-
-        # self.scenario_projector = ProjHead(feat_dim=dim, hidden_dim=dim//4, head_dim=8)
-        self.env_projector = ProjHead(feat_dim=dim, hidden_dim=dim, head_dim=projection_dim)
-        self.beh_projector = ProjHead(feat_dim=dim, hidden_dim=dim, head_dim=projection_dim)
-        self.obj_projector = ProjHead(feat_dim=dim, hidden_dim=dim, head_dim=projection_dim)
-
-        self.scene_target_projector = ProjHead(feat_dim=dim*2, hidden_dim=dim, head_dim=projection_dim)
-        self.target_encoder = init_(nn.Linear(future_steps*3, dim))
+        self.inf_query_generator = TransformerEncoderLayer(dim=dim, num_heads=num_heads, drop_path=0.2)
+        self.learned_seed = nn.Parameter(torch.randn(1, 1, dim))
 
         self.apply(self._init_weights)
 
@@ -178,113 +125,51 @@ class PlanningModel(TorchModuleWrapper):
 
         agent_key_padding = ~(agent_mask.any(-1))
         polygon_key_padding = ~(polygon_mask.any(-1))
+        key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding], dim=-1)
 
-        # add fake key_padding_mask for scenario embedding TODO: check if mask should be inverse mask
-        scenario_emb_key_padding = torch.zeros(bs, self.scenario_embedding.shape[1], dtype=torch.bool, device=agent_key_padding.device)
+        x_agent = self.agent_encoder(data)
+        x_polygon = self.map_encoder(data)
 
-        key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding, scenario_emb_key_padding], dim=-1)
-
-        x_agent_pred = self.agent_encoder_pred(data)
-        x_polygon_all= self.map_encoder(data, on_route_embedding=False)
-
-        # add learnable initial scenario embedding
-        scenario_emb = self.scenario_embedding.repeat(bs, 1, 1)
-
-        ##### 1. prediction forward pass #####
+        x = torch.cat([x_agent, x_polygon], dim=1) + pos_embed 
         
-        x_pred = torch.cat([x_agent_pred, x_polygon_all], dim=1) + pos_embed 
-        x_pred = torch.cat([x_pred, scenario_emb], dim=1)
         # x: [batch, n_elem, n_dim]. n_elem is not a fixed number, it depends on the number of agents and polygons in the scene
 
         for blk in self.encoder_blocks:
-            x_pred = blk(x_pred, key_padding_mask=key_padding_mask)
-        x_pred = self.norm(x_pred)
+            x = blk(x, key_padding_mask=key_padding_mask)
+        x = self.norm(x)
 
-        # predictions, probabilities = self.trajectory_decoder(x[:, 0:A], x[:, A:-4], agent_key_padding, polygon_key_padding) # x: [batch, n_elem, 128], trajectory: [batch, modal, 80, 4], probability: [batch, 6]
-        polygon_sceemb_key_padding = torch.cat([polygon_key_padding, scenario_emb_key_padding], dim=-1)
-        predictions, context, _ = self.trajectory_decoder_pred(x_pred[:, 0:A], x_pred[:, A:], agent_key_padding, polygon_sceemb_key_padding, self.learned_query)
-        # prediction = self.agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2)
+        masks_sup = self.adv_masker(x.detach()) # [batch, n_elem]
+        sup_mask = key_padding_mask | masks_sup.bool() # TODO: positive-negative needs to be checked. Now assume 1 would be masked
+        inf_mask = key_padding_mask | (~masks_sup.bool())
 
+        trajectory_sup, probability_sup = self.sup_trajectory_decoder(torch.zeros((bs, 1, self.dim)).to('cuda'), x, sup_mask)
+        inf_query = self.inf_query_generator(x, key_padding_mask=inf_mask)[:,0]
+        trajectory_full, probability_full = self.full_trajectory_decoder(inf_query, x, sup_mask)
 
-        ##### 2. planning forward pass #####
-
-
-        x_agent_plan = self.agent_encoder_plan(data)
-        x_polygon_plan= self.map_encoder(data, on_route_embedding=True)
-
-        x_plan = torch.cat([x_agent_plan, x_polygon_plan], dim=1) + pos_embed
-        x_plan = torch.cat([x_plan, scenario_emb], dim=1)
-        # x: [batch, n_elem, n_dim]. n_elem is not a fixed number, it depends on the number of agents and polygons in the scene
-
-        for blk in self.encoder_blocks:
-            x_plan = blk(x_plan, key_padding_mask=key_padding_mask)
-        x_plan = self.norm(x_plan)
-
-        plans, _, probabilities = self.trajectory_decoder_plan(x_plan[:, 0:1], x_plan[:, A:], agent_key_padding[:, 0:1], polygon_sceemb_key_padding, context[:, :, 0, :])
-
-
-        # get the projection of the scenario embedding
-        scenario_emb = x_pred[:,-1] # [B, dim]
-
-        # get the projection of the scenario feature embeddings
-        beh_proj = self.beh_projector(x_pred[:, -2])
-        env_proj = self.env_projector(x_pred[:, -3])
-        obj_proj = self.obj_projector(x_pred[:, -4])
-
+        # TODO: add adversarial query generator
+        
 
         out = {
-            "trajectory": plans[:, :, 0],
-            "probability": probabilities,
-            "prediction": predictions,
-            "beh_proj": beh_proj,
-            "env_proj": env_proj,
-            "obj_proj": obj_proj,
+            "trajectory_sup": trajectory_sup,
+            "probability_sup": probability_sup,
+            "trajectory_full": trajectory_full,
+            "probability_full": probability_full,
         }
 
-        most_probable_mode = probabilities.argmax(dim=-1)
-
-        
-
-        if self.training:
-            trajectory = plans[:, :, 0, :, torch.Tensor([0,1,5]).to(torch.long)] # [B, num_modes, timestep, states_dim]
-            trajectory_embs = self.target_encoder(trajectory.view(bs, self.num_modes, -1)) # [B, num_modes, 128]
-            trajectory_embs = trajectory_embs.view((-1, self.dim)).unsqueeze(0).repeat(bs, 1, 1) # [B, B*num_modes, 128]
-
-            scene_target_emb = torch.cat([trajectory_embs, scenario_emb.unsqueeze(1).repeat(1,bs*self.num_modes,1)], dim=-1) # [B, B*num_modes, 256]
-            scene_target_emb_projs = self.scene_target_projector(scene_target_emb) # [B, B*num_modes, 8]
-            out["scene_plan_emb_proj"] = scene_target_emb_projs# [B, B*num_modes, 8]
-
-            target_emb = self.target_encoder(data["agent"]["target"][:,0].reshape(bs, -1))
-            scene_target_emb = torch.cat([target_emb, scenario_emb], dim=-1)
-            scene_target_emb_proj = self.scene_target_projector(scene_target_emb)
-            out["scene_target_emb_proj"] = scene_target_emb_proj # [B, 8]
-
-            ego_target = data["agent"]["target"][:, 0]
-            errors = (ego_target[:, None, :, :2] - plans[:, :, 0, :, :2]).norm(dim=-1).sum(dim=(-1))
-            closest_mode = errors.argmin(dim=-1)
-
-            output_trajectory = plans[:, :, 0][torch.arange(bs), closest_mode]
-            best_emb = self.target_encoder(output_trajectory[..., torch.Tensor([0,1,5]).to(torch.long)].reshape(bs, -1))
-            scene_best_emb = torch.cat([best_emb, scenario_emb], dim=-1)
-            scene_best_emb_proj = self.scene_target_projector(scene_best_emb)
-            out["scene_best_emb_proj"] = scene_best_emb_proj
-
-
         if not self.training:
-            trajectory = plans[:, :, 0]
-            
-            output_trajectory = trajectory[torch.arange(bs), most_probable_mode]
-            output_trajectory = output_trajectory[..., torch.Tensor([0,1,5]).to(torch.long)] # [B, timestep, states_dim]
-            out["output_trajectory"] = output_trajectory
-
-            if self.plot:
-                # examine whether the path exists
-                save_path = './debug_files/scenario_2/'
-                if not os.path.exists(save_path):
-                    os.makedirs(save_path)
-                np_data = NuplanFeature(data=data).to_numpy().data
-                plot_sample_elements(np_data, out, sample_index=self.sample_index, save_path=save_path)
-                self.sample_index += 1
-                print('plotting: ', self.sample_index)
+            best_mode = probability_full.argmax(dim=-1)
+            output_trajectory = trajectory_full[torch.arange(bs), best_mode]
+            angle = torch.atan2(output_trajectory[..., 3], output_trajectory[..., 2])
+            out["output_trajectory"] = torch.cat(
+                [output_trajectory[..., :2], angle.unsqueeze(-1)], dim=-1
+            )
 
         return out
+    
+    def get_loss_final_modules(self):
+        modules = []
+        for module_name, module in self.named_modules():
+            if not (module_name.startswith("sup_trajectory_decoder") or module_name.startswith("adv_masker")):
+                modules.append((module_name, module))
+
+        return modules

@@ -20,6 +20,7 @@ from src.metrics import MR, minADE, minFDE
 from src.optim.warmup_cos_lr import WarmupCosLR
 from src.models.planTF.training_objectives import nll_loss_multimodes_joint, nll_loss_multimodes
 from src.models.planTF.pairing_matrix import proj_name_to_mat
+from .modules.adversarial_masker import TransformerMasker
 
 from torch.nn.utils.rnn import pad_sequence
 
@@ -34,10 +35,6 @@ class LightningTrainer(pl.LightningModule):
         weight_decay,
         epochs,
         warmup_epochs,
-        modes_contrastive_weight = 10.0, # 100
-        scenario_type_contrastive_weight = 50,
-        contrastive_temperature = 0.3,
-        modes_contrastive_negative_threshold = 2.0,
     ) -> None:
         super().__init__()
         self.save_hyperparameters(ignore=["model"])
@@ -47,11 +44,8 @@ class LightningTrainer(pl.LightningModule):
         self.weight_decay = weight_decay
         self.epochs = epochs
         self.warmup_epochs = warmup_epochs
-        self.temperature = contrastive_temperature # TODO: adjust temperature?
 
-        self.modes_contrastive_weight = modes_contrastive_weight # TODO: adjust contrastive_weight?
-        self.scenario_type_contrastive_weight = scenario_type_contrastive_weight
-        self.modes_contrastive_negative_threshold = modes_contrastive_negative_threshold
+        self.automatic_optimization = False
 
 
     def on_fit_start(self) -> None:
@@ -73,6 +67,7 @@ class LightningTrainer(pl.LightningModule):
     def _step(
         self, batch: Tuple[FeaturesType, TargetsType, ScenarioListType], prefix: str
     ) -> torch.Tensor:
+ 
         features, _, _ = batch
         res = self.forward(features["feature"].data)
 
@@ -83,207 +78,40 @@ class LightningTrainer(pl.LightningModule):
         return losses["loss"]
 
     def _compute_objectives(self, res, data) -> Dict[str, torch.Tensor]:
-        probability, prediction = (
-            res["probability"], # [batch, num_modes, num_agents, time_steps, 5]
-            res["prediction"], # [batch, num_modes]
+        probability_full, trajectory_full = (
+            res["probability_full"], # [batch, num_modes, num_agents, time_steps, 5]
+            res["trajectory_full"],
+        )
+
+        probability_sup, trajectory_sup = (
+            res["probability_sup"], # [batch, num_modes, num_agents, time_steps, 5]
+            res["trajectory_sup"],
         )
 
         targets = data["agent"]["target"]
         valid_mask = data["agent"]["valid_mask"][..., -targets.shape[-2]:]
 
-        nll_loss_pred, kl_loss_pred, post_entropy_pred, adefde_loss_pred = \
-            nll_loss_multimodes_joint(prediction.permute(1,3,0,2,4), targets.permute(0,2,1,3), probability, valid_mask.permute(0,2,1),
+        nll_loss_full, kl_loss_full, post_entropy_full, adefde_loss_full = nll_loss_multimodes_joint(trajectory_full.unsqueeze(2).permute(1,3,0,2,4), targets[:, 0:1].permute(0,2,1,3), probability_full, valid_mask.permute(0,2,1),
                                         entropy_weight=40.0,
                                         kl_weight=20.0,
                                         use_FDEADE_aux_loss=True,
                                         predict_yaw=True)
         
-        nll_loss_plan, kl_loss_plan, post_entropy_plan, adefde_loss_plan = nll_loss_multimodes_joint(res["trajectory"].unsqueeze(2).permute(1,3,0,2,4), targets[:, 0:1].permute(0,2,1,3), probability, valid_mask.permute(0,2,1),
+        nll_loss_sup, kl_loss_sup, post_entropy_sup, adefde_loss_sup = nll_loss_multimodes_joint(trajectory_sup.unsqueeze(2).permute(1,3,0,2,4), targets[:, 0:1].permute(0,2,1,3), probability_sup, valid_mask.permute(0,2,1),
                                         entropy_weight=40.0,
                                         kl_weight=20.0,
                                         use_FDEADE_aux_loss=True,
                                         predict_yaw=True)
         
-        # contrastive loss
-        # 1. contrastive loss between scene understandings
-        # look up tables to get positive and negative pairs TODO debug; examine if MASKS are needed!
 
-        scene_type_loss_dict ={}
-        scene_type_loss_sum = 0
-
-        for proj_name in ["beh_proj", "env_proj", "obj_proj"]:
-            query_embs, pos_embs, neg_embs, neg_masks = \
-                self.get_positive_negative_embs_scenario_types(targets[:, 0], data["scenario_type"], res[proj_name], proj_name)
-            contrastive_loss_type = self._contrastive_loss(query_embs, pos_embs, neg_embs, neg_masks) \
-                                    if pos_embs is not None else 0
-            scene_type_loss_dict[proj_name] = contrastive_loss_type
-            scene_type_loss_sum += contrastive_loss_type
-
-        # 2. contrastive loss between multi-modal plans
-        contrastive_loss_modes = 0
-        if self.training:
-            neg_masks = self.get_negative_embs_masks(res["trajectory"], targets[:, 0]) 
-            contrastive_loss_modes = self._contrastive_loss(res["scene_best_emb_proj"], 
-                                                            res["scene_target_emb_proj"],
-                                                            res["scene_plan_emb_proj"], neg_masks)
-
-        if self.current_epoch < 10:
-            loss = adefde_loss_pred*100
-                # + nll_loss + kl_loss + \
-                #  1e-10 * contrastive_loss_modes + \
-                #  1e-10 * scene_type_loss_sum
-        else:
-            loss = nll_loss_plan + adefde_loss_plan + kl_loss_plan + \
-                 self.modes_contrastive_weight * contrastive_loss_modes + \
-                 self.scenario_type_contrastive_weight * scene_type_loss_sum
+        loss_sup = nll_loss_sup + adefde_loss_sup + kl_loss_sup
+        loss_full = nll_loss_full + adefde_loss_full + kl_loss_full
 
         return {
-            "loss": loss,
-
-            # "kl_loss": kl_loss,
-            # "post_entropy": post_entropy,
-            "ade_fde_loss": adefde_loss_pred,
-            # "nll_loss": nll_loss,
-
-            "contrastive_loss": contrastive_loss_modes,
-            "beh_contrastive_loss": scene_type_loss_dict["beh_proj"],
-            "env_contrastive_loss": scene_type_loss_dict["env_proj"],
-            "obj_contrastive_loss": scene_type_loss_dict["obj_proj"],
+            "loss": loss_full, # this term named exactly as "loss" is used in the log_step function
+            "loss_sup": loss_sup,
+            "loss_full": loss_full,
         }
-
-    def get_negative_embs_masks(self, multimodal_trajs, ego_target):
-        '''
-        Input:
-            multimodal_trajs: [batch, num_modes, time_steps, 6]
-            ego_target: [batch, time_steps, 2]
-        Output:
-            neg_masks: [batch, num_modes]
-        '''
-        # calculate the ade and fde of each mode
-        bs = multimodal_trajs.size(0)
-        multimodal_trajs = multimodal_trajs.view((-1, multimodal_trajs.size(-2), multimodal_trajs.size(-1))).unsqueeze(0).repeat(bs, 1, 1, 1)  # [batch, batch*num_modes, time_steps, 6]
-        fde = torch.norm(multimodal_trajs[:, :, -1, :2] - ego_target[:, None, -1, :2], dim=-1) # [batch, batch*num_modes]
-
-        neg_masks = (fde > self.modes_contrastive_negative_threshold).to(torch.bool) # [batch, batch*num_modes]
-        return neg_masks
-
-
-    def get_positive_negative_embs_scenario_types(self, ego_targets, scenario_types_ids, projections, proj_name):
-        '''
-        Input:
-            ego_targets: [batch_size, time_steps, 3]
-            scenario_types_ids: [batch_size]
-            projections: [batch_size, proj_dim(8)]
-        Output:
-            pos_embs: [batch_size, dim]
-            neg_embs: [batch_size, num_neg, dim]
-            neg_masks: [batch_size, num_neg]
-        '''
-
-        bs = scenario_types_ids.size(0)
-        scenario_types_ids = scenario_types_ids.to(torch.long)
-        # get positive and negative pairs of behavior embeddings
-        pairing_mat = proj_name_to_mat[proj_name][scenario_types_ids[:, None], scenario_types_ids].squeeze()*(~torch.eye(bs).to(torch.bool)) # exclude self
-        
-        # exclude rows where there is no positive pair or no negative pair
-        valid_idx = torch.nonzero(torch.any(pairing_mat>0, dim=-1) & torch.any(pairing_mat<0, dim=-1), as_tuple=True)[0]
-        pairing_mat_valid = pairing_mat[valid_idx] # [batch_valid, batch]
-        # pos_embs = pad_sequence([projections[torch.where(pairing_mat_valid[i]>0)] for i in range(bs)], batch_first=True) # [batch, pairs, dim]
-        # neg_embs = pad_sequence([projections[torch.where(pairing_mat_valid[i]<0)] for i in range(bs)], batch_first=True)
-
-        if valid_idx.size(0) == 0:
-            return None, None, None, None
-        else: 
-            neg_embs = projections.unsqueeze(0).repeat(valid_idx.size(0), 1, 1) # [batch_valid, batch, dim]
-            neg_masks = pairing_mat_valid < 0 # [batch_valid, batch]
-            neg_masks = neg_masks.to(projections.device)
-
-            errors_mat = (ego_targets[valid_idx, None, :, :2] - ego_targets[None, valid_idx, :, :2]).norm(dim=-1).sum(-1) # [batch_valid, batch_valid]
-            errors_mat = errors_mat + torch.eye(errors_mat.size(0)).to(errors_mat.device)*1e6 # exclude self
-            least_error = torch.argmin(errors_mat, dim=-1) # [batch_valid]
-
-            pos_embs = projections[valid_idx[least_error]] # [batch_valid, dim]
-            query_embs = projections[valid_idx] # [batch_valid, dim]
-        
-        return query_embs, pos_embs, neg_embs, neg_masks
-
-    
-    def _contrastive_loss(self, emb_query, emb_pos, emb_neg, neg_masks: torch.Tensor):
-        '''
-        Input:
-            emb_query: [batch, dim]
-            emb_pos: [batch, dim]
-            emb_neg: [batch, num_neg, dim]
-            neg_masks: [batch, num_neg]
-        Output:
-            loss: scalar
-        '''
-
-        emb_query = emb_query
-        query = nn.functional.normalize(emb_query, dim=-1)
-
-        # normalized embedding
-        key_pos = nn.functional.normalize(emb_pos, dim=-1)
-        key_neg = nn.functional.normalize(emb_neg, dim=-1)
-        # pairing
-        sim_pos = (query * key_pos).sum(dim=-1)
-        sim_neg = (query[:, None, :] * key_neg).sum(dim=-1)
-
-        # neg_masks = neg_masks.to(torch.bool)
-
-        # bs = sim_neg.size(0)
-        # loss = torch.zeros(bs)
-
-        # for i in range(bs):
-        #     sim_neg_i = sim_neg[i, torch.nonzero(neg_masks[i])].squeeze()
-        #     if sim_neg_i.numel() > 0:
-        #         loss[i] = -torch.log(torch.exp(sim_pos[i] / self.temperature) / torch.sum(torch.exp(sim_neg_i / self.temperature), dim=-1))
-
-        # loss (social-nce)
-
-        # logits = (torch.cat([sim_pos.unsqueeze(1), sim_neg], dim=1) / self.temperature)
-        # labels = torch.zeros(logits.size(0), dtype=torch.long, device=self.device)
-        # loss = self.contrastive_criterion(logits, labels)
-
-        # loss
-        # neg_masks.requires_grad_(False)
-        denominator = torch.sum(torch.exp(sim_neg / self.temperature) * neg_masks, dim=-1)
-        # pick the non-zero subset of denominator
-        nonzero_deno = denominator[torch.nonzero(denominator).squeeze()]
-        numerator = torch.exp(sim_pos / self.temperature)[torch.nonzero(denominator).squeeze()]
-        loss = -torch.log(numerator/nonzero_deno).mean()
-
-        return loss
-    
-    # def _contrastive_loss_multi(self, emb_query, emb_pos, emb_neg):
-    #     '''
-    #     Input:
-    #         emb_query: [batch, dim]
-    #         emb_pos: [batch, max_pairs, dim]
-    #         emb_neg: [batch, max_pairs, dim]
-    #         mask_pos: [batch, max_pairs]
-    #         mask_neg: [batch, max_pairs]
-    #     Output:
-    #         loss: scalar
-    #     '''
-
-    #     emb_query = emb_query
-    #     query = nn.functional.normalize(emb_query, dim=-1)
-
-    #     # normalized embedding
-    #     key_pos = nn.functional.normalize(emb_pos, dim=-1)
-    #     key_neg = nn.functional.normalize(emb_neg, dim=-1)
-    #     # pairing
-    #     sim_pos = (query[:, None, :] * key_pos).sum(dim=-1)
-    #     sim_neg = (query[:, None, :] * key_neg).sum(dim=-1) 
-    #     # I think it is not necessary to exclude padding embeddings, since the padding embeddings are all zeros
-    #     # and the dot product between query and zero embeddings would produce zero gradients for the query embedding
-
-    #     # loss
-    #     loss = -torch.log(torch.sum(torch.exp(sim_pos / self.temperature), dim=-1) / torch.sum(torch.exp(sim_neg / self.temperature), dim=-1)).mean()
-
-    #     return loss
-
 
     def _compute_metrics(self, output, data, prefix) -> Dict[str, torch.Tensor]:
         metrics = self.metrics[prefix](output, data["agent"]["target"][:, 0])
@@ -333,8 +161,38 @@ class LightningTrainer(pl.LightningModule):
         :param batch: example batch
         :param batch_idx: batch's index (unused)
         :return: model's loss tensor
+
+
+        def training_step(self, batch, batch_idx):
+            opt = self.optimizers()
+            opt.zero_grad()
+            loss = self.compute_loss(batch)
+            self.manual_backward(loss)
+            opt.step()
         """
-        return self._step(batch, "train")
+        prefix = "train"
+
+        features, _, _ = batch
+        res = self.forward(features["feature"].data)
+        losses = self._compute_objectives(res, features["feature"].data)
+
+        opts = self.optimizers()
+        opts[0].zero_grad()
+        self.manual_backward(losses["loss_full"])
+        opts[0].step()
+
+        opts[1].zero_grad()
+        self.manual_backward(losses["loss_sup"]) # TODO: add variance loss
+        opts[1].step()
+
+        opts[2].zero_grad()
+        self.manual_backward(losses["loss_sup"])
+        opts[2].step()
+
+        metrics = self._compute_metrics(res, features["feature"].data, prefix)
+        self._log_step(losses["loss"], losses, metrics, prefix) # TODO: write train step and optimizer configuration
+        
+        return losses["loss"]
 
     def validation_step(
         self, batch: Tuple[FeaturesType, TargetsType, ScenarioListType], batch_idx: int
@@ -396,9 +254,10 @@ class LightningTrainer(pl.LightningModule):
             nn.LayerNorm,
             nn.Embedding,
         )
-        for module_name, module in self.named_modules():
+        # for module_name, module in self.named_modules():
+        for module_name, module in self.model.get_loss_final_modules():
             for param_name, param in module.named_parameters():
-                full_param_name = (
+                full_param_name = "model."+(
                     "%s.%s" % (module_name, param_name) if module_name else param_name
                 )
                 if "bias" in param_name:
@@ -434,22 +293,33 @@ class LightningTrainer(pl.LightningModule):
         ]
 
         # Get optimizer
-        optimizer = torch.optim.AdamW(
+        optimizer_loss_final = torch.optim.AdamW(
             optim_groups, lr=self.lr, weight_decay=self.weight_decay
         )
 
         # Get lr_scheduler
-        scheduler = WarmupCosLR(
+        scheduler_loss_final = self.get_lr_scheduler(optimizer_loss_final)
+
+        optimizer_adv_masker = torch.optim.AdamW(
+            self.model.adv_masker.parameters(), lr=self.lr, weight_decay=self.weight_decay
+        )
+
+        optimizer_sup_decoder = torch.optim.AdamW(
+            self.model.sup_trajectory_decoder.parameters(), lr=self.lr, weight_decay=self.weight_decay
+        )
+
+        # return [optimizer], [scheduler]
+        return {
+            'optimizer': [optimizer_loss_final, optimizer_adv_masker, optimizer_sup_decoder],
+            'lr_scheduler': scheduler_loss_final,
+            # 'gradient_clip_val': 3.0,  # Adjust this value to the desired gradient clipping value
+        }
+    
+    def get_lr_scheduler(self, optimizer):
+        return WarmupCosLR(
             optimizer=optimizer,
             lr=self.lr,
             min_lr=1e-6,
             epochs=self.epochs,
             warmup_epochs=self.warmup_epochs,
         )
-
-        # return [optimizer], [scheduler]
-        return {
-            'optimizer': optimizer,
-            'lr_scheduler': scheduler,
-            'gradient_clip_val': 3.0,  # Adjust this value to the desired gradient clipping value
-        }
