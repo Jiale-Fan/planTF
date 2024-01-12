@@ -17,16 +17,18 @@ class TransformerMasker(nn.Module):
         # self.bn = nn.BatchNorm1d(num_classes, affine=False)
 
     def forward(self, f, key_padding_mask):
-       '''
-         input:
-              f: [B, N, in_dim]
-              key_padding_mask: [B, N]
-         output:
-                z: [B, N]
-       '''
-       mask = self.linear(self.tf(f, key_padding_mask=key_padding_mask)).squeeze(-1)
-       z = torch.zeros_like(mask)
-       for _ in range(self.k):
-           mask = F.gumbel_softmax(mask, dim=1, tau=0.5, hard=False)
-           z = torch.maximum(mask,z)
-       return z
+        '''
+            input:
+                f: [B, N, in_dim]
+                key_padding_mask: [B, N]
+            output:
+                    z: [B, N]
+        '''
+        mask_prob = self.linear(self.tf(f, key_padding_mask=key_padding_mask)).squeeze(-1)
+        z = torch.zeros_like(mask_prob)
+        k = int(mask_prob.shape[1]*self.mask_rate)
+
+        for _ in range(k):
+            mask = F.gumbel_softmax(mask_prob, dim=1, tau=0.5, hard=False)
+            z = torch.maximum(mask,z)
+        return z

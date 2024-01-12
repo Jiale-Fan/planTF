@@ -138,7 +138,7 @@ class PlanningModel(TorchModuleWrapper):
             x = blk(x, key_padding_mask=key_padding_mask)
         x = self.norm(x)
 
-        masks_sup = self.adv_masker(x.detach()) # [batch, n_elem]
+        masks_sup = self.adv_masker(x.detach(), key_padding_mask) # [batch, n_elem]
         sup_mask = key_padding_mask | masks_sup.bool() # TODO: positive-negative needs to be checked. Now assume 1 would be masked
         inf_mask = key_padding_mask | (~masks_sup.bool())
 
@@ -166,10 +166,10 @@ class PlanningModel(TorchModuleWrapper):
 
         return out
     
-    def get_loss_final_modules(self):
-        modules = []
-        for module_name, module in self.named_modules():
-            if not (module_name.startswith("sup_trajectory_decoder") or module_name.startswith("adv_masker")):
-                modules.append((module_name, module))
+    # def get_loss_final_modules(self):
+    #     modules = []
+    #     for module_name, module in self.named_modules():
+    #         if not (module_name.startswith("sup_trajectory_decoder") or module_name.startswith("adv_masker")):
+    #             modules.append((module_name, module))
 
-        return modules
+    #     return modules

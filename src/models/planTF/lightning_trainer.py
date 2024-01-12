@@ -254,12 +254,19 @@ class LightningTrainer(pl.LightningModule):
             nn.LayerNorm,
             nn.Embedding,
         )
-        # for module_name, module in self.named_modules():
-        for module_name, module in self.model.get_loss_final_modules():
+        for module_name, module in self.named_modules():
+    
+        # for module_name, module in self.model.get_loss_final_modules():
             for param_name, param in module.named_parameters():
-                full_param_name = "model."+(
+                full_param_name = (
                     "%s.%s" % (module_name, param_name) if module_name else param_name
                 )
+
+
+                # exclude adv_masker and sup_trajectory_decoder from the main optimizer
+                if "adv_masker" in full_param_name or "sup_trajectory_decoder" in full_param_name:
+                    continue
+
                 if "bias" in param_name:
                     no_decay.add(full_param_name)
                 elif "weight" in param_name:
@@ -274,8 +281,10 @@ class LightningTrainer(pl.LightningModule):
         }
         inter_params = decay & no_decay
         union_params = decay | no_decay
-        assert len(inter_params) == 0
-        assert len(param_dict.keys() - union_params) == 0
+
+        ## Following assertions are not true because we now use multiple optimizers
+        # assert len(inter_params) == 0
+        # assert len(param_dict.keys() - union_params) == 0
 
         optim_groups = [
             {
@@ -308,12 +317,12 @@ class LightningTrainer(pl.LightningModule):
             self.model.sup_trajectory_decoder.parameters(), lr=self.lr, weight_decay=self.weight_decay
         )
 
-        # return [optimizer], [scheduler]
-        return {
-            'optimizer': [optimizer_loss_final, optimizer_adv_masker, optimizer_sup_decoder],
-            'lr_scheduler': scheduler_loss_final,
-            # 'gradient_clip_val': 3.0,  # Adjust this value to the desired gradient clipping value
-        }
+        return [optimizer_loss_final, optimizer_adv_masker, optimizer_sup_decoder], [scheduler_loss_final]
+        # return {
+        #     'optimizer': [optimizer_loss_final, optimizer_adv_masker, optimizer_sup_decoder],
+        #     'lr_scheduler': scheduler_loss_final,
+        #     # 'gradient_clip_val': 3.0,  # Adjust this value to the desired gradient clipping value
+        # }
     
     def get_lr_scheduler(self, optimizer):
         return WarmupCosLR(
