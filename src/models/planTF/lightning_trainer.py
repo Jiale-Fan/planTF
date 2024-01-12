@@ -135,7 +135,8 @@ class LightningTrainer(pl.LightningModule):
         else:
             loss = nll_loss_plan + adefde_loss_plan + kl_loss_plan + \
                  self.modes_contrastive_weight * contrastive_loss_modes + \
-                 self.scenario_type_contrastive_weight * scene_type_loss_sum
+                 self.scenario_type_contrastive_weight * scene_type_loss_sum +\
+                 adefde_loss_pred*100
 
         return {
             "loss": loss,
