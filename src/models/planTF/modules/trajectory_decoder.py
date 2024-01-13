@@ -7,13 +7,13 @@ import numpy as np
 
 def generate_tgt_masks(ori_mask, num_modes, num_heads):
     B = ori_mask.shape[0]
-    tgt_mask = ori_mask.unsqueeze(-1) & ori_mask.unsqueeze(-2)
+    tgt_mask = ori_mask.unsqueeze(-1) | ori_mask.unsqueeze(-2)
     tgt_mask = tgt_mask.unsqueeze(1).repeat(1,num_modes*num_heads,1,1).view(B*num_modes*num_heads, -1, tgt_mask.shape[-1])
     return tgt_mask
 
 def generate_memory_masks(agent_mask, map_mask, num_modes, num_heads):
     B = agent_mask.shape[0]
-    memory_mask = agent_mask.unsqueeze(-1) & map_mask.unsqueeze(-2)
+    memory_mask = agent_mask.unsqueeze(-1) | map_mask.unsqueeze(-2)
     memory_mask = memory_mask.unsqueeze(1).repeat(1,num_heads*num_modes,1,1).view(B*num_heads*num_modes, -1, memory_mask.shape[-1])
     return memory_mask
 
