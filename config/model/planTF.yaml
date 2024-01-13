@@ -6,7 +6,7 @@ state_channel: 6
 polygon_channel: 6
 history_channel: 9
 history_steps: 21
-future_steps: 80
+future_steps: 16
 encoder_depth: 4
 drop_path: 0.2
 num_heads: 8

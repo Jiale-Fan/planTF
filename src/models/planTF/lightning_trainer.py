@@ -31,6 +31,7 @@ class LightningTrainer(pl.LightningModule):
         weight_decay,
         epochs,
         warmup_epochs,
+        subsample_ratio = 5
     ) -> None:
         super().__init__()
         self.save_hyperparameters(ignore=["model"])
@@ -40,6 +41,7 @@ class LightningTrainer(pl.LightningModule):
         self.weight_decay = weight_decay
         self.epochs = epochs
         self.warmup_epochs = warmup_epochs
+        self.subsample_ratio = subsample_ratio
 
     def on_fit_start(self) -> None:
         metrics_collection = MetricCollection(
@@ -75,7 +77,7 @@ class LightningTrainer(pl.LightningModule):
             # res["score_pred"],
         )
 
-        targets = data["agent"]["target"]
+        targets = data["agent"]["target"][:,:,::self.subsample_ratio,:]
         valid_mask = data["agent"]["valid_mask"][..., -targets.shape[-2]:]
 
         # ego_target_pos, ego_target_heading = targets[:, 0, :, :2], targets[:, 0, :, 2]
@@ -129,7 +131,7 @@ class LightningTrainer(pl.LightningModule):
         }
 
     def _compute_metrics(self, output, data, prefix) -> Dict[str, torch.Tensor]:
-        metrics = self.metrics[prefix](output, data["agent"]["target"][:, 0])
+        metrics = self.metrics[prefix](output, data["agent"]["target"][:, 0, ::self.subsample_ratio])
         return metrics
 
     def _log_step(
