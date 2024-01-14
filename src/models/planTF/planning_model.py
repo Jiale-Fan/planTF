@@ -12,11 +12,12 @@ from .layers.common_layers import build_mlp
 from .layers.transformer_encoder_layer import TransformerEncoderLayer
 from .modules.agent_encoder import AgentEncoder
 from .modules.map_encoder import MapEncoder
-from .modules.trajectory_decoder import TransformerTrajectoryDecoder, MLPTrajectoryDecoder
-from .modules.adversarial_masker import TransformerMasker
+from .modules.trajectory_decoder import TrajectoryDecoder
+from .modules.adversarial_modules import TransformerMasker, AdversarialEmbeddingPerturbator
 
 # no meaning, required by nuplan
 trajectory_sampling = TrajectorySampling(num_poses=8, time_horizon=8, interval_length=1)
+
 
 class PlanningModel(TorchModuleWrapper):
     def __init__(
@@ -70,26 +71,18 @@ class PlanningModel(TorchModuleWrapper):
 
         self.norm = nn.LayerNorm(dim)
 
-        self.full_trajectory_decoder = TransformerTrajectoryDecoder(
+        self.trajectory_decoder = TrajectoryDecoder(
             embed_dim=dim,
             num_modes=num_modes,
             future_steps=future_steps,
             out_channels=4,
-            internal_seed=True,
         )
 
-        self.sup_trajectory_decoder = TransformerTrajectoryDecoder(
-            embed_dim=dim,
-            num_modes=num_modes,
-            future_steps=future_steps,
-            out_channels=4,
-            internal_seed=True,
-        )
+        self.masker = TransformerMasker(in_dim=dim, num_heads=16, mask_rate=0.5, dropout=0.1)
+        self.adv_embedding_offset = AdversarialEmbeddingPerturbator(dim=dim)
 
-        self.adv_masker = TransformerMasker(in_dim=dim, num_heads=16, mask_rate=0.5, dropout=0.1)
-
-        self.inf_query_generator = TransformerEncoderLayer(dim=dim, num_heads=num_heads, drop_path=0.2)
-        self.learned_seed = nn.Parameter(torch.randn(1, 1, dim))
+        # self.inf_query_generator = TransformerEncoderLayer(dim=dim, num_heads=num_heads, drop_path=0.2)
+        # self.learned_seed = nn.Parameter(torch.randn(1, 1, dim))
 
         self.apply(self._init_weights)
 
@@ -134,39 +127,45 @@ class PlanningModel(TorchModuleWrapper):
         
         # x: [batch, n_elem, n_dim]. n_elem is not a fixed number, it depends on the number of agents and polygons in the scene
 
-        for blk in self.encoder_blocks:
-            x = blk(x, key_padding_mask=key_padding_mask)
-        x = self.norm(x)
-
-        masks_sup = self.adv_masker(x.detach(), key_padding_mask) # [batch, n_elem]
+        masks_sup = self.masker(x.detach(), key_padding_mask) # [batch, n_elem]
+        offsets = self.adv_embedding_offset(x.detach()) # [batch, n_elem, n_dim]
 
         # note that the masks here are not bool, but float. it should be multiplied with the tensors to approximate the masked tensor
         # during training. 
         # reference: https://arxiv.org/pdf/1802.07814.pdf
 
-        # but since we need to explicitly separate the causal factors, we need to convert the masks to bool
-        
-        sup_mask = key_padding_mask | masks_sup.bool() # TODO: positive-negative needs to be checked. Now assume 1 would be masked
-        inf_mask = key_padding_mask | (~masks_sup.bool())
+        x_perturbed = x + offsets * masks_sup.unsqueeze(-1)
 
-        trajectory_sup, probability_sup = self.sup_trajectory_decoder(torch.zeros((bs, 1, self.dim)).to('cuda'), x, sup_mask)
-        inf_query = self.inf_query_generator(x, key_padding_mask=inf_mask)[:,0]
-        trajectory_full, probability_full = self.full_trajectory_decoder(inf_query, x, sup_mask)
+        # forward pass of the unperturbed inputs
+        for blk in self.encoder_blocks:
+            x = blk(x, key_padding_mask=key_padding_mask)
+        x = self.norm(x)
 
-        # TODO: add adversarial query generator
-        
+        # forward pass of the unperturbed inputs
+        x_p = x_perturbed
+        for blk in self.encoder_blocks:
+            x_p = blk(x_p, key_padding_mask=key_padding_mask)
+        x_p = self.norm(x_p)
+
+
+        predictions_full, probability_full = self.trajectory_decoder(x[:, 0:A], x[:, A:], agent_key_padding, polygon_key_padding)
+        predictions_sup, probability_sup = self.trajectory_decoder(x_p[:, 0:A], x_p[:, A:], agent_key_padding, polygon_key_padding)
+        trajectory_full = predictions_full[:,:,0]
+        trajectory_sup = predictions_sup[:,:,0]
 
         out = {
-            "trajectory_sup": trajectory_sup,
-            "probability_sup": probability_sup,
-            "trajectory_full": trajectory_full,
-            "probability_full": probability_full,
+            "trajectory_per": trajectory_sup,
+            "probability_per": probability_sup,
+            "predictions_per": predictions_sup,
+            "trajectory": trajectory_full,
+            "probability": probability_full,
+            "predictions": predictions_full,
         }
 
         if not self.training:
             best_mode = probability_full.argmax(dim=-1)
             output_trajectory = trajectory_full[torch.arange(bs), best_mode]
-            angle = torch.atan2(output_trajectory[..., 3], output_trajectory[..., 2])
+            angle = torch.atan2(output_trajectory[..., 6], output_trajectory[..., 5])
             out["output_trajectory"] = torch.cat(
                 [output_trajectory[..., :2], angle.unsqueeze(-1)], dim=-1
             )

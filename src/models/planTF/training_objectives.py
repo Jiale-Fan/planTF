@@ -186,11 +186,12 @@ def nll_loss_multimodes_joint(pred, gt_agents_and_ego, mode_probs, agents_masks,
 
     # compute ADE/FDE loss - L2 norms with between best predictions and GT.
     if use_FDEADE_aux_loss:
-        adefde_loss = l2_loss_fde_joint(pred, gt_agents_and_ego, agents_masks, predict_yaw)
+        adefde_loss, var_ade_fde = l2_loss_fde_joint(pred, gt_agents_and_ego, agents_masks, predict_yaw)
     else:
         adefde_loss = torch.tensor(0.0).to(gt_agents_and_ego.device)
+        var_ade_fde = torch.tensor(0.0).to(gt_agents_and_ego.device)
 
-    return loss, kl_loss, post_entropy, adefde_loss
+    return loss, kl_loss, post_entropy, adefde_loss, var_ade_fde
 
 
 def l2_loss_fde_joint(pred, data, agent_masks, predict_yaw):
@@ -202,11 +203,17 @@ def l2_loss_fde_joint(pred, data, agent_masks, predict_yaw):
     yaw_loss = torch.tensor(0.0).to(pred.device)
     if predict_yaw:
         # yaw_loss = torch.norm(pred[:, :, :, :, 5:].transpose(1, 2) - data[:, :, :, 2:].unsqueeze(0), dim=-1).mean(2)  # across time
-        yaw_loss = torch.norm(angle_diff(pred[:, :, :, :, 5:].transpose(1, 2), data[:, :, :, 2:].unsqueeze(0)), dim=-1).mean(2)  # across time
+        angle = torch.atan2(pred[..., 6], pred[..., 5])
+        yaw_loss = torch.norm(angle_diff(angle.transpose(1, 2).unsqueeze(-1), data[:, :, :, 2:].unsqueeze(0)), dim=-1).mean(2)  # across time
         yaw_loss = (yaw_loss).mean(-1).transpose(0, 1)
 
-    loss, min_inds = (fde_loss + ade_loss + yaw_loss).min(dim=1)
-    return 100.0 * loss.mean()
+    losses = fde_loss + ade_loss + yaw_loss # [B, num_modes]
+    
+    loss_batch = (fde_loss + ade_loss).sum(-1)
+    var = torch.var(loss_batch, dim=-1)
+
+    loss, min_inds = losses.min(dim=1)
+    return 100.0 * loss.mean(), var
 
 def angle_diff(a, b):
     # unused

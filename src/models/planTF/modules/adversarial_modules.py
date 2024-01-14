@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from ..layers.transformer_encoder_layer import TransformerEncoderLayer
+from ..layers.common_layers import build_mlp
 
 
 class TransformerMasker(nn.Module):
@@ -32,3 +33,23 @@ class TransformerMasker(nn.Module):
             mask = F.gumbel_softmax(mask_prob, dim=1, tau=0.5, hard=False)
             z = torch.maximum(mask,z)
         return z
+    
+
+
+class AdversarialEmbeddingPerturbator(nn.Module):
+    def __init__(self, dim) -> None:
+        super(AdversarialEmbeddingPerturbator, self).__init__()
+        self.layers = build_mlp(dim, [4*dim, 4*dim, dim])
+    def forward(self, x):
+        """
+        x : [B, N, dim]
+        return : [B, N, dim]
+        
+        """
+        y = self.layers(x)
+        # clip the 2-norm of the perturbation to be less than the mean 2-norm of the embedding
+        mean_embed_norm = torch.mean(torch.norm(x, dim=-1))
+        y_ori_scale = torch.norm(y, dim=-1, keepdim=True)
+        y_clamped_scale = torch.clamp(y_ori_scale, max=mean_embed_norm)
+        y_clamped = y / y_ori_scale * y_clamped_scale
+        return y_clamped

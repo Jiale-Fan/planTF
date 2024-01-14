@@ -18,12 +18,14 @@ from src.custom_training.custom_training_builder import (
     build_training_engine,
     update_config_for_training,
 )
+import torch
 
 logging.getLogger("numba").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # If set, use the env. variable to overwrite the default dataset and experiment paths
 set_default_path()
+torch.autograd.set_detect_anomaly(True)
 
 
 @hydra.main(config_path="./config", config_name="planTF_training")
