@@ -47,5 +47,5 @@ def global_trajectory_to_states(
 
 def load_checkpoint(checkpoint: str):
     ckpt = torch.load(checkpoint, map_location=torch.device("cpu"))
-    state_dict = {k.replace("model.", ""): v for k, v in ckpt["state_dict"].items()}
+    state_dict = {k.replace("model.", "", 1): v for k, v in ckpt["state_dict"].items()}
     return state_dict
