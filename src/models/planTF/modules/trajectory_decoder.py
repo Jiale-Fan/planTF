@@ -5,18 +5,6 @@ import torch.nn.functional as F
 from torch.nn import TransformerDecoderLayer
 import numpy as np
 
-def generate_tgt_masks(ori_mask, num_modes, num_heads):
-    B = ori_mask.shape[0]
-    tgt_mask = ori_mask.unsqueeze(-1) | ori_mask.unsqueeze(-2)
-    tgt_mask = tgt_mask.unsqueeze(1).repeat(1,num_modes*num_heads,1,1).view(B*num_modes*num_heads, -1, tgt_mask.shape[-1])
-    return tgt_mask
-
-def generate_memory_masks(agent_mask, map_mask, num_modes, num_heads):
-    B = agent_mask.shape[0]
-    memory_mask = agent_mask.unsqueeze(-1) | map_mask.unsqueeze(-2)
-    memory_mask = memory_mask.unsqueeze(1).repeat(1,num_heads*num_modes,1,1).view(B*num_heads*num_modes, -1, memory_mask.shape[-1])
-    return memory_mask
-
 class TrajectoryDecoder(nn.Module):
     def __init__(self, embed_dim, num_modes, future_steps, out_channels, num_heads=8, dropout=0.1) -> None:
         super().__init__()
@@ -59,13 +47,15 @@ class TrajectoryDecoder(nn.Module):
 
         B, A = agent_emb.shape[:2]
         modal_specific_agent_emb = self.learned_query[None,:,None,:]+agent_emb[:,None,:,:] # [B, num_modes, ego+agents, embed_dim]
-        modal_specific_agent_emb = modal_specific_agent_emb.view(-1, A, self.embed_dim)
+        modal_specific_agent_emb = modal_specific_agent_emb.view(-1, A, self.embed_dim) # [B*num_modes, ego+agents, embed_dim]
+        agent_mask_tf = agent_mask.unsqueeze(1).repeat(1, self.num_modes, 1).view(-1, agent_mask.shape[-1]) # [B*num_modes, ego+agents]
 
         memory_map_emb = map_emb.unsqueeze(1).repeat(1, self.num_modes, 1, 1).view(-1, map_emb.shape[-2], map_emb.shape[-1])
+        map_mask_tf = map_mask.unsqueeze(1).repeat(1, self.num_modes, 1).view(-1, map_mask.shape[-1])
 
         x = self.transformer_decoder(tgt=modal_specific_agent_emb, memory=memory_map_emb,
-                                      tgt_mask=generate_tgt_masks(agent_mask, self.num_modes, self.num_heads), 
-                                      memory_mask=generate_memory_masks(agent_mask, map_mask, self.num_modes, self.num_heads))
+                                      tgt_key_padding_mask=agent_mask_tf, 
+                                      memory_key_padding_mask=map_mask_tf)
         x = x.view(B, self.num_modes, -1, self.embed_dim) # [B, num_modes, ego+agents, embed_dim]
 
         predictions = self.output_model(x) # [B, num_modes, ego+agents, 6]
