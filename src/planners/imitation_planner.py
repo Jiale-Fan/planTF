@@ -55,7 +55,7 @@ class ImitationPlanner(AbstractPlanner):
         self._initialization: Optional[PlannerInitialization] = None
 
         self._future_horizon = 8.0
-        self._step_interval = 0.1
+        self._step_interval = 0.5
 
         self._replan_interval = replan_interval
         self._last_plan_elapsed_step = replan_interval  # force plan at first step
