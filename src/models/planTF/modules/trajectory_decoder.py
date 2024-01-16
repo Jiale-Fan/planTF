@@ -36,7 +36,6 @@ class TrajectoryDecoder(nn.Module):
 
         self.output_model = OutputModel(d_k=self.embed_dim, predict_yaw=True)
 
-        self.mode_map_attn = nn.MultiheadAttention(self.embed_dim, num_heads=self.num_heads, dropout=self.dropout, batch_first=True)
         self.prob_decoder = nn.MultiheadAttention(self.embed_dim, num_heads=self.num_heads, dropout=self.dropout, batch_first=True)
 
         self.prob_predictor = init_(nn.Linear(self.embed_dim, 1))
@@ -48,27 +47,25 @@ class TrajectoryDecoder(nn.Module):
 
         B, A = agent_emb.shape[:2]
         modal_specific_agent_emb = self.learned_query[None,:,:,None,:]+agent_emb[:,None,None,:,:] # [B, num_modes, future_steps, ego+agents, embed_dim]
-        modal_specific_agent_emb = modal_specific_agent_emb.view(-1, A, self.embed_dim)
+        modal_specific_agent_emb = modal_specific_agent_emb.permute(0,1,3,2,4).reshape(-1, self.future_steps, self.embed_dim) # [B*num_modes*(ego+agents), future_steps, embed_dim]
 
-        memory_map_emb = map_emb.unsqueeze(1).repeat(1, self.num_modes*self.future_steps, 1, 1).view(-1, map_emb.shape[-2], map_emb.shape[-1])
+        memory_map_emb = map_emb.unsqueeze(1).repeat(1, self.num_modes*A, 1, 1).view(-1, map_emb.shape[-2], map_emb.shape[-1]) # [B*num_modes*(ego+agents), map_size, embed_dim]
 
-        agent_mask_tf = agent_mask.unsqueeze(1).repeat(1, self.num_modes*self.future_steps, 1).view(-1, agent_mask.shape[-1]) # [B*num_modes, ego+agents]
-        map_mask_tf = map_mask.unsqueeze(1).repeat(1, self.num_modes*self.future_steps, 1).view(-1, map_mask.shape[-1])
+        # if there reports an error, add adjusted masks
+        x = self.transformer_decoder(tgt=modal_specific_agent_emb, memory=memory_map_emb)
 
-        x = self.transformer_decoder(tgt=modal_specific_agent_emb, memory=memory_map_emb,
-                                      tgt_key_padding_mask=agent_mask_tf, 
-                                      memory_key_padding_mask=map_mask_tf)
         x = x.view(B, self.num_modes, self.future_steps, -1, self.embed_dim).permute(0,1,3,2,4) # [B, num_modes, self.future_steps, ego+agents, embed_dim]
 
         predictions = self.output_model(x) # [B, num_modes, ego+agents, self.future_steps, 6]
 
         P = self.learned_query_prob.unsqueeze(0).repeat(B, 1, 1)
 
-        mode_params_emb = self.prob_decoder(query=P, key=agent_emb,
-                                            value=agent_emb, key_padding_mask=agent_mask)[0] # TODO: add valid masks
-        mode_params_emb = self.mode_map_attn(query=mode_params_emb, key=map_emb, value=map_emb,
-                                                key_padding_mask=map_mask
-                                                )[0] + mode_params_emb
+        cont = torch.concat([agent_emb, map_emb], dim=1)
+        cont_mask = torch.concat([agent_mask, map_mask], dim=1)
+
+        mode_params_emb = self.prob_decoder(query=P, key=cont,
+                                            value=cont, key_padding_mask=cont_mask)[0]
+
         mode_probs = self.prob_predictor(mode_params_emb).squeeze(-1)
         mode_probs = F.softmax(mode_probs, dim=-1)
 
