@@ -78,7 +78,7 @@ class PlanningModel(TorchModuleWrapper):
             out_channels=4,
         )
 
-        self.masker = TransformerMasker(in_dim=dim, num_heads=16, mask_rate=0.5, dropout=0.1)
+        self.masker = TransformerMasker(in_dim=dim, num_heads=16, mask_rate=0.7, dropout=0.1)
         self.adv_embedding_offset = AdversarialEmbeddingPerturbator(dim=dim)
 
         # self.inf_query_generator = TransformerEncoderLayer(dim=dim, num_heads=num_heads, drop_path=0.2)

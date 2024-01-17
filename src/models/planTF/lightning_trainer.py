@@ -34,6 +34,7 @@ class LightningTrainer(pl.LightningModule):
         weight_decay,
         epochs,
         warmup_epochs,
+        pretraining_epochs=6,
     ) -> None:
         super().__init__()
         self.save_hyperparameters(ignore=["model"])
@@ -47,6 +48,7 @@ class LightningTrainer(pl.LightningModule):
         self.automatic_optimization = False
 
         self.optimize_term_switch = False
+        self.pretraining_epochs = pretraining_epochs
 
 
     def on_fit_start(self) -> None:
@@ -189,21 +191,22 @@ class LightningTrainer(pl.LightningModule):
 
         opts = self.optimizers()
 
-        if self.optimize_term_switch:
+        if self.current_epoch >=self.pretraining_epochs:
+            if self.optimize_term_switch:
 
-            # update the perturbator
-            opts[2].zero_grad()
-            self.manual_backward(-losses["loss_per"], retain_graph=True)
-            opts[2].step()
+                # update the perturbator
+                opts[2].zero_grad()
+                self.manual_backward(-losses["loss_per"], retain_graph=True)
+                opts[2].step()
 
-        else:
+            else:
 
-            # update the masker 
-            opts[1].zero_grad()
-            self.manual_backward(losses["loss_per"]+losses["var_per"], retain_graph=True) # TODO: add variance loss
-            opts[1].step()
+                # update the masker 
+                opts[1].zero_grad()
+                self.manual_backward(losses["loss_per"]+losses["var_per"], retain_graph=True) # TODO: add variance loss
+                opts[1].step()
 
-        self.optimize_term_switch = not self.optimize_term_switch
+            self.optimize_term_switch = not self.optimize_term_switch
 
         # update the main model
         opts[0].zero_grad()
