@@ -35,6 +35,7 @@ class LightningTrainer(pl.LightningModule):
         epochs,
         warmup_epochs,
         pretraining_epochs=6,
+        masker_var_weight=1.0
     ) -> None:
         super().__init__()
         self.save_hyperparameters(ignore=["model"])
@@ -49,6 +50,7 @@ class LightningTrainer(pl.LightningModule):
 
         self.optimize_term_switch = False
         self.pretraining_epochs = pretraining_epochs
+        self.masker_var_weight = masker_var_weight
 
 
     def on_fit_start(self) -> None:
@@ -79,50 +81,62 @@ class LightningTrainer(pl.LightningModule):
         self._log_step(losses["loss"], losses, metrics, prefix)
 
         return losses["loss"]
+    
+    def _plantf_loss(self, targets, trajectory, probability, prediction, valid_mask ):
+        ego_target_pos, ego_target_heading = targets[:, 0, :, :2], targets[:, 0, :, 2]
+        ego_target = torch.cat(
+            [
+                ego_target_pos,
+                torch.stack(
+                    [ego_target_heading.cos(), ego_target_heading.sin()], dim=-1
+                ),
+            ],
+            dim=-1,
+        )
+        agent_target, agent_mask = targets[:, 1:], valid_mask[:, 1:]
+
+        ade = torch.norm(trajectory[..., :2] - ego_target[:, None, :, :2], dim=-1)
+        best_mode = torch.argmin(ade.sum(-1), dim=-1)
+        best_traj = trajectory[torch.arange(trajectory.shape[0]), best_mode]
+        ego_reg_loss_batch = F.smooth_l1_loss(best_traj, ego_target, reduction="none").mean((-2,-1))
+        ego_reg_loss = ego_reg_loss_batch.mean()
+        ego_reg_loss_var = ego_reg_loss_batch.var()
+        ego_cls_loss = F.cross_entropy(probability, best_mode.detach())
+
+        agent_reg_loss = F.smooth_l1_loss(
+            prediction[agent_mask], agent_target[agent_mask][:, :2]
+        )
+
+        total_loss = ego_cls_loss + ego_reg_loss + agent_reg_loss
+
+        return total_loss, ego_reg_loss_var
+
 
     def _compute_objectives(self, res, data) -> Dict[str, torch.Tensor]:
         probability_full, trajectory_full, predictions_full = (
             res["probability"], # [batch, num_modes, num_agents, time_steps, 5]
             res["trajectory"],
-            res["predictions"],
+            res["prediction"],
         )
 
         probability_per, trajectory_per, predictions_per = (
             res["probability_per"], # [batch, num_modes, num_agents, time_steps, 5]
             res["trajectory_per"],
-            res["predictions_per"],
+            res["prediction_per"],
         )
 
         targets = data["agent"]["target"]
         valid_mask = data["agent"]["valid_mask"][..., -targets.shape[-2]:]
 
-        nll_loss_full, kl_loss_full, post_entropy_full, adefde_loss_full, var_full = nll_loss_multimodes_joint(predictions_full.permute(1,3,0,2,4), targets.permute(0,2,1,3), probability_full, valid_mask.permute(0,2,1),
-                                        entropy_weight=40.0,
-                                        kl_weight=20.0,
-                                        use_FDEADE_aux_loss=True,
-                                        predict_yaw=True)
-        
-        nll_loss_per, kl_loss_per, post_entropy_per, adefde_loss_per, var_per = nll_loss_multimodes_joint(predictions_per.permute(1,3,0,2,4), targets.permute(0,2,1,3), probability_per, valid_mask.permute(0,2,1),
-                                        entropy_weight=40.0,
-                                        kl_weight=20.0,
-                                        use_FDEADE_aux_loss=True,
-                                        predict_yaw=True)
-        
-        #  nll_loss_per, kl_loss_per, post_entropy_per, adefde_loss_per, var_per = nll_loss_multimodes_joint(trajectory_sup.unsqueeze(2).permute(1,3,0,2,4), targets[:, 0:1].permute(0,2,1,3), probability_sup, valid_mask.permute(0,2,1),
-        #                                 entropy_weight=40.0,
-        #                                 kl_weight=20.0,
-        #                                 use_FDEADE_aux_loss=True,
-        #                                 predict_yaw=True)
-        
-
-        loss_per = nll_loss_per + adefde_loss_per + kl_loss_per
-        loss_full = nll_loss_full + adefde_loss_full + kl_loss_full
+        loss_full, var_full = self._plantf_loss(targets, trajectory_full, probability_full, predictions_full, valid_mask)
+        loss_per, var_per = self._plantf_loss(targets, trajectory_per, probability_per, predictions_per, valid_mask)
 
         return {
             "loss": loss_full, # this term named exactly as "loss" is used in the log_step function
             "loss_per": loss_per,
             "loss_full": loss_full,
             "var_per": var_per,
+            "var_full": var_full,
         }
 
     def _compute_metrics(self, output, data, prefix) -> Dict[str, torch.Tensor]:
@@ -192,21 +206,11 @@ class LightningTrainer(pl.LightningModule):
         opts = self.optimizers()
 
         if self.current_epoch >=self.pretraining_epochs:
-            if self.optimize_term_switch:
-
-                # update the perturbator
-                opts[2].zero_grad()
-                self.manual_backward(-losses["loss_per"], retain_graph=True)
-                opts[2].step()
-
-            else:
-
-                # update the masker 
-                opts[1].zero_grad()
-                self.manual_backward(losses["loss_per"]+losses["var_per"], retain_graph=True) # TODO: add variance loss
-                opts[1].step()
-
-            self.optimize_term_switch = not self.optimize_term_switch
+        # if True:
+            # update the masker 
+            opts[1].zero_grad()
+            self.manual_backward(losses["loss_per"]+self.masker_var_weight*losses["var_per"], retain_graph=True) # TODO: add variance loss
+            opts[1].step()
 
         # update the main model
         opts[0].zero_grad()
@@ -287,9 +291,9 @@ class LightningTrainer(pl.LightningModule):
                 )
 
 
-                # exclude adv_masker and sup_trajectory_decoder from the main optimizer
-                if "adv_masker" in full_param_name or "sup_trajectory_decoder" in full_param_name:
-                    continue
+                # # exclude adv_masker and sup_trajectory_decoder from the main optimizer
+                # if "adv_masker" in full_param_name or "sup_trajectory_decoder" in full_param_name:
+                #     continue
 
                 if "bias" in param_name:
                     no_decay.add(full_param_name)
@@ -310,43 +314,80 @@ class LightningTrainer(pl.LightningModule):
         # assert len(inter_params) == 0
         # assert len(param_dict.keys() - union_params) == 0
 
-        optim_groups = [
-            {
-                "params": [
+        decay_params = [
                     param_dict[param_name] for param_name in sorted(list(decay))
-                ],
+                ]
+        
+        no_decay_params = [
+                    param_dict[param_name] for param_name in sorted(list(no_decay))
+                ]
+
+        optim_groups_full = [
+            {
+                "params": decay_params,
                 "weight_decay": self.weight_decay,
             },
             {
-                "params": [
-                    param_dict[param_name] for param_name in sorted(list(no_decay))
-                ],
+                "params": no_decay_params,
                 "weight_decay": 0.0,
             },
         ]
 
         # Get optimizer
         optimizer_loss_final = torch.optim.AdamW(
-            optim_groups, lr=self.lr, weight_decay=self.weight_decay
+            optim_groups_full, lr=self.lr, weight_decay=self.weight_decay
         )
 
         # Get lr_scheduler
         scheduler_loss_final = self.get_lr_scheduler(optimizer_loss_final)
 
+        decay_params_per = []
+        for param_name in sorted(list(decay)):
+            if self.if_deputy_optimizer_param_name(param_name):
+                decay_params_per.append(param_dict[param_name])
+        no_decay_params_per = []
+        for param_name in sorted(list(no_decay)):
+            if self.if_deputy_optimizer_param_name(param_name):
+                no_decay_params_per.append(param_dict[param_name])
+
+        optim_groups_per = [
+            {
+                "params": decay_params_per,
+                "weight_decay": self.weight_decay,
+            },
+            {
+                "params": no_decay_params_per,
+                "weight_decay": 0.0,
+            },
+        ]
+
+
         optimizer_masker = torch.optim.AdamW(
-            self.model.masker.parameters(), lr=self.lr, weight_decay=self.weight_decay
+            optim_groups_per
+             , lr=self.lr, weight_decay=self.weight_decay
         )
 
-        optimizer_adv_perturbator = torch.optim.AdamW(
-            self.model.adv_embedding_offset.parameters(), lr=self.lr, weight_decay=self.weight_decay
-        )
+        # optimizer_adv_perturbator = torch.optim.AdamW(
+        #     self.model.adv_embedding_offset.parameters(), lr=self.lr, weight_decay=self.weight_decay
+        # )
 
-        return [optimizer_loss_final, optimizer_masker, optimizer_adv_perturbator], [scheduler_loss_final]
+        return [optimizer_loss_final, optimizer_masker], [scheduler_loss_final]
         # return {
         #     'optimizer': [optimizer_loss_final, optimizer_adv_masker, optimizer_sup_decoder],
         #     'lr_scheduler': scheduler_loss_final,
         #     # 'gradient_clip_val': 3.0,  # Adjust this value to the desired gradient clipping value
         # }
+    
+    
+    def if_deputy_optimizer_param_name(self, param_name):
+        # if "noise_distributor" in param_name or "encoder_blocks_latter" in param_name or "trajectory_decoder" in param_name or "agent_predictor" in param_name:
+        #     return True
+        # else:
+        #     return False
+        if "noise_distributor" in param_name:
+            return True
+        else:
+            return False
     
     def get_lr_scheduler(self, optimizer):
         return WarmupCosLR(
