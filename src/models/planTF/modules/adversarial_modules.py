@@ -6,6 +6,59 @@ from ..layers.transformer_encoder_layer import TransformerEncoderLayer
 from ..layers.common_layers import build_mlp
 
 
+import torch
+import torch.nn as nn
+
+class LearnableNoiseModule(nn.Module):
+    """
+    This module aims to generate stochastic noise from a learnable parameterized Gaussian distribution.
+    Reference: arXiv:2308.00566
+    """
+    def __init__(self, sigma: int=0.25, dim: int=128):
+        super(LearnableNoiseModule, self).__init__()
+        self.sigma = sigma
+        self.A = nn.Linear(dim, dim*dim, bias=False)
+        self.b = nn.Parameter(torch.randn(dim))
+
+    def forward(self, context, pos_emb):
+        '''
+        context: [batch_size, length, dim]
+        pos_emb: [batch_size, length, dim]
+        '''
+        # cov = self.sigma * self.A @ self.A.t()
+        noise = torch.randn_like(context) @ self.A
+        context_scaled = pos_emb @ self.A + self.b
+        out = context_scaled + noise + pos_emb
+        return out
+    
+
+
+
+# class LearnableNoiseModule(nn.Module):
+#     """
+#     This module aims to generate stochastic noise from a learnable parameterized Gaussian distribution.
+#     Reference: arXiv:2308.00566
+#     """
+#     def __init__(self, sigma: int=0.25, dim: int=128):
+#         super(LearnableNoiseModule, self).__init__()
+#         self.sigma = sigma
+#         self.dim = dim
+#         self.A_net = nn.Linear(dim, dim*dim, bias=False)
+#         self.b = nn.Parameter(torch.randn(dim))
+
+#     def forward(self, context, pos_emb):
+#         '''
+#         context: [batch_size, length, dim]
+#         pos_emb: [batch_size, length, dim]
+#         '''
+#         # cov = self.sigma * self.A @ self.A.t()
+#         A = self.A_net(pos_emb).view(-1, self.dim*self.dim)
+#         noise = torch.matmal(torch.randn_like(context), A)
+#         context_scaled = context @ self.A + self.b
+#         out = context_scaled + noise + pos_emb
+#         return out
+
+
 class TransformerMasker(nn.Module):
     def __init__(self, in_dim, num_heads=16, mask_rate=0.5, dropout=0.1):
         super(TransformerMasker, self).__init__()

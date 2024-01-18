@@ -69,7 +69,8 @@ class PlanningModel(TorchModuleWrapper):
             for dp in [x.item() for x in torch.linspace(0, drop_path, encoder_depth)]
         )
 
-        self.norm = nn.LayerNorm(dim)
+        self.norm_init = nn.LayerNorm(dim, elementwise_affine=False)
+        self.norm_enc = nn.LayerNorm(dim)
 
         self.trajectory_decoder = TrajectoryDecoder(
             embed_dim=dim,
