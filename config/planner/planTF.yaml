@@ -19,9 +19,9 @@ imitation_planner:
     num_heads: 8
     num_modes: 6
     # state_dropout: 0.75
-    use_ego_history: false
+    use_ego_history: true
     state_attn_encoder: true
-    plot: true
+    # plot: true
 
     feature_builder:
       _target_: src.feature_builders.nuplan_feature_builder.NuplanFeatureBuilder
