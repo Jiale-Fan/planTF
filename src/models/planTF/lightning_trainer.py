@@ -98,7 +98,7 @@ class LightningTrainer(pl.LightningModule):
             prediction[agent_mask], agent_target[agent_mask][:, :2]
         )
 
-        loss = ego_reg_loss + ego_cls_loss + agent_reg_loss
+        loss = ego_reg_loss + ego_cls_loss # + agent_reg_loss
 
         return {
             "loss": loss,
