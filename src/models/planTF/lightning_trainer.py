@@ -248,7 +248,7 @@ class LightningTrainer(pl.LightningModule):
         #     self.optimize_term_switch = not self.optimize_term_switch
             if self.optimize_term_switch:
                 opts[0].zero_grad()
-                self.manual_backward(losses["blending_loss"]) # TODO
+                self.manual_backward(-losses["blending_loss"]) # TODO
                 opts[0].step()
             else:
                 opts[1].zero_grad()
