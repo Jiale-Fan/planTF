@@ -205,17 +205,26 @@ class LightningTrainer(pl.LightningModule):
 
         opts = self.optimizers()
 
-        if self.current_epoch >=self.pretraining_epochs:
-        # if True:
-            # update the masker 
-            opts[1].zero_grad()
-            self.manual_backward(losses["loss_per"]+self.masker_var_weight*losses["var_per"], retain_graph=True) # TODO: add variance loss
-            opts[1].step()
-
+        if self.current_epoch < self.pretraining_epochs:
         # update the main model
-        opts[0].zero_grad()
-        self.manual_backward(losses["loss_full"])
-        opts[0].step()
+            opts[0].zero_grad()
+            self.manual_backward(losses["loss_full"])
+            opts[0].step()
+            
+        else:
+        # if True:
+            if self.optimize_term_switch:
+                # update the perturbed pass 
+                opts[1].zero_grad()
+                # self.manual_backward(losses["loss_per"]+self.masker_var_weight*losses["var_per"], retain_graph=True)
+                self.manual_backward(losses["loss_per"], retain_graph=True) # TODO: add variance loss
+                opts[1].step()
+            else: 
+                # update the main model
+                opts[0].zero_grad()
+                self.manual_backward(losses["loss_full"])
+                opts[0].step()
+            self.optimize_term_switch = not self.optimize_term_switch
 
         metrics = self._compute_metrics(res, features["feature"].data, prefix)
         self._log_step(losses["loss"], losses, metrics, prefix) # TODO: write train step and optimizer configuration
@@ -380,14 +389,14 @@ class LightningTrainer(pl.LightningModule):
     
     
     def if_deputy_optimizer_param_name(self, param_name):
-        # if "noise_distributor" in param_name or "encoder_blocks_latter" in param_name or "trajectory_decoder" in param_name or "agent_predictor" in param_name:
-        #     return True
-        # else:
-        #     return False
-        if "noise_distributor" in param_name:
+        if "noise_distributor" in param_name or "encoder_blocks_latter" in param_name or "trajectory_decoder" in param_name or "agent_predictor" in param_name:
             return True
         else:
             return False
+        # if "noise_distributor" in param_name:
+        #     return True
+        # else:
+        #     return False
     
     def get_lr_scheduler(self, optimizer):
         return WarmupCosLR(

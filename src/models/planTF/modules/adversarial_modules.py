@@ -9,28 +9,56 @@ from ..layers.common_layers import build_mlp
 import torch
 import torch.nn as nn
 
-class LearnableNoiseModule(nn.Module):
-    """
-    This module aims to generate stochastic noise from a learnable parameterized Gaussian distribution.
-    Reference: arXiv:2308.00566
-    """
-    def __init__(self, sigma: int=0.25, dim: int=128):
-        super(LearnableNoiseModule, self).__init__()
-        self.sigma = sigma
-        self.A = nn.Linear(dim, dim*dim, bias=False)
-        # self.b = nn.Parameter(torch.randn(dim))
+# class LearnableNoiseModule(nn.Module):
+#     """
+#     This module aims to generate stochastic noise from a learnable parameterized Gaussian distribution.
+#     Reference: arXiv:2308.00566
+#     """
+#     def __init__(self, sigma: int=0.25, dim: int=128):
+#         super(LearnableNoiseModule, self).__init__()
+#         self.sigma = sigma
+#         self.A = nn.Linear(dim, dim*dim, bias=False)
+#         # self.b = nn.Parameter(torch.randn(dim))
 
-    def forward(self, context, pos_emb):
-        '''
-        context: [batch_size, length, dim]
-        pos_emb: [batch_size, length, dim]
-        '''
-        # cov = self.sigma * self.A @ self.A.t()
-        noise = torch.randn_like(context) @ self.A
-        context_scaled = pos_emb @ self.A + self.b
-        out = context_scaled + noise + pos_emb
-        return out
+#     def forward(self, context, pos_emb):
+#         '''
+#         context: [batch_size, length, dim]
+#         pos_emb: [batch_size, length, dim]
+#         '''
+#         # cov = self.sigma * self.A @ self.A.t()
+#         noise = torch.randn_like(context) @ self.A
+#         context_scaled = pos_emb @ self.A + self.b
+#         out = context_scaled + noise + pos_emb
+#         return out
     
+
+# class NoiseDistributor(nn.Module):
+#     def __init__(self, in_dim, num_heads=16, mask_rate=0.5, dropout=0.1):
+#         super(NoiseDistributor, self).__init__()
+#         self.in_dim = in_dim
+#         self.mask_rate= mask_rate
+        
+#         self.tf = TransformerEncoderLayer(dim=in_dim, num_heads=num_heads, drop_path=dropout)
+#         self.linear = nn.Linear(in_dim, 1, bias=False)
+
+#         # self.bn = nn.BatchNorm1d(num_classes, affine=False)
+
+#     def forward(self, f, key_padding_mask):
+#         '''
+#             input:
+#                 f: [B, N, in_dim]
+#                 key_padding_mask: [B, N]
+#             output:
+#                     z: [B, N]
+#         '''
+#         masks_inv = ~key_padding_mask
+#         total_masked_num = self.mask_rate*key_padding_mask.sum(-1, keepdim=True)
+        
+#         d = self.linear(self.tf(f, key_padding_mask=key_padding_mask)).squeeze(-1) # [B, N]
+#         distri = torch.exp(d)*masks_inv / torch.sum(torch.exp(d)*masks_inv, dim=-1, keepdim=True) # [B, N]
+#         distri = distri * total_masked_num
+#         return distri
+
 
 class NoiseDistributor(nn.Module):
     def __init__(self, in_dim, num_heads=16, mask_rate=0.5, dropout=0.1):
@@ -51,13 +79,14 @@ class NoiseDistributor(nn.Module):
             output:
                     z: [B, N]
         '''
-        masks_inv = ~key_padding_mask
-        total_masked_num = self.mask_rate*key_padding_mask.sum(-1, keepdim=True)
-        
-        d = self.linear(self.tf(f, key_padding_mask=key_padding_mask)).squeeze(-1) # [B, N]
-        distri = torch.exp(d)*masks_inv / torch.sum(torch.exp(d)*masks_inv, dim=-1, keepdim=True) # [B, N]
-        distri = distri * total_masked_num
-        return distri
+        mask_prob = self.linear(self.tf(f, key_padding_mask=key_padding_mask)).squeeze(-1)
+        z = torch.zeros_like(mask_prob)
+        k = int(mask_prob.shape[1]*self.mask_rate)
+
+        for _ in range(k):
+            mask = F.gumbel_softmax(mask_prob, dim=1, tau=0.5, hard=False)
+            z = torch.maximum(mask,z)
+        return z
 
 # class LearnableNoiseModule(nn.Module):
 #     """
