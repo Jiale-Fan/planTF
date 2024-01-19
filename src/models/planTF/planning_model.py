@@ -14,6 +14,7 @@ from .modules.agent_encoder import AgentEncoder
 from .modules.map_encoder import MapEncoder
 from .modules.trajectory_decoder import TFTrajectoryDecoder, MlpTrajectoryDecoder
 from .modules.adversarial_modules import NoiseDistributor
+from .discriminator import Discriminator
 
 # no meaning, required by nuplan
 trajectory_sampling = TrajectorySampling(num_poses=8, time_horizon=8, interval_length=1)
@@ -94,6 +95,18 @@ class PlanningModel(TorchModuleWrapper):
         # self.learned_seed = nn.Parameter(torch.randn(1, 1, dim))
 
         self.agent_predictor = build_mlp(dim, [dim * 2, future_steps * 2], norm="ln")
+
+        self.discriminator = Discriminator(
+            dim=dim,
+            state_channel=state_channel,
+            polygon_channel=polygon_channel,
+            history_channel=history_channel,
+            total_steps=history_steps+future_steps,
+            history_step=history_steps,
+            encoder_depth=encoder_depth//2,
+            drop_path=drop_path,
+            num_heads=num_heads,
+        )
 
         self.apply(self._init_weights)
 
@@ -209,6 +222,18 @@ class PlanningModel(TorchModuleWrapper):
             out["output_trajectory"] = torch.cat(
                 [output_trajectory[..., :2], angle.unsqueeze(-1)], dim=-1
             )
+        else:
+            out["disc_prob_gt"] = self.discriminator(data)
+
+            ego_target = data["agent"]["target"][:, 0] # [B, timestep, states_dim]
+            errors = (ego_target[:, None, :, :2] - trajectory_full[:, :, :, :2]).norm(dim=-1).sum(dim=(-1))
+            closest_mode = errors.argmin(dim=-1)
+            best_trajectory = trajectory_full[torch.arange(bs), closest_mode]
+
+            data_plan = data.copy()
+            data_plan["agent"]["position"][:, 0, self.history_steps:] = best_trajectory[..., :2]
+            data_plan["agent"]["heading"][:, 0, self.history_steps:] = torch.atan2(best_trajectory[..., 3], best_trajectory[..., 2])
+            out["disc_prob_plan"] = self.discriminator(data_plan)
 
         return out
     

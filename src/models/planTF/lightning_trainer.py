@@ -23,6 +23,7 @@ from src.models.planTF.pairing_matrix import proj_name_to_mat
 
 from torch.nn.utils.rnn import pad_sequence
 
+
 logger = logging.getLogger(__name__)
 
 
@@ -51,6 +52,8 @@ class LightningTrainer(pl.LightningModule):
         self.optimize_term_switch = False
         self.pretraining_epochs = pretraining_epochs
         self.masker_var_weight = masker_var_weight
+
+        self.discri_criterion = nn.BCELoss()
 
 
     def on_fit_start(self) -> None:
@@ -120,7 +123,7 @@ class LightningTrainer(pl.LightningModule):
         )
 
         probability_per, trajectory_per, predictions_per = (
-            res["probability_per"], # [batch, num_modes, num_agents, time_steps, 5]
+            res["probability_per"], 
             res["trajectory_per"],
             res["prediction_per"],
         )
@@ -131,12 +134,23 @@ class LightningTrainer(pl.LightningModule):
         loss_full, var_full = self._plantf_loss(targets, trajectory_full, probability_full, predictions_full, valid_mask)
         loss_per, var_per = self._plantf_loss(targets, trajectory_per, probability_per, predictions_per, valid_mask)
 
+        if self.training:
+            disc_prob_gt, disc_prob_plan = res["disc_prob_gt"], res["disc_prob_plan"]
+            discriminator_loss = self.discri_criterion(disc_prob_plan, torch.ones_like(disc_prob_plan)) + \
+                            self.discri_criterion(disc_prob_gt, torch.zeros_like(disc_prob_gt))
+            blending_loss = self.discri_criterion(disc_prob_plan, torch.ones_like(disc_prob_plan))
+        else:
+            discriminator_loss = 0
+            blending_loss = 0
+
         return {
             "loss": loss_full, # this term named exactly as "loss" is used in the log_step function
             "loss_per": loss_per,
             "loss_full": loss_full,
             "var_per": var_per,
             "var_full": var_full,
+            "discriminator_loss": discriminator_loss,
+            "blending_loss": blending_loss
         }
 
     def _compute_metrics(self, output, data, prefix) -> Dict[str, torch.Tensor]:
@@ -207,24 +221,41 @@ class LightningTrainer(pl.LightningModule):
 
         if self.current_epoch < self.pretraining_epochs:
         # update the main model
-            opts[0].zero_grad()
-            self.manual_backward(losses["loss_full"])
-            opts[0].step()
+            if self.optimize_term_switch: 
+                opts[0].zero_grad()
+                self.manual_backward(losses["loss_full"], retain_graph=True)
+                opts[0].step()
+            else:
+                opts[1].zero_grad()
+                self.manual_backward(losses["discriminator_loss"])
+                opts[1].step()
+            self.optimize_term_switch = not self.optimize_term_switch
+
             
         else:
         # if True:
+        #     if self.optimize_term_switch:
+        #         # update the perturbed pass 
+        #         opts[1].zero_grad()
+        #         # self.manual_backward(losses["loss_per"]+self.masker_var_weight*losses["var_per"], retain_graph=True)
+        #         self.manual_backward(losses["loss_per"], retain_graph=True) # TODO: add variance loss
+        #         opts[1].step()
+        #     else: 
+        #         # update the main model
+        #         opts[0].zero_grad()
+        #         self.manual_backward(losses["loss_full"])
+        #         opts[0].step()
+        #     self.optimize_term_switch = not self.optimize_term_switch
             if self.optimize_term_switch:
-                # update the perturbed pass 
-                opts[1].zero_grad()
-                # self.manual_backward(losses["loss_per"]+self.masker_var_weight*losses["var_per"], retain_graph=True)
-                self.manual_backward(losses["loss_per"], retain_graph=True) # TODO: add variance loss
-                opts[1].step()
-            else: 
-                # update the main model
                 opts[0].zero_grad()
-                self.manual_backward(losses["loss_full"])
+                self.manual_backward(losses["blending_loss"]) # TODO
                 opts[0].step()
+            else:
+                opts[1].zero_grad()
+                self.manual_backward(losses["discriminator_loss"])
+                opts[1].step()
             self.optimize_term_switch = not self.optimize_term_switch
+
 
         metrics = self._compute_metrics(res, features["feature"].data, prefix)
         self._log_step(losses["loss"], losses, metrics, prefix) # TODO: write train step and optimizer configuration
@@ -316,28 +347,35 @@ class LightningTrainer(pl.LightningModule):
         param_dict = {
             param_name: param for param_name, param in self.named_parameters()
         }
-        inter_params = decay & no_decay
-        union_params = decay | no_decay
+        # inter_params = decay & no_decay
+        # union_params = decay | no_decay
 
         ## Following assertions are not true because we now use multiple optimizers
         # assert len(inter_params) == 0
         # assert len(param_dict.keys() - union_params) == 0
 
-        decay_params = [
-                    param_dict[param_name] for param_name in sorted(list(decay))
-                ]
-        
-        no_decay_params = [
-                    param_dict[param_name] for param_name in sorted(list(no_decay))
-                ]
+        decay_params_per = []
+        decay_params_full = []
+        for param_name in sorted(list(decay)):
+            if self.if_deputy_optimizer_param_name(param_name):
+                decay_params_per.append(param_dict[param_name])
+            else:
+                decay_params_full.append(param_dict[param_name])
+        no_decay_params_per = []
+        no_decay_params_full = []
+        for param_name in sorted(list(no_decay)):
+            if self.if_deputy_optimizer_param_name(param_name):
+                no_decay_params_per.append(param_dict[param_name])
+            else:
+                no_decay_params_full.append(param_dict[param_name])
 
         optim_groups_full = [
             {
-                "params": decay_params,
+                "params": decay_params_full,
                 "weight_decay": self.weight_decay,
             },
             {
-                "params": no_decay_params,
+                "params": no_decay_params_full,
                 "weight_decay": 0.0,
             },
         ]
@@ -348,16 +386,7 @@ class LightningTrainer(pl.LightningModule):
         )
 
         # Get lr_scheduler
-        scheduler_loss_final = self.get_lr_scheduler(optimizer_loss_final)
-
-        decay_params_per = []
-        for param_name in sorted(list(decay)):
-            if self.if_deputy_optimizer_param_name(param_name):
-                decay_params_per.append(param_dict[param_name])
-        no_decay_params_per = []
-        for param_name in sorted(list(no_decay)):
-            if self.if_deputy_optimizer_param_name(param_name):
-                no_decay_params_per.append(param_dict[param_name])
+        scheduler_loss_final = self.get_lr_scheduler(optimizer_loss_final) # TODO: add lr scheduler to another optimizer
 
         optim_groups_per = [
             {
@@ -389,14 +418,14 @@ class LightningTrainer(pl.LightningModule):
     
     
     def if_deputy_optimizer_param_name(self, param_name):
-        if "noise_distributor" in param_name or "encoder_blocks_latter" in param_name or "trajectory_decoder" in param_name or "agent_predictor" in param_name:
-            return True
-        else:
-            return False
-        # if "noise_distributor" in param_name:
+        # if "noise_distributor" in param_name or "encoder_blocks_latter" in param_name or "trajectory_decoder" in param_name or "agent_predictor" in param_name:
         #     return True
         # else:
         #     return False
+        if "discriminator" in param_name:
+            return True
+        else:
+            return False
     
     def get_lr_scheduler(self, optimizer):
         return WarmupCosLR(
