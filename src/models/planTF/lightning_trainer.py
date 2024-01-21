@@ -35,7 +35,7 @@ class LightningTrainer(pl.LightningModule):
         epochs,
         warmup_epochs,
         pretraining_epochs=6,
-        masker_var_weight=1.0
+        masker_var_weight=5.0
     ) -> None:
         super().__init__()
         self.save_hyperparameters(ignore=["model"])
@@ -217,7 +217,7 @@ class LightningTrainer(pl.LightningModule):
                 # update the perturbed pass 
                 opts[1].zero_grad()
                 # self.manual_backward(losses["loss_per"]+self.masker_var_weight*losses["var_per"], retain_graph=True)
-                self.manual_backward(losses["loss_per"], retain_graph=True) # TODO: add variance loss
+                self.manual_backward(losses["loss_per"]+self.masker_var_weight*losses["var_per"], retain_graph=True) # TODO: add variance loss
                 opts[1].step()
             else: 
                 # update the main model
