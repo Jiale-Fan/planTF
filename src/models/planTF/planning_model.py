@@ -36,6 +36,7 @@ class PlanningModel(TorchModuleWrapper):
         state_attn_encoder=True,
         state_dropout=0.75,
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
+        mask_rate=0.3,
     ) -> None:
         super().__init__(
             feature_builders=[feature_builder],
@@ -47,6 +48,7 @@ class PlanningModel(TorchModuleWrapper):
         self.history_steps = history_steps
         self.future_steps = future_steps
         self.encoder_depth = encoder_depth
+        self.mask_rate = mask_rate
 
         self.pos_emb = build_mlp(4, [dim] * 2)
         self.agent_encoder = AgentEncoder(
@@ -75,10 +77,17 @@ class PlanningModel(TorchModuleWrapper):
             for dp in [x.item() for x in torch.linspace(drop_path/2, drop_path, encoder_depth//2)]
         )
 
-        self.norm_before_perturb = nn.LayerNorm(dim, elementwise_affine=False)
+        # self.norm_before_perturb = nn.LayerNorm(dim, elementwise_affine=False)
         self.norm_enc = nn.LayerNorm(dim)
 
-        self.trajectory_decoder = MlpTrajectoryDecoder(
+        self.trajectory_decoder_full = MlpTrajectoryDecoder(
+            embed_dim=dim,
+            num_modes=num_modes,
+            future_steps=future_steps,
+            out_channels=4,
+        )
+
+        self.trajectory_decoder_per = MlpTrajectoryDecoder(
             embed_dim=dim,
             num_modes=num_modes,
             future_steps=future_steps,
@@ -86,6 +95,7 @@ class PlanningModel(TorchModuleWrapper):
         )
 
         self.element_type_embedding = nn.Embedding(7, dim)
+        self.masked_embedding_offset = nn.Parameter(torch.randn(1, 1, dim).to('cuda'), requires_grad=True)
 
         self.noise_distributor = NoiseDistributor(in_dim=dim, num_heads=16, mask_rate=0.7, dropout=0.1)
         # self.adv_embedding_offset = AdversarialEmbeddingPerturbator(dim=dim)
@@ -157,41 +167,33 @@ class PlanningModel(TorchModuleWrapper):
         x_polygon = self.map_encoder(data)
 
         x = torch.cat([x_agent, x_polygon], dim=1) + pos_embed 
-        x_p = x.detach().clone()
-        
+        x_initial = x.clone().detach()        
         # x: [batch, n_elem, n_dim]. n_elem is not a fixed number, it depends on the number of agents and polygons in the scene
 
         # forward pass of the unperturbed inputs
         for blk in self.encoder_blocks_prior:
             x = blk(x, key_padding_mask=key_padding_mask)
-        x_p = x
         for blk in self.encoder_blocks_latter:
             x = blk(x, key_padding_mask=key_padding_mask)
         x = self.norm_enc(x)
 
-        # perturb the inputs
-        x_p = self.norm_before_perturb(x_p)
-        masks_sup = self.noise_distributor(x_p.detach().clone(), key_padding_mask)
-        offsets = torch.randn_like(x_p)
-        x_p = x_p + offsets * masks_sup.unsqueeze(-1)
-        # feed to latter encoders
+        # generate masked version of the inputs
+        M = self.get_random_masks(key_padding_mask)
+        x_p = (x_initial*(~M)+ (pos_embed+self.masked_embedding_offset)*M)*(~key_padding_mask.unsqueeze(-1)) 
+
+        for blk in self.encoder_blocks_prior:
+            x_p = blk(x_p, key_padding_mask=key_padding_mask)
         for blk in self.encoder_blocks_latter:
-            x = blk(x, key_padding_mask=key_padding_mask)
+            x_p = blk(x_p, key_padding_mask=key_padding_mask)
         x_p = self.norm_enc(x_p)
 
+        rec_loss = torch.norm((x.detach().clone()-x_p)*M*(~key_padding_mask.unsqueeze(-1)), dim=-1).mean()
 
-        # predictions_full, probability_full = self.trajectory_decoder(x[:, 0:A], x[:, A:], agent_key_padding, polygon_key_padding)
-        # predictions_sup, probability_sup = self.trajectory_decoder(x_p[:, 0:A], x_p[:, A:], agent_key_padding, polygon_key_padding)
-        # trajectory_full = predictions_full[:,:,0]
-        # trajectory_sup = predictions_sup[:,:,0]
-
-        trajectory_full, probability_full = self.trajectory_decoder(x[:, 0])
+        trajectory_full, probability_full = self.trajectory_decoder_full(x[:, 0])
         prediction_full = self.agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2)
 
-        trajectory_per, probability_per = self.trajectory_decoder(x_p[:, 0])
+        trajectory_per, probability_per = self.trajectory_decoder_per(x_p[:, 0])
         prediction_per = self.agent_predictor(x_p[:, 1:A]).view(bs, -1, self.future_steps, 2)
-
-
 
         out = {
             "trajectory_per": trajectory_per,
@@ -200,6 +202,7 @@ class PlanningModel(TorchModuleWrapper):
             "trajectory": trajectory_full,
             "probability": probability_full,
             "prediction": prediction_full,
+            "rec_loss": rec_loss,
         }
 
         if not self.training:
@@ -219,3 +222,18 @@ class PlanningModel(TorchModuleWrapper):
     #             modules.append((module_name, module))
 
     #     return modules
+
+    def get_random_masks(self, key_padding_mask):
+        '''
+            input: key_padding_mask: [batch, n_elem]
+            output: mask: [batch, n_elem] with mask_rate of its valid elements set to 1
+        '''
+        padding_masks = ~key_padding_mask
+        valid_num = padding_masks.sum(dim=-1)
+        unmasked_num = (valid_num * self.mask_rate).to(torch.long)
+        randperms = torch.stack([torch.randperm(padding_masks.shape[-1])+1 for _ in range(padding_masks.shape[0])], dim=0)
+        randperms = randperms.to(padding_masks.device)*padding_masks
+        sorted_randperms = torch.sort(randperms, dim=-1, descending=True)[0]
+        indices_split = torch.stack([sorted_randperms[i,unmasked_num[i]] for i in range(padding_masks.shape[0])])
+        mask = randperms > indices_split.unsqueeze(-1)
+        return mask.unsqueeze(-1)
