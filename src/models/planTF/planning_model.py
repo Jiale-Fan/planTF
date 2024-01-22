@@ -77,6 +77,11 @@ class PlanningModel(TorchModuleWrapper):
             for dp in [x.item() for x in torch.linspace(drop_path/2, drop_path, encoder_depth//2)]
         )
 
+        self.reconstruct_blocks_latter = nn.ModuleList(
+            TransformerEncoderLayer(dim=dim, num_heads=num_heads, drop_path=dp)
+            for dp in [x.item() for x in torch.linspace(drop_path/2, drop_path, encoder_depth//2)]
+        )
+
         # self.norm_before_perturb = nn.LayerNorm(dim, elementwise_affine=False)
         self.norm_enc = nn.LayerNorm(dim)
 
@@ -87,12 +92,12 @@ class PlanningModel(TorchModuleWrapper):
             out_channels=4,
         )
 
-        self.trajectory_decoder_per = MlpTrajectoryDecoder(
-            embed_dim=dim,
-            num_modes=num_modes,
-            future_steps=future_steps,
-            out_channels=4,
-        )
+        # self.trajectory_decoder_per = MlpTrajectoryDecoder(
+        #     embed_dim=dim,
+        #     num_modes=num_modes,
+        #     future_steps=future_steps,
+        #     out_channels=4,
+        # )
 
         self.element_type_embedding = nn.Embedding(7, dim)
         self.masked_embedding_offset = nn.Parameter(torch.randn(1, 1, dim).to('cuda'), requires_grad=True)
@@ -183,22 +188,22 @@ class PlanningModel(TorchModuleWrapper):
 
         for blk in self.encoder_blocks_prior:
             x_p = blk(x_p, key_padding_mask=key_padding_mask)
-        for blk in self.encoder_blocks_latter:
+        for blk in self.reconstruct_blocks_latter:
             x_p = blk(x_p, key_padding_mask=key_padding_mask)
         x_p = self.norm_enc(x_p)
 
-        rec_loss = torch.norm((x.detach().clone()-x_p)*M*(~key_padding_mask.unsqueeze(-1)), dim=-1).mean()
+        rec_loss = torch.norm((x_initial-x_p)*M*(~key_padding_mask.unsqueeze(-1)), dim=-1).mean()
 
         trajectory_full, probability_full = self.trajectory_decoder_full(x[:, 0])
         prediction_full = self.agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2)
 
-        trajectory_per, probability_per = self.trajectory_decoder_per(x_p[:, 0])
-        prediction_per = self.agent_predictor(x_p[:, 1:A]).view(bs, -1, self.future_steps, 2)
+        # trajectory_per, probability_per = self.trajectory_decoder_per(x_p[:, 0])
+        # prediction_per = self.agent_predictor(x_p[:, 1:A]).view(bs, -1, self.future_steps, 2)
 
         out = {
-            "trajectory_per": trajectory_per,
-            "probability_per": probability_per,
-            "prediction_per": prediction_per,
+            # "trajectory_per": trajectory_per,
+            # "probability_per": probability_per,
+            # "prediction_per": prediction_per,
             "trajectory": trajectory_full,
             "probability": probability_full,
             "prediction": prediction_full,

@@ -34,7 +34,7 @@ class LightningTrainer(pl.LightningModule):
         weight_decay,
         epochs,
         warmup_epochs,
-        pretraining_epochs=6,
+        pretraining_epochs=10,
         masker_var_weight=1.0
     ) -> None:
         super().__init__()
@@ -119,23 +119,23 @@ class LightningTrainer(pl.LightningModule):
             res["prediction"],
         )
 
-        probability_per, trajectory_per, predictions_per = (
-            res["probability_per"], # [batch, num_modes, num_agents, time_steps, 5]
-            res["trajectory_per"],
-            res["prediction_per"],
-        )
+        # probability_per, trajectory_per, predictions_per = (
+        #     res["probability_per"], # [batch, num_modes, num_agents, time_steps, 5]
+        #     res["trajectory_per"],
+        #     res["prediction_per"],
+        # )
 
         targets = data["agent"]["target"]
         valid_mask = data["agent"]["valid_mask"][..., -targets.shape[-2]:]
 
         loss_full, var_full = self._plantf_loss(targets, trajectory_full, probability_full, predictions_full, valid_mask)
-        loss_per, var_per = self._plantf_loss(targets, trajectory_per, probability_per, predictions_per, valid_mask)
+        # loss_per, var_per = self._plantf_loss(targets, trajectory_per, probability_per, predictions_per, valid_mask)
 
         return {
             "loss": loss_full, # this term named exactly as "loss" is used in the log_step function
-            "loss_per": loss_per,
+            # "loss_per": loss_per,
             "loss_full": loss_full,
-            "var_per": var_per,
+            # "var_per": var_per,
             "var_full": var_full,
             "rec_loss": res["rec_loss"],
         }
@@ -206,27 +206,20 @@ class LightningTrainer(pl.LightningModule):
 
         opts = self.optimizers()
 
+
         if self.current_epoch < self.pretraining_epochs:
-        # update the main model
             opts[0].zero_grad()
-            self.manual_backward(losses["loss_full"])
+            self.manual_backward(losses["rec_loss"])
             opts[0].step()
-            
         else:
         # if True:
-            opts[1].zero_grad()
-            self.manual_backward(losses["loss_per"], retain_graph=True) # TODO: add variance loss
-            opts[1].step()
-            if self.current_epoch % 2 != 0:
-                opts[0].zero_grad()
-                self.manual_backward(losses["loss_full"])
-                opts[0].step()
-            else:
-                opts[0].zero_grad()
-                self.manual_backward(losses["rec_loss"])
-                opts[0].step()
-            # self.optimize_term_switch = not self.optimize_term_switch
-
+            opts[0].zero_grad()
+            self.manual_backward(losses["loss_full"]) # TODO: add variance loss
+            opts[0].step()
+            # opts[1].zero_grad()
+            # self.manual_backward(losses["loss_per"]) # TODO: add variance loss
+            # opts[1].step()
+            
         metrics = self._compute_metrics(res, features["feature"].data, prefix)
         self._log_step(losses["loss"], losses, metrics, prefix) # TODO: write train step and optimizer configuration
         
