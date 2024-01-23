@@ -284,5 +284,12 @@ class PlanningModel(TorchModuleWrapper):
         return mask
     
     def init_stage_two(self):
-        self.map_encoder_plan.load_state_dict(self.map_encoder_pred.state_dict())
+        # self.map_encoder_plan.load_state_dict(self.map_encoder_pred.state_dict())
+        
+        params_pred = self.map_encoder_pred.state_dict()
+        # params_plan = self.map_encoder_plan.state_dict()
+        detached = {}
+        for name, param in params_pred.items():
+            detached[name] = params_pred[name].detach().clone()
+        self.map_encoder_plan.load_state_dict(detached)
         pass

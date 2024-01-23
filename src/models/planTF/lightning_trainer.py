@@ -34,7 +34,7 @@ class LightningTrainer(pl.LightningModule):
         weight_decay,
         epochs,
         warmup_epochs,
-        pretraining_epochs=10,
+        pretraining_epochs=6,
         masker_var_weight=1.0
     ) -> None:
         super().__init__()
@@ -233,9 +233,9 @@ class LightningTrainer(pl.LightningModule):
             opt_main.step()
         else:
         # if True:
-            if not self.stage_two_init_flag:
-                self.model.init_stage_two()
-                self.stage_two_init_flag = True
+            # if not self.stage_two_init_flag:
+            #     self.model.init_stage_two()
+            #     self.stage_two_init_flag = True
             opt_main.zero_grad()
             self.manual_backward(losses["loss"]) # TODO: add variance loss
             opt_main.step()
