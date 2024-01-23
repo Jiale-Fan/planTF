@@ -29,14 +29,18 @@ class PlanningModel(TorchModuleWrapper):
         history_steps=21,
         future_steps=80,
         encoder_depth=4,
+        decoder_depth=4,
         drop_path=0.2,
         num_heads=8,
-        num_modes=6,
+        num_modes=1,
         use_ego_history=False,
         state_attn_encoder=True,
         state_dropout=0.75,
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
-        mask_rate=0.3,
+        mask_rate_t0=0.3,
+        mask_rate_tf=0.9,
+        num_keyframes=8,
+        out_channels=4,
     ) -> None:
         super().__init__(
             feature_builders=[feature_builder],
@@ -48,7 +52,10 @@ class PlanningModel(TorchModuleWrapper):
         self.history_steps = history_steps
         self.future_steps = future_steps
         self.encoder_depth = encoder_depth
-        self.mask_rate = mask_rate
+        self.mask_rate_t0 = mask_rate_t0
+        self.mask_rate_tf = mask_rate_tf
+        self.num_keyframes = num_keyframes
+        self.num_heads = num_heads
 
         self.pos_emb = build_mlp(4, [dim] * 2)
         self.agent_encoder = AgentEncoder(
@@ -62,53 +69,49 @@ class PlanningModel(TorchModuleWrapper):
             state_dropout=state_dropout,
         )
 
-        self.map_encoder = MapEncoder(
+        self.map_encoder_pred = MapEncoder(
             dim=dim,
             polygon_channel=polygon_channel,
         )
 
-        self.encoder_blocks_prior = nn.ModuleList(
-            TransformerEncoderLayer(dim=dim, num_heads=num_heads, drop_path=dp)
-            for dp in [x.item() for x in torch.linspace(0, drop_path/2, encoder_depth//2)]
+        self.map_encoder_plan = MapEncoder(
+            dim=dim,
+            polygon_channel=polygon_channel,
         )
 
-        self.encoder_blocks_latter = nn.ModuleList(
+        self.encoder_blocks_pred = nn.ModuleList(
             TransformerEncoderLayer(dim=dim, num_heads=num_heads, drop_path=dp)
-            for dp in [x.item() for x in torch.linspace(drop_path/2, drop_path, encoder_depth//2)]
+            for dp in [x.item() for x in torch.linspace(0, drop_path, encoder_depth)]
         )
 
-        self.reconstruct_blocks_latter = nn.ModuleList(
-            TransformerEncoderLayer(dim=dim, num_heads=num_heads, drop_path=dp)
-            for dp in [x.item() for x in torch.linspace(drop_path/2, drop_path, encoder_depth//2)]
+        self.decoder_blocks = nn.ModuleList(
+            nn.TransformerDecoderLayer(
+            d_model=dim,
+            nhead=num_heads,
+            dim_feedforward=2048,
+            dropout=dp,
+            activation="relu",
+            batch_first=True,
+        )
+            for dp in [x.item() for x in torch.linspace(0, drop_path, decoder_depth)]
         )
 
-        # self.norm_before_perturb = nn.LayerNorm(dim, elementwise_affine=False)
         self.norm_enc = nn.LayerNorm(dim)
+        self.norm_dec = nn.LayerNorm(dim)
 
         self.trajectory_decoder_full = MlpTrajectoryDecoder(
-            embed_dim=dim,
+            embed_dim=dim+num_keyframes*out_channels,
             num_modes=num_modes,
             future_steps=future_steps,
-            out_channels=4,
+            out_channels=out_channels,
         )
 
-        # self.trajectory_decoder_per = MlpTrajectoryDecoder(
-        #     embed_dim=dim,
-        #     num_modes=num_modes,
-        #     future_steps=future_steps,
-        #     out_channels=4,
-        # )
-
         self.element_type_embedding = nn.Embedding(7, dim)
-        self.masked_embedding_offset = nn.Parameter(torch.randn(1, 1, dim).to('cuda'), requires_grad=True)
-
-        self.noise_distributor = NoiseDistributor(in_dim=dim, num_heads=16, mask_rate=0.7, dropout=0.1)
-        # self.adv_embedding_offset = AdversarialEmbeddingPerturbator(dim=dim)
-
-        # self.inf_query_generator = TransformerEncoderLayer(dim=dim, num_heads=num_heads, drop_path=0.2)
-        # self.learned_seed = nn.Parameter(torch.randn(1, 1, dim))
+        self.keyframes_seed = nn.Parameter(torch.randn(1, num_keyframes, dim).to('cuda'), requires_grad=True)
 
         self.agent_predictor = build_mlp(dim, [dim * 2, future_steps * 2], norm="ln")
+        self.agent_context_mlp = build_mlp(dim*2, [dim], norm="ln")
+        self.keyframe_mlp = build_mlp(dim, [4], norm="ln")
 
         self.apply(self._init_weights)
 
@@ -126,93 +129,67 @@ class PlanningModel(TorchModuleWrapper):
         elif isinstance(m, nn.Embedding):
             nn.init.normal_(m.weight, mean=0.0, std=0.2)
 
-    def forward(self, data):
-        agent_pos = data["agent"]["position"][:, :, self.history_steps - 1]
-        agent_heading = data["agent"]["heading"][:, :, self.history_steps - 1]
-        agent_mask = data["agent"]["valid_mask"][:, :, : self.history_steps]
-        polygon_center = data["map"]["polygon_center"]
-        polygon_mask = data["map"]["valid_mask"]
-
-
-        agent_category = data["agent"]["category"] # 4 possible types
-        polygon_type = data["map"]["polygon_type"]+4 # 3 possible types
-
-        '''
-        self.interested_objects_types = [
-            TrackedObjectType.EGO,
-            TrackedObjectType.VEHICLE,
-            TrackedObjectType.PEDESTRIAN,
-            TrackedObjectType.BICYCLE,
-        ]
-        self.polygon_types = [
-            SemanticMapLayer.LANE,
-            SemanticMapLayer.LANE_CONNECTOR,
-            SemanticMapLayer.CROSSWALK,
-        ]
-        '''
-
-        # create pose embedding for each element
-        types = torch.cat([agent_category, polygon_type], dim=1).to(torch.long)
-        types_embedding = self.element_type_embedding(types)
-
-        bs, A = agent_pos.shape[0:2]
-
-        position = torch.cat([agent_pos, polygon_center[..., :2]], dim=1)
-        angle = torch.cat([agent_heading, polygon_center[..., 2]], dim=1)
-        pos = torch.cat(
-            [position, torch.stack([angle.cos(), angle.sin()], dim=-1)], dim=-1
-        )
-        pos_embed = self.pos_emb(pos) + types_embedding
-
-        agent_key_padding = ~(agent_mask.any(-1))
-        polygon_key_padding = ~(polygon_mask.any(-1))
-        key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding], dim=-1)
-
-        x_agent = self.agent_encoder(data)
-        x_polygon = self.map_encoder(data)
-
-        x = torch.cat([x_agent, x_polygon], dim=1) + pos_embed 
-        x_initial = x.clone().detach()        
+    def forward(self, data):     
+        # encode the information of the agents and the map separately without cross attention
+        x_agent, agent_key_padding = self.initial_agents_encoding(data)
+        x_map, map_key_padding = self.initial_map_encoding(self.map_encoder_pred, data, on_route_info=False)
+        bs, A = x_agent.shape[:2]
+        x = torch.cat([x_agent, x_map], dim=1) # [batch, n_elem, n_dim]
+        key_padding_mask = torch.cat([agent_key_padding, map_key_padding], dim=-1) # [batch, n_elem]
+        x_initial = x
         # x: [batch, n_elem, n_dim]. n_elem is not a fixed number, it depends on the number of agents and polygons in the scene
 
-        # forward pass of the unperturbed inputs
-        for blk in self.encoder_blocks_prior:
-            x = blk(x, key_padding_mask=key_padding_mask)
-        for blk in self.encoder_blocks_latter:
+        # prediction encoder: trained in pretraining stage
+        for blk in self.encoder_blocks_pred:
             x = blk(x, key_padding_mask=key_padding_mask)
         x = self.norm_enc(x)
 
-        # generate masked version of the inputs
-        M = self.get_random_masks(key_padding_mask)
-        x_p = (x_initial*(~M)+ (pos_embed+self.masked_embedding_offset)*M)*(~key_padding_mask.unsqueeze(-1)) 
+        prediction_full = self.agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2) # TODO: add ego?
 
-        for blk in self.encoder_blocks_prior:
-            x_p = blk(x_p, key_padding_mask=key_padding_mask)
-        for blk in self.reconstruct_blocks_latter:
-            x_p = blk(x_p, key_padding_mask=key_padding_mask)
-        x_p = self.norm_enc(x_p)
+        # concatenate the initial state to the context containing the prediction, take the elements corresponding to the agents
+        
+        concated = torch.cat([x_initial, x], dim=-1)[:, :A].detach().clone()
+        context_agt = self.agent_context_mlp(concated) # [batch, n_elem, n_dim] # TODO: whether exclude ego?
+        map_info, _ = self.initial_map_encoding(self.map_encoder_plan, data, on_route_info=True)
+        context = torch.cat([context_agt, map_info], dim=1) # [batch, n_elem, n_dim]
 
-        rec_loss = torch.norm((x_initial-x_p)*M*(~key_padding_mask.unsqueeze(-1)), dim=-1).mean()
+        queries = self.keyframes_seed.repeat(bs, 1, 1) # [batch, num_keyframes, n_dim]
+        tgt_mask = self.get_decoder_tgt_masks(bs) # [batch*head, keyframes, keyframes]
+        memory_mask = self.get_decoder_memory_masks(agent_key_padding, map_key_padding) # [batch*head, n_elem, 1, n_elem]
 
-        trajectory_full, probability_full = self.trajectory_decoder_full(x[:, 0])
-        prediction_full = self.agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2)
+        for blk in self.decoder_blocks:
+            queries = blk(tgt=queries, 
+                            memory=context,
+                            tgt_mask=tgt_mask,
+                            memory_mask=memory_mask,
+                            memory_key_padding_mask=key_padding_mask)
+        final_rep = self.norm_dec(queries) # [batch, keyframes, n_dim]
+        keyframes = self.keyframe_mlp(final_rep) # [batch, keyframes, 4]
 
-        # trajectory_per, probability_per = self.trajectory_decoder_per(x_p[:, 0])
-        # prediction_per = self.agent_predictor(x_p[:, 1:A]).view(bs, -1, self.future_steps, 2)
+        ego_emb_hist = x[:, 0] # [batch, n_dim]
+        ego_emb = torch.cat([ego_emb_hist, keyframes.view(bs, -1)], dim=-1) # [batch, dim+keyframes*4]
+        trajectory, probability = self.trajectory_decoder_full(ego_emb) # [batch, num_modes, future_steps, 4]
 
         out = {
             # "trajectory_per": trajectory_per,
             # "probability_per": probability_per,
             # "prediction_per": prediction_per,
-            "trajectory": trajectory_full,
-            "probability": probability_full,
+            "trajectory": trajectory,
+            "probability": probability,
             "prediction": prediction_full,
-            "rec_loss": rec_loss,
+            "keyframes": keyframes,
         }
 
-        if not self.training:
-            best_mode = probability_full.argmax(dim=-1)
-            output_trajectory = trajectory_full[torch.arange(bs), best_mode]
+        if self.training:
+            keyframes_gt = data["agent"]["target"][:, 0, ::10, :]
+            keyframes_gt_input = torch.cat([keyframes_gt[..., :-1], torch.cos(keyframes_gt[..., -1:]), torch.sin(keyframes_gt[..., -1:])], dim=-1)
+            ego_emb_hist = x[:, 0] # [batch, n_dim]
+            ego_emb = torch.cat([ego_emb_hist, keyframes_gt_input.view(bs, -1)], dim=-1) # [batch, dim+keyframes*4]
+            trajectory_ref_loss, _ = self.trajectory_decoder_full(ego_emb) # [batch, num_modes, future_steps, 4]
+             # TODO: change to single mode?
+            out["trajectory_ref_loss"] = trajectory_ref_loss.squeeze(1)
+        else:
+            output_trajectory = trajectory[:, 0]
             angle = torch.atan2(output_trajectory[..., 3], output_trajectory[..., 2])
             out["output_trajectory"] = torch.cat(
                 [output_trajectory[..., :2], angle.unsqueeze(-1)], dim=-1
@@ -227,18 +204,85 @@ class PlanningModel(TorchModuleWrapper):
     #             modules.append((module_name, module))
 
     #     return modules
+    def initial_agents_encoding(self, data):
+        '''
+            input: data: dictionary containing map and agent info
+                   on_route_info: bool indicating whether on_route info is used
+            output: x: [batch, n_elem, n_dim]
+                    key_padding_mask: [batch, n_elem] with 0 for valid elements and 1 for invalid elements
+        '''
+        agent_pos = data["agent"]["position"][:, :, self.history_steps - 1]
+        agent_heading = data["agent"]["heading"][:, :, self.history_steps - 1]
+        agent_mask = data["agent"]["valid_mask"][:, :, : self.history_steps]
+        agent_category = data["agent"]["category"].to(torch.long) # 4 possible types
 
-    def get_random_masks(self, key_padding_mask):
         '''
-            input: key_padding_mask: [batch, n_elem]
-            output: mask: [batch, n_elem] with mask_rate of its valid elements set to 1
+        self.interested_objects_types = [
+            TrackedObjectType.EGO,
+            TrackedObjectType.VEHICLE,
+            TrackedObjectType.PEDESTRIAN,
+            TrackedObjectType.BICYCLE,
+        ]
+        self.polygon_types = [
+            SemanticMapLayer.LANE,
+            SemanticMapLayer.LANE_CONNECTOR,
+            SemanticMapLayer.CROSSWALK,
+        ]
         '''
+        types_embedding = self.element_type_embedding(agent_category)
+
+        pos = torch.cat(
+            [agent_pos, torch.stack([agent_heading.cos(), agent_heading.sin()], dim=-1)], dim=-1
+        )
+        pos_embed = self.pos_emb(pos) + types_embedding
+        agent_key_padding = ~(agent_mask.any(-1))
+        x_agent = self.agent_encoder(data) + pos_embed
+        return x_agent, agent_key_padding
+    
+    def initial_map_encoding(self, map_encoder, data, on_route_info):
+
+        polygon_center = data["map"]["polygon_center"]
+        polygon_mask = data["map"]["valid_mask"]
+        polygon_type = data["map"]["polygon_type"].to(torch.long)+4
+
+        types_embedding = self.element_type_embedding(polygon_type)
+
+        pos = torch.cat(
+            [polygon_center[..., :2], torch.stack([polygon_center[..., 2].cos(), polygon_center[..., 2].sin()], dim=-1)], dim=-1
+        )
+        pos_embed = self.pos_emb(pos) + types_embedding
+        polygon_key_padding = ~(polygon_mask.any(-1))
+        x_polygon = map_encoder(data, on_route_info) + pos_embed
+        return x_polygon, polygon_key_padding
+
+
+    def get_decoder_tgt_masks(self, bs):
+        m = (torch.tril(torch.ones(self.num_keyframes, self.num_keyframes, device='cuda')) == 1).to(torch.bool).flip(dims=[-1])
+        # mask = (~m).repeat(bs*self.num_heads, 1, 1)
+        mask = (~m)
+        return mask
+    
+    def get_decoder_memory_masks(self, agent_key_padding, map_key_padding):
+        
+        batch_agent_mask = torch.stack([self.get_mask_slice(agent_key_padding, r) \
+                     for r in torch.linspace(self.mask_rate_t0, self.mask_rate_tf, self.num_keyframes)], dim=1)
+        batch_mask = torch.cat([batch_agent_mask, map_key_padding.unsqueeze(1).repeat(1,self.num_keyframes,1)], dim=-1)
+        batch_mask = batch_mask.unsqueeze(1).repeat(1, self.num_heads, 1, 1)
+        batch_mask = batch_mask.view(-1, batch_mask.shape[-2], batch_mask.shape[-1])
+        return batch_mask
+        
+    
+    def get_mask_slice(self, key_padding_mask, mask_rate):
         padding_masks = ~key_padding_mask
         valid_num = padding_masks.sum(dim=-1)
-        unmasked_num = (valid_num * self.mask_rate).to(torch.long)
+        unmasked_num = (valid_num * mask_rate).to(torch.long)
         randperms = torch.stack([torch.randperm(padding_masks.shape[-1])+1 for _ in range(padding_masks.shape[0])], dim=0)
         randperms = randperms.to(padding_masks.device)*padding_masks
         sorted_randperms = torch.sort(randperms, dim=-1, descending=True)[0]
         indices_split = torch.stack([sorted_randperms[i,unmasked_num[i]] for i in range(padding_masks.shape[0])])
         mask = randperms > indices_split.unsqueeze(-1)
-        return mask.unsqueeze(-1)
+        return mask
+    
+    def init_stage_two(self):
+        self.map_encoder_plan.load_state_dict(self.map_encoder_pred.state_dict())
+        pass

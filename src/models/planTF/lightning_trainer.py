@@ -51,6 +51,7 @@ class LightningTrainer(pl.LightningModule):
         self.optimize_term_switch = False
         self.pretraining_epochs = pretraining_epochs
         self.masker_var_weight = masker_var_weight
+        self.stage_two_init_flag = False
 
 
     def on_fit_start(self) -> None:
@@ -113,31 +114,49 @@ class LightningTrainer(pl.LightningModule):
 
 
     def _compute_objectives(self, res, data) -> Dict[str, torch.Tensor]:
-        probability_full, trajectory_full, predictions_full = (
-            res["probability"], # [batch, num_modes, num_agents, time_steps, 5]
+        trajectory, prediction, keyframes = (
             res["trajectory"],
             res["prediction"],
-        )
-
-        # probability_per, trajectory_per, predictions_per = (
-        #     res["probability_per"], # [batch, num_modes, num_agents, time_steps, 5]
-        #     res["trajectory_per"],
-        #     res["prediction_per"],
-        # )
+            res["keyframes"]
+        )        
 
         targets = data["agent"]["target"]
-        valid_mask = data["agent"]["valid_mask"][..., -targets.shape[-2]:]
+        valid_mask = data["agent"]["valid_mask"][:, :, -trajectory.shape[-2] :]
 
-        loss_full, var_full = self._plantf_loss(targets, trajectory_full, probability_full, predictions_full, valid_mask)
-        # loss_per, var_per = self._plantf_loss(targets, trajectory_per, probability_per, predictions_per, valid_mask)
+        ego_target_pos, ego_target_heading = targets[:, 0, :, :2], targets[:, 0, :, 2]
+        ego_target = torch.cat(
+            [
+                ego_target_pos,
+                torch.stack(
+                    [ego_target_heading.cos(), ego_target_heading.sin()], dim=-1
+                ),
+            ],
+            dim=-1,
+        )
+        agent_target, agent_mask = targets[:, 1:], valid_mask[:, 1:]
+
+        agent_reg_loss = F.smooth_l1_loss(
+            prediction[agent_mask], agent_target[agent_mask][:, :2]
+        )
+
+        ego_keyframes_gt = ego_target[:, ::10]
+        key_frames_loss = F.smooth_l1_loss(keyframes, ego_keyframes_gt, reduction="none").mean()
+
+        if self.training:
+            trajectory_ref_loss = res["trajectory_ref_loss"]
+            ego_reg_loss_batch = F.smooth_l1_loss(trajectory_ref_loss, ego_target, reduction="none").mean((-2,-1))
+            ego_reg_loss = ego_reg_loss_batch.mean()
+            # ego_reg_loss_var = ego_reg_loss_batch.var()
+        else:
+            ego_reg_loss = 0
+
+        total_loss = ego_reg_loss + agent_reg_loss + key_frames_loss
 
         return {
-            "loss": loss_full, # this term named exactly as "loss" is used in the log_step function
-            # "loss_per": loss_per,
-            "loss_full": loss_full,
-            # "var_per": var_per,
-            "var_full": var_full,
-            "rec_loss": res["rec_loss"],
+            "loss": total_loss,
+            "loss_keyframe": key_frames_loss,
+            "loss_pred": agent_reg_loss,
+            "loss_ref": ego_reg_loss,
         }
 
     def _compute_metrics(self, output, data, prefix) -> Dict[str, torch.Tensor]:
@@ -206,19 +225,20 @@ class LightningTrainer(pl.LightningModule):
 
         opts = self.optimizers()
 
+        opt_main = opts
 
         if self.current_epoch < self.pretraining_epochs:
-            opts[0].zero_grad()
-            self.manual_backward(losses["rec_loss"])
-            opts[0].step()
+            opt_main.zero_grad()
+            self.manual_backward(losses["loss_pred"]+losses["loss_ref"]) 
+            opt_main.step()
         else:
         # if True:
-            opts[0].zero_grad()
-            self.manual_backward(losses["loss_full"]) # TODO: add variance loss
-            opts[0].step()
-            # opts[1].zero_grad()
-            # self.manual_backward(losses["loss_per"]) # TODO: add variance loss
-            # opts[1].step()
+            if not self.stage_two_init_flag:
+                self.model.init_stage_two()
+                self.stage_two_init_flag = True
+            opt_main.zero_grad()
+            self.manual_backward(losses["loss"]) # TODO: add variance loss
+            opt_main.step()
             
         metrics = self._compute_metrics(res, features["feature"].data, prefix)
         self._log_step(losses["loss"], losses, metrics, prefix) # TODO: write train step and optimizer configuration
@@ -258,7 +278,7 @@ class LightningTrainer(pl.LightningModule):
         """
         return self.model(features)
 
-    def configure_optimizers(
+    def configure_optimizers_memo(
         self,
     ) -> Union[Optimizer, Dict[str, Union[Optimizer, _LRScheduler]]]:
         """
@@ -380,6 +400,88 @@ class LightningTrainer(pl.LightningModule):
         #     'lr_scheduler': scheduler_loss_final,
         #     # 'gradient_clip_val': 3.0,  # Adjust this value to the desired gradient clipping value
         # }
+    
+
+    def configure_optimizers(
+        self,
+    ) -> Union[Optimizer, Dict[str, Union[Optimizer, _LRScheduler]]]:
+        """
+        Configures the optimizers and learning schedules for the training.
+
+        :return: optimizer or dictionary of optimizers and schedules
+        """
+        decay = set()
+        no_decay = set()
+        whitelist_weight_modules = (
+            nn.Linear,
+            nn.Conv1d,
+            nn.Conv2d,
+            nn.Conv3d,
+            nn.MultiheadAttention,
+            nn.LSTM,
+            nn.GRU,
+        )
+        blacklist_weight_modules = (
+            nn.BatchNorm1d,
+            nn.BatchNorm2d,
+            nn.BatchNorm3d,
+            nn.SyncBatchNorm,
+            nn.LayerNorm,
+            nn.Embedding,
+        )
+        for module_name, module in self.named_modules():
+            for param_name, param in module.named_parameters():
+                full_param_name = (
+                    "%s.%s" % (module_name, param_name) if module_name else param_name
+                )
+                if "bias" in param_name:
+                    no_decay.add(full_param_name)
+                elif "weight" in param_name:
+                    if isinstance(module, whitelist_weight_modules):
+                        decay.add(full_param_name)
+                    elif isinstance(module, blacklist_weight_modules):
+                        no_decay.add(full_param_name)
+                elif not ("weight" in param_name or "bias" in param_name):
+                    no_decay.add(full_param_name)
+        param_dict = {
+            param_name: param for param_name, param in self.named_parameters()
+        }
+        inter_params = decay & no_decay
+        union_params = decay | no_decay
+        assert len(inter_params) == 0
+        assert len(param_dict.keys() - union_params) == 0
+
+        optim_groups = [
+            {
+                "params": [
+                    param_dict[param_name] for param_name in sorted(list(decay))
+                ],
+                "weight_decay": self.weight_decay,
+            },
+            {
+                "params": [
+                    param_dict[param_name] for param_name in sorted(list(no_decay))
+                ],
+                "weight_decay": 0.0,
+            },
+        ]
+
+        # Get optimizer
+        optimizer = torch.optim.AdamW(
+            optim_groups, lr=self.lr, weight_decay=self.weight_decay
+        )
+
+        # Get lr_scheduler
+        scheduler = WarmupCosLR(
+            optimizer=optimizer,
+            lr=self.lr,
+            min_lr=1e-6,
+            epochs=self.epochs,
+            warmup_epochs=self.warmup_epochs,
+        )
+
+        return [optimizer], [scheduler]
+
     
     
     def if_deputy_optimizer_param_name(self, param_name):
