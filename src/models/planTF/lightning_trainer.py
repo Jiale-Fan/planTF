@@ -133,13 +133,12 @@ class LightningTrainer(pl.LightningModule):
             ],
             dim=-1,
         )
-        agent_target, agent_mask = targets[:, 1:], valid_mask[:, 1:]
 
         agent_reg_loss = F.smooth_l1_loss(
-            prediction[agent_mask], agent_target[agent_mask][:, :2]
+            prediction[valid_mask], targets[valid_mask][:, :2]
         )
 
-        ego_keyframes_gt = ego_target[:, ::10]
+        ego_keyframes_gt = ego_target[:, self.model.keyframes_indices]
         key_frames_loss = F.smooth_l1_loss(keyframes, ego_keyframes_gt, reduction="none").mean()
 
         if self.training:
@@ -233,15 +232,19 @@ class LightningTrainer(pl.LightningModule):
             opt_main.step()
         else:
         # if True:
-            # if not self.stage_two_init_flag:
-            #     self.model.init_stage_two()
-            #     self.stage_two_init_flag = True
-            opt_main.zero_grad()
-            self.manual_backward(losses["loss"]) # TODO: add variance loss
-            opt_main.step()
+            if not self.stage_two_init_flag:
+                self.model.init_stage_two()
+                self.stage_two_init_flag = True
+                # the init of stage two copies the map encoder for prediction
+                # to the map encoder for planning. Since we've replaced the original
+                # parameters, we can not do backward in this step
+            else:
+                opt_main.zero_grad()
+                self.manual_backward(losses["loss"])
+                opt_main.step()
             
         metrics = self._compute_metrics(res, features["feature"].data, prefix)
-        self._log_step(losses["loss"], losses, metrics, prefix) # TODO: write train step and optimizer configuration
+        self._log_step(losses["loss"], losses, metrics, prefix) 
         
         return losses["loss"]
 

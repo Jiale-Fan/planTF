@@ -39,7 +39,7 @@ class PlanningModel(TorchModuleWrapper):
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
         mask_rate_t0=0.3,
         mask_rate_tf=0.9,
-        num_keyframes=8,
+        keyframes_interval = 5,
         out_channels=4,
     ) -> None:
         super().__init__(
@@ -54,7 +54,7 @@ class PlanningModel(TorchModuleWrapper):
         self.encoder_depth = encoder_depth
         self.mask_rate_t0 = mask_rate_t0
         self.mask_rate_tf = mask_rate_tf
-        self.num_keyframes = num_keyframes
+        self.keyframes_interval = keyframes_interval
         self.num_heads = num_heads
 
         self.pos_emb = build_mlp(4, [dim] * 2)
@@ -99,21 +99,28 @@ class PlanningModel(TorchModuleWrapper):
         self.norm_enc = nn.LayerNorm(dim)
         self.norm_dec = nn.LayerNorm(dim)
 
+        self.keyframes_indices = self.get_keyframe_indices().to('cuda')
+        self.num_keyframes = self.keyframes_indices.sum().to(torch.long).item()
+
         self.trajectory_decoder_full = MlpTrajectoryDecoder(
-            embed_dim=dim+num_keyframes*out_channels,
+            embed_dim=dim+self.num_keyframes*out_channels,
             num_modes=num_modes,
             future_steps=future_steps,
             out_channels=out_channels,
         )
 
         self.element_type_embedding = nn.Embedding(7, dim)
-        self.keyframes_seed = nn.Parameter(torch.randn(1, num_keyframes, dim).to('cuda'), requires_grad=True)
+
+
+        self.keyframes_seed = nn.Parameter(torch.randn(1, self.num_keyframes, dim).to('cuda'), requires_grad=True)
 
         self.agent_predictor = build_mlp(dim, [dim * 2, future_steps * 2], norm="ln")
         self.agent_context_mlp = build_mlp(dim*2, [dim], norm="ln")
         self.keyframe_mlp = build_mlp(dim, [4], norm="ln")
 
         self.apply(self._init_weights)
+
+        
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -144,12 +151,16 @@ class PlanningModel(TorchModuleWrapper):
             x = blk(x, key_padding_mask=key_padding_mask)
         x = self.norm_enc(x)
 
-        prediction_full = self.agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2) # TODO: add ego?
+        prediction_full = self.agent_predictor(x[:, :A]).view(bs, -1, self.future_steps, 2) 
 
         # concatenate the initial state to the context containing the prediction, take the elements corresponding to the agents
         
         concated = torch.cat([x_initial, x], dim=-1)[:, :A].detach().clone()
-        context_agt = self.agent_context_mlp(concated) # [batch, n_elem, n_dim] # TODO: whether exclude ego?
+        context_agt = self.agent_context_mlp(concated) # [batch, n_elem, n_dim]
+        # exclude the first element of the context, which is the ego
+        context_agt = context_agt[:, 1:]
+        agent_key_padding = agent_key_padding[:, 1:]
+        key_padding_mask = key_padding_mask[:, 1:]
         map_info, _ = self.initial_map_encoding(self.map_encoder_plan, data, on_route_info=True)
         context = torch.cat([context_agt, map_info], dim=1) # [batch, n_elem, n_dim]
 
@@ -177,6 +188,7 @@ class PlanningModel(TorchModuleWrapper):
         ego_emb_hist = x[:, 0] # [batch, n_dim]
         ego_emb = torch.cat([ego_emb_hist, keyframes.view(bs, -1)], dim=-1) # [batch, dim+keyframes*4]
         trajectory, probability = self.trajectory_decoder_full(ego_emb) # [batch, num_modes, future_steps, 4]
+        trajectory[:, :, self.keyframes_indices, :] = keyframes.unsqueeze(1) # [batch, num_modes, future_steps, 4]
 
         out = {
             # "trajectory_per": trajectory_per,
@@ -189,12 +201,11 @@ class PlanningModel(TorchModuleWrapper):
         }
 
         if self.training:
-            keyframes_gt = data["agent"]["target"][:, 0, ::10, :]
+            keyframes_gt = data["agent"]["target"][:, 0, self.keyframes_indices, :]
             keyframes_gt_input = torch.cat([keyframes_gt[..., :-1], torch.cos(keyframes_gt[..., -1:]), torch.sin(keyframes_gt[..., -1:])], dim=-1)
             ego_emb_hist = x[:, 0] # [batch, n_dim]
             ego_emb = torch.cat([ego_emb_hist, keyframes_gt_input.view(bs, -1)], dim=-1) # [batch, dim+keyframes*4]
             trajectory_ref_loss, _ = self.trajectory_decoder_full(ego_emb) # [batch, num_modes, future_steps, 4]
-             # TODO: change to single mode?
             out["trajectory_ref_loss"] = trajectory_ref_loss.squeeze(1)
         else:
             output_trajectory = trajectory[:, 0]
@@ -204,6 +215,15 @@ class PlanningModel(TorchModuleWrapper):
             )
 
         return out
+
+    def get_keyframe_indices(self):
+        '''
+            return: [future_steps] with keyframes being 1 and others being 0
+        '''
+        indices = torch.zeros(self.future_steps, device='cuda', dtype=torch.bool)
+        indices[::self.keyframes_interval] = 1
+        indices[:20] = 1 # TODO: to tune
+        return indices
     
     # def get_loss_final_modules(self):
     #     modules = []
