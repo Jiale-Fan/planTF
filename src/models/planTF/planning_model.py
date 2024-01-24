@@ -157,12 +157,20 @@ class PlanningModel(TorchModuleWrapper):
         tgt_mask = self.get_decoder_tgt_masks(bs) # [batch*head, keyframes, keyframes]
         memory_mask = self.get_decoder_memory_masks(agent_key_padding, map_key_padding) # [batch*head, n_elem, 1, n_elem]
 
-        for blk in self.decoder_blocks:
-            queries = blk(tgt=queries, 
-                            memory=context,
-                            tgt_mask=tgt_mask,
-                            memory_mask=memory_mask,
-                            memory_key_padding_mask=key_padding_mask)
+        if self.training:
+            for blk in self.decoder_blocks:
+                queries = blk(tgt=queries, 
+                                memory=context,
+                                tgt_mask=tgt_mask,
+                                memory_mask=memory_mask,
+                                memory_key_padding_mask=key_padding_mask)
+        else:
+            for blk in self.decoder_blocks:
+                queries = blk(tgt=queries, 
+                                memory=context,
+                                tgt_mask=tgt_mask,
+                                memory_mask=None,
+                                memory_key_padding_mask=key_padding_mask)
         final_rep = self.norm_dec(queries) # [batch, keyframes, n_dim]
         keyframes = self.keyframe_mlp(final_rep) # [batch, keyframes, 4]
 
