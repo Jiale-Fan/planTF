@@ -114,10 +114,11 @@ class LightningTrainer(pl.LightningModule):
 
 
     def _compute_objectives(self, res, data) -> Dict[str, torch.Tensor]:
-        trajectory, prediction, keyframes = (
+        trajectory, prediction, keyframes, probability = (
             res["trajectory"],
             res["prediction"],
-            res["keyframes"]
+            res["keyframes"],
+            res["probability"],
         )        
 
         targets = data["agent"]["target"]
@@ -145,6 +146,8 @@ class LightningTrainer(pl.LightningModule):
         ego_reg_loss_batch = F.smooth_l1_loss(best_keyframes, ego_keyframes_gt, reduction="none").mean((-2,-1))
         key_frames_loss = ego_reg_loss_batch.mean()
 
+        ego_cls_loss = F.cross_entropy(probability, best_mode.detach())
+
         if self.training:
             trajectory_ref_loss = res["trajectory_ref_loss"]
             ego_reg_loss_batch = F.smooth_l1_loss(trajectory_ref_loss, ego_target, reduction="none").mean((-2,-1))
@@ -153,7 +156,7 @@ class LightningTrainer(pl.LightningModule):
         else:
             ego_reg_loss = 0
 
-        total_loss = ego_reg_loss + agent_reg_loss + key_frames_loss
+        total_loss = ego_reg_loss + agent_reg_loss + key_frames_loss + ego_cls_loss
 
         return {
             "loss": total_loss,
