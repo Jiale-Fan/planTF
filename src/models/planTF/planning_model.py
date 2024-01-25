@@ -155,10 +155,10 @@ class PlanningModel(TorchModuleWrapper):
 
         # concatenate the initial state to the context containing the prediction, take the elements corresponding to the agents
         
-        concated = torch.cat([x_initial, x], dim=-1)[:, :A].detach().clone()
-        context_agt = self.agent_context_mlp(concated) # [batch, n_elem, n_dim]
+        # concated = torch.cat([x_initial, x], dim=-1)[:, :A].detach().clone()
+        # context_agt = self.agent_context_mlp(concated) # [batch, n_elem, n_dim]
         # exclude the first element of the context, which is the ego
-        context_agt = context_agt[:, 1:]
+        context_agt = x[:, 1:A].detach().clone()
         agent_key_padding = agent_key_padding[:, 1:]
         key_padding_mask = key_padding_mask[:, 1:]
         map_info, _ = self.initial_map_encoding(self.map_encoder_plan, data, on_route_info=True)
@@ -222,7 +222,8 @@ class PlanningModel(TorchModuleWrapper):
         '''
         indices = torch.zeros(self.future_steps, device='cuda', dtype=torch.bool)
         indices[::self.keyframes_interval] = 1
-        indices[:20] = 1 # TODO: to tune
+        # indices[0:20:2] = 1 # TODO: to tune
+        indices[:20] = 1
         return indices
     
     # def get_loss_final_modules(self):
