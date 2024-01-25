@@ -37,8 +37,8 @@ class PlanningModel(TorchModuleWrapper):
         state_attn_encoder=True,
         state_dropout=0.75,
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
-        mask_rate_t0=0.3,
-        mask_rate_tf=0.9,
+        mask_rate_t0=0.5,
+        mask_rate_tf=1.0,
         keyframes_interval = 5,
         out_channels=4,
     ) -> None:
@@ -155,10 +155,10 @@ class PlanningModel(TorchModuleWrapper):
 
         # concatenate the initial state to the context containing the prediction, take the elements corresponding to the agents
         
-        # concated = torch.cat([x_initial, x], dim=-1)[:, :A].detach().clone()
-        # context_agt = self.agent_context_mlp(concated) # [batch, n_elem, n_dim]
+        concated = torch.cat([x_initial, x], dim=-1)[:, :A].detach().clone()
+        context_agt = self.agent_context_mlp(concated) # [batch, n_elem, n_dim]
         # exclude the first element of the context, which is the ego
-        context_agt = x[:, 1:A].detach().clone()
+        context_agt = context_agt[:, 1:]
         agent_key_padding = agent_key_padding[:, 1:]
         key_padding_mask = key_padding_mask[:, 1:]
         map_info, _ = self.initial_map_encoding(self.map_encoder_plan, data, on_route_info=True)
@@ -221,7 +221,7 @@ class PlanningModel(TorchModuleWrapper):
             return: [future_steps] with keyframes being 1 and others being 0
         '''
         indices = torch.zeros(self.future_steps, device='cuda', dtype=torch.bool)
-        indices[::self.keyframes_interval] = 1
+        indices[self.keyframes_interval-1::self.keyframes_interval] = 1
         # indices[0:20:2] = 1 # TODO: to tune
         indices[:20] = 1
         return indices
@@ -292,9 +292,13 @@ class PlanningModel(TorchModuleWrapper):
         return mask
     
     def get_decoder_memory_masks(self, agent_key_padding, map_key_padding):
+
+        ls = torch.linspace(self.mask_rate_t0, self.mask_rate_tf, self.future_steps).to('cuda')
+        key_ls = ls*self.keyframes_indices
+        mask_rates = key_ls[key_ls>0]
         
         batch_agent_mask = torch.stack([self.get_mask_slice(agent_key_padding, r) \
-                     for r in torch.linspace(self.mask_rate_t0, self.mask_rate_tf, self.num_keyframes)], dim=1)
+                     for r in mask_rates], dim=1)
         batch_mask = torch.cat([batch_agent_mask, map_key_padding.unsqueeze(1).repeat(1,self.num_keyframes,1)], dim=-1)
         batch_mask = batch_mask.unsqueeze(1).repeat(1, self.num_heads, 1, 1)
         batch_mask = batch_mask.view(-1, batch_mask.shape[-2], batch_mask.shape[-1])
@@ -304,12 +308,12 @@ class PlanningModel(TorchModuleWrapper):
     def get_mask_slice(self, key_padding_mask, mask_rate):
         padding_masks = ~key_padding_mask
         valid_num = padding_masks.sum(dim=-1)
-        unmasked_num = (valid_num * mask_rate).to(torch.long)
+        unmasked_num = torch.floor((valid_num * mask_rate)).to(torch.long)
         randperms = torch.stack([torch.randperm(padding_masks.shape[-1])+1 for _ in range(padding_masks.shape[0])], dim=0)
         randperms = randperms.to(padding_masks.device)*padding_masks
         sorted_randperms = torch.sort(randperms, dim=-1, descending=True)[0]
-        indices_split = torch.stack([sorted_randperms[i,unmasked_num[i]] for i in range(padding_masks.shape[0])])
-        mask = randperms > indices_split.unsqueeze(-1)
+        indices_split = torch.stack([sorted_randperms[i,min(unmasked_num[i], sorted_randperms.shape[-1]-1)] for i in range(padding_masks.shape[0])])
+        mask = randperms >= indices_split.unsqueeze(-1)
         return mask
     
     def init_stage_two(self):

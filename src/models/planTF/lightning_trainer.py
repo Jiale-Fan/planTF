@@ -35,7 +35,8 @@ class LightningTrainer(pl.LightningModule):
         epochs,
         warmup_epochs,
         pretraining_epochs=6,
-        masker_var_weight=1.0
+        masker_var_weight=1.0,
+        prediction_timesteps=40,
     ) -> None:
         super().__init__()
         self.save_hyperparameters(ignore=["model"])
@@ -52,6 +53,7 @@ class LightningTrainer(pl.LightningModule):
         self.pretraining_epochs = pretraining_epochs
         self.masker_var_weight = masker_var_weight
         self.stage_two_init_flag = False
+        self.prediction_timesteps = prediction_timesteps
 
 
     def on_fit_start(self) -> None:
@@ -135,7 +137,7 @@ class LightningTrainer(pl.LightningModule):
         )
 
         agent_reg_loss = F.smooth_l1_loss(
-            prediction[valid_mask], targets[valid_mask][:, :2]
+            prediction[valid_mask][:self.prediction_timesteps], targets[valid_mask][:self.prediction_timesteps, :2]
         )
 
         ego_keyframes_gt = ego_target[:, self.model.keyframes_indices]
