@@ -158,9 +158,9 @@ class PlanningModel(TorchModuleWrapper):
         concated = torch.cat([x_initial, x], dim=-1)[:, :A].detach().clone()
         context_agt = self.agent_context_mlp(concated) # [batch, n_elem, n_dim]
         # exclude the first element of the context, which is the ego
-        # context_agt = context_agt[:, 1:]
-        # agent_key_padding = agent_key_padding[:, 1:]
-        # key_padding_mask = key_padding_mask[:, 1:]
+        context_agt = context_agt[:, 1:]
+        agent_key_padding = agent_key_padding[:, 1:]
+        key_padding_mask = key_padding_mask[:, 1:]
 
         map_info, _ = self.initial_map_encoding(self.map_encoder_plan, data, on_route_info=True)
         context = torch.cat([context_agt, map_info], dim=1) # [batch, n_elem, n_dim]
