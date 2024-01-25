@@ -56,6 +56,7 @@ class PlanningModel(TorchModuleWrapper):
         self.mask_rate_tf = mask_rate_tf
         self.keyframes_interval = keyframes_interval
         self.num_heads = num_heads
+        self.num_modes = num_modes 
 
         self.pos_emb = build_mlp(4, [dim] * 2)
         self.agent_encoder = AgentEncoder(
@@ -102,21 +103,20 @@ class PlanningModel(TorchModuleWrapper):
         self.keyframes_indices = self.get_keyframe_indices().to('cuda')
         self.num_keyframes = self.keyframes_indices.sum().to(torch.long).item()
 
-        self.trajectory_decoder_full = MlpTrajectoryDecoder(
-            embed_dim=dim+self.num_keyframes*out_channels,
+        self.trajectory_refinener = build_mlp(dim+self.num_keyframes*out_channels, [dim * 2, future_steps * out_channels], norm="ln")
+
+        self.keyframe_decoder = MlpTrajectoryDecoder(
+            embed_dim=dim,
             num_modes=num_modes,
-            future_steps=future_steps,
+            future_steps=self.num_keyframes,
             out_channels=out_channels,
         )
 
         self.element_type_embedding = nn.Embedding(7, dim)
-
-
         self.keyframes_seed = nn.Parameter(torch.randn(1, self.num_keyframes, dim).to('cuda'), requires_grad=True)
 
         self.agent_predictor = build_mlp(dim, [dim * 2, future_steps * 2], norm="ln")
         self.agent_context_mlp = build_mlp(dim*2, [dim], norm="ln")
-        self.keyframe_mlp = build_mlp(dim, [4], norm="ln")
 
         self.apply(self._init_weights)
 
@@ -155,20 +155,21 @@ class PlanningModel(TorchModuleWrapper):
 
         # concatenate the initial state to the context containing the prediction, take the elements corresponding to the agents
         
-        # concated = torch.cat([x_initial, x], dim=-1)[:, :A].detach().clone()
-        # context_agt = self.agent_context_mlp(concated) # [batch, n_elem, n_dim]
+        concated = torch.cat([x_initial, x], dim=-1)[:, :A].detach().clone()
+        context_agt = self.agent_context_mlp(concated) # [batch, n_elem, n_dim]
         # exclude the first element of the context, which is the ego
-        context_agt = x[:, 1:A].detach().clone()
-        agent_key_padding = agent_key_padding[:, 1:]
-        key_padding_mask = key_padding_mask[:, 1:]
+        # context_agt = context_agt[:, 1:]
+        # agent_key_padding = agent_key_padding[:, 1:]
+        # key_padding_mask = key_padding_mask[:, 1:]
+
         map_info, _ = self.initial_map_encoding(self.map_encoder_plan, data, on_route_info=True)
         context = torch.cat([context_agt, map_info], dim=1) # [batch, n_elem, n_dim]
 
         queries = self.keyframes_seed.repeat(bs, 1, 1) # [batch, num_keyframes, n_dim]
         tgt_mask = self.get_decoder_tgt_masks(bs) # [batch*head, keyframes, keyframes]
-        memory_mask = self.get_decoder_memory_masks(agent_key_padding, map_key_padding) # [batch*head, n_elem, 1, n_elem]
 
         if self.training:
+            memory_mask = self.get_decoder_memory_masks(agent_key_padding, map_key_padding) # [batch*head, n_elem, 1, n_elem]
             for blk in self.decoder_blocks:
                 queries = blk(tgt=queries, 
                                 memory=context,
@@ -183,12 +184,12 @@ class PlanningModel(TorchModuleWrapper):
                                 memory_mask=None,
                                 memory_key_padding_mask=key_padding_mask)
         final_rep = self.norm_dec(queries) # [batch, keyframes, n_dim]
-        keyframes = self.keyframe_mlp(final_rep) # [batch, keyframes, 4]
+        keyframes, probability = self.keyframe_decoder(final_rep[:, 0]) # [batch, keyframes, 4]
 
         ego_emb_hist = x[:, 0] # [batch, n_dim]
-        ego_emb = torch.cat([ego_emb_hist, keyframes.view(bs, -1)], dim=-1) # [batch, dim+keyframes*4]
-        trajectory, probability = self.trajectory_decoder_full(ego_emb) # [batch, num_modes, future_steps, 4]
-        trajectory[:, :, self.keyframes_indices, :] = keyframes.unsqueeze(1) # [batch, num_modes, future_steps, 4]
+        ego_emb = torch.cat([ego_emb_hist.unsqueeze(1).repeat(1,self.num_modes,1), keyframes.view(bs, self.num_modes, -1)], dim=-1) # [batch, modes, dim+keyframes*4]
+        trajectory = self.trajectory_refinener(ego_emb).view(bs, self.num_modes, self.future_steps, -1) # [batch, num_modes, future_steps, 4]
+        trajectory[:, :, self.keyframes_indices, :] = keyframes # [batch, num_modes, future_steps, 4]
 
         out = {
             # "trajectory_per": trajectory_per,
@@ -205,10 +206,11 @@ class PlanningModel(TorchModuleWrapper):
             keyframes_gt_input = torch.cat([keyframes_gt[..., :-1], torch.cos(keyframes_gt[..., -1:]), torch.sin(keyframes_gt[..., -1:])], dim=-1)
             ego_emb_hist = x[:, 0] # [batch, n_dim]
             ego_emb = torch.cat([ego_emb_hist, keyframes_gt_input.view(bs, -1)], dim=-1) # [batch, dim+keyframes*4]
-            trajectory_ref_loss, _ = self.trajectory_decoder_full(ego_emb) # [batch, num_modes, future_steps, 4]
-            out["trajectory_ref_loss"] = trajectory_ref_loss.squeeze(1)
+            trajectory_ref_loss = self.trajectory_refinener(ego_emb).view(bs, self.future_steps, -1) # [batch, num_modes, future_steps, 4]
+            out["trajectory_ref_loss"] = trajectory_ref_loss
         else:
-            output_trajectory = trajectory[:, 0]
+            best_mode = probability.argmax(dim=-1)
+            output_trajectory = trajectory[torch.arange(bs), best_mode]
             angle = torch.atan2(output_trajectory[..., 3], output_trajectory[..., 2])
             out["output_trajectory"] = torch.cat(
                 [output_trajectory[..., :2], angle.unsqueeze(-1)], dim=-1
@@ -304,7 +306,7 @@ class PlanningModel(TorchModuleWrapper):
     def get_mask_slice(self, key_padding_mask, mask_rate):
         padding_masks = ~key_padding_mask
         valid_num = padding_masks.sum(dim=-1)
-        unmasked_num = (valid_num * mask_rate).to(torch.long)
+        unmasked_num = torch.floor((valid_num * mask_rate)).to(torch.long)
         randperms = torch.stack([torch.randperm(padding_masks.shape[-1])+1 for _ in range(padding_masks.shape[0])], dim=0)
         randperms = randperms.to(padding_masks.device)*padding_masks
         sorted_randperms = torch.sort(randperms, dim=-1, descending=True)[0]

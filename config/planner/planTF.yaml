@@ -17,9 +17,9 @@ imitation_planner:
     encoder_depth: 4
     drop_path: 0.2
     num_heads: 8
-    num_modes: 1
-    state_dropout: 0
-    use_ego_history: true
+    num_modes: 6
+    state_dropout: 0.75
+    use_ego_history: false
     state_attn_encoder: true
     # plot: true
 

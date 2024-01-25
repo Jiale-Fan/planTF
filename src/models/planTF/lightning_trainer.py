@@ -139,7 +139,11 @@ class LightningTrainer(pl.LightningModule):
         )
 
         ego_keyframes_gt = ego_target[:, self.model.keyframes_indices]
-        key_frames_loss = F.smooth_l1_loss(keyframes, ego_keyframes_gt, reduction="none").mean()
+        ade = torch.norm(keyframes[..., :2] - ego_keyframes_gt[:, None, :, :2], dim=-1)
+        best_mode = torch.argmin(ade.sum(-1), dim=-1)
+        best_keyframes = keyframes[torch.arange(keyframes.shape[0]), best_mode]
+        ego_reg_loss_batch = F.smooth_l1_loss(best_keyframes, ego_keyframes_gt, reduction="none").mean((-2,-1))
+        key_frames_loss = ego_reg_loss_batch.mean()
 
         if self.training:
             trajectory_ref_loss = res["trajectory_ref_loss"]
