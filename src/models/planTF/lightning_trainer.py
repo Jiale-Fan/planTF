@@ -141,7 +141,9 @@ class LightningTrainer(pl.LightningModule):
         )
 
         ego_keyframes_gt = ego_target[:, self.model.keyframes_indices]
-        key_frames_loss = F.smooth_l1_loss(keyframes, ego_keyframes_gt, reduction="none").mean()
+        key_frames_loss = F.smooth_l1_loss(keyframes, ego_keyframes_gt, reduction="none").mean(-1)
+        key_frames_ade_loss = key_frames_loss.mean()
+        key_frames_fde_loss = key_frames_loss[:, -1].mean()
 
         if self.training:
             trajectory_ref_loss = res["trajectory_ref_loss"]
@@ -151,11 +153,12 @@ class LightningTrainer(pl.LightningModule):
         else:
             ego_reg_loss = 0
 
-        total_loss = ego_reg_loss + agent_reg_loss + key_frames_loss
+        total_loss = ego_reg_loss + agent_reg_loss + key_frames_ade_loss + key_frames_fde_loss
 
         return {
             "loss": total_loss,
-            "loss_keyframe": key_frames_loss,
+            "loss_keyframe": key_frames_ade_loss,
+            "loss_keyframe_fde": key_frames_fde_loss,
             "loss_pred": agent_reg_loss,
             "loss_ref": ego_reg_loss,
         }
