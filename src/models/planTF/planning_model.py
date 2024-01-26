@@ -292,9 +292,10 @@ class PlanningModel(TorchModuleWrapper):
 
     def get_decoder_tgt_masks(self, bs):
         m1 = torch.tril(torch.ones(self.num_keyframes, self.num_keyframes, device='cuda'), diagonal=-1).to(torch.bool)
-        m2 = torch.triu(torch.ones(self.num_keyframes, self.num_keyframes, device='cuda'), diagonal=5).to(torch.bool)
+        # m2 = torch.triu(torch.ones(self.num_keyframes, self.num_keyframes, device='cuda'), diagonal=5).to(torch.bool)
         # mask = (~m).repeat(bs*self.num_heads, 1, 1)
-        mask = m1 | m2
+        # mask = m1 | m2
+        mask = m1
         return mask
     
     def get_decoder_memory_masks(self, agent_key_padding, map_key_padding, on_route_bools):
