@@ -153,7 +153,7 @@ class LightningTrainer(pl.LightningModule):
         else:
             ego_reg_loss = 0
 
-        total_loss = ego_reg_loss + agent_reg_loss + key_frames_ade_loss + key_frames_fde_loss
+        total_loss = ego_reg_loss + agent_reg_loss + key_frames_ade_loss
 
         return {
             "loss": total_loss,
