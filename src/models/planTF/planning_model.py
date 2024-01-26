@@ -166,7 +166,6 @@ class PlanningModel(TorchModuleWrapper):
 
         queries = self.keyframes_seed.repeat(bs, 1, 1) # [batch, num_keyframes, n_dim]
         tgt_mask = self.get_decoder_tgt_masks(bs) # [batch*head, keyframes, keyframes]
-        memory_mask = self.get_decoder_memory_masks(agent_key_padding, map_key_padding, data["map"]["polygon_on_route"].bool()) # [batch*head, n_elem, 1, n_elem]
 
 
         # ablation study: no mask
@@ -175,6 +174,7 @@ class PlanningModel(TorchModuleWrapper):
 
         if self.training:
             for blk in self.decoder_blocks:
+                memory_mask = self.get_decoder_memory_masks(agent_key_padding, map_key_padding, data["map"]["polygon_on_route"].bool()) # [batch*head, n_elem, 1, n_elem]
                 queries = blk(tgt=queries, 
                                 memory=context,
                                 tgt_mask=tgt_mask,
@@ -308,7 +308,8 @@ class PlanningModel(TorchModuleWrapper):
         key_ls = ls*self.keyframes_indices
         mask_rates = key_ls[key_ls>0]
 
-        map_mask = map_key_padding | (~on_route_bools)
+        # map_mask = map_key_padding | (~on_route_bools)
+        map_mask = map_key_padding
         
         batch_agent_mask = torch.stack([self.get_mask_slice(agent_key_padding, r) \
                      for r in mask_rates], dim=1)
