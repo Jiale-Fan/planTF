@@ -168,6 +168,11 @@ class PlanningModel(TorchModuleWrapper):
         tgt_mask = self.get_decoder_tgt_masks(bs) # [batch*head, keyframes, keyframes]
         memory_mask = self.get_decoder_memory_masks(agent_key_padding, map_key_padding, data["map"]["polygon_on_route"].bool()) # [batch*head, n_elem, 1, n_elem]
 
+
+        # ablation study: no mask
+        tgt_mask = None
+        memory_mask = None
+
         if self.training:
             for blk in self.decoder_blocks:
                 queries = blk(tgt=queries, 
@@ -223,7 +228,7 @@ class PlanningModel(TorchModuleWrapper):
         indices = torch.zeros(self.future_steps, device='cuda', dtype=torch.bool)
         indices[self.keyframes_interval-1::self.keyframes_interval] = 1
         # indices[0:20:2] = 1 # TODO: to tune
-        indices[:20] = 1
+        # indices[:20] = 1
         return indices
     
     # def get_loss_final_modules(self):
