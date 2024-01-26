@@ -169,8 +169,8 @@ class PlanningModel(TorchModuleWrapper):
 
 
         # ablation study: no mask
-        # tgt_mask = None
-        # memory_mask = None
+        tgt_mask = None
+        memory_mask = None
 
         if self.training:
             for blk in self.decoder_blocks:
