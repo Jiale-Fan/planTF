@@ -166,7 +166,7 @@ class PlanningModel(TorchModuleWrapper):
 
         queries = self.keyframes_seed.repeat(bs, 1, 1) # [batch, num_keyframes, n_dim]
         tgt_mask = self.get_decoder_tgt_masks(bs) # [batch*head, keyframes, keyframes]
-        memory_mask = self.get_decoder_memory_masks(agent_key_padding, map_key_padding) # [batch*head, n_elem, 1, n_elem]
+        memory_mask = self.get_decoder_memory_masks(agent_key_padding, map_key_padding, data["map"]["polygon_on_route"].bool()) # [batch*head, n_elem, 1, n_elem]
 
         if self.training:
             for blk in self.decoder_blocks:
@@ -291,15 +291,22 @@ class PlanningModel(TorchModuleWrapper):
         mask = (~m)
         return mask
     
-    def get_decoder_memory_masks(self, agent_key_padding, map_key_padding):
+    def get_decoder_memory_masks(self, agent_key_padding, map_key_padding, on_route_bools):
+        '''
+            input: agent_key_padding: [batch, n_elem_agent]
+                     map_key_padding: [batch, n_elem_map], 1 indicates invalid elements
+                     on_route_bools: [batch, n_elem_map], 1 indicates on_route and 0 indicates not on_route
+        '''
 
         ls = torch.linspace(self.mask_rate_t0, self.mask_rate_tf, self.future_steps).to(self.keyframes_indices.device)
         key_ls = ls*self.keyframes_indices
         mask_rates = key_ls[key_ls>0]
+
+        map_mask = map_key_padding | (~on_route_bools)
         
         batch_agent_mask = torch.stack([self.get_mask_slice(agent_key_padding, r) \
                      for r in mask_rates], dim=1)
-        batch_mask = torch.cat([batch_agent_mask, map_key_padding.unsqueeze(1).repeat(1,self.num_keyframes,1)], dim=-1)
+        batch_mask = torch.cat([batch_agent_mask, map_mask.unsqueeze(1).repeat(1,self.num_keyframes,1)], dim=-1)
         batch_mask = batch_mask.unsqueeze(1).repeat(1, self.num_heads, 1, 1)
         batch_mask = batch_mask.view(-1, batch_mask.shape[-2], batch_mask.shape[-1])
         return batch_mask
