@@ -137,7 +137,7 @@ class LightningTrainer(pl.LightningModule):
         )
 
         agent_reg_loss = F.smooth_l1_loss(
-            prediction[valid_mask][:self.prediction_timesteps], targets[valid_mask][:self.prediction_timesteps, :2]
+            prediction[valid_mask], targets[valid_mask][:, :2]
         )
 
         ego_keyframes_gt = ego_target[:, self.model.keyframes_indices]

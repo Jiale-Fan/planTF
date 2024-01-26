@@ -37,8 +37,8 @@ class PlanningModel(TorchModuleWrapper):
         state_attn_encoder=True,
         state_dropout=0.75,
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
-        mask_rate_t0=0.5,
-        mask_rate_tf=1.0,
+        mask_rate_t0=0.3,
+        mask_rate_tf=0.9,
         keyframes_interval = 5,
         out_channels=4,
     ) -> None:
@@ -293,7 +293,7 @@ class PlanningModel(TorchModuleWrapper):
     
     def get_decoder_memory_masks(self, agent_key_padding, map_key_padding):
 
-        ls = torch.linspace(self.mask_rate_t0, self.mask_rate_tf, self.future_steps).to('cuda')
+        ls = torch.linspace(self.mask_rate_t0, self.mask_rate_tf, self.future_steps).to(self.keyframes_indices.device)
         key_ls = ls*self.keyframes_indices
         mask_rates = key_ls[key_ls>0]
         
@@ -306,6 +306,7 @@ class PlanningModel(TorchModuleWrapper):
         
     
     def get_mask_slice(self, key_padding_mask, mask_rate):
+        mask_rate = mask_rate.to(key_padding_mask.device)
         padding_masks = ~key_padding_mask
         valid_num = padding_masks.sum(dim=-1)
         unmasked_num = torch.floor((valid_num * mask_rate)).to(torch.long)
