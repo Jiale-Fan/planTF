@@ -228,7 +228,7 @@ class PlanningModel(TorchModuleWrapper):
         indices = torch.zeros(self.future_steps, device='cuda', dtype=torch.bool)
         indices[self.keyframes_interval-1::self.keyframes_interval] = 1
         # indices[0:20:2] = 1 # TODO: to tune
-        # indices[:20] = 1
+        indices[:20] = 1
         return indices
     
     # def get_loss_final_modules(self):

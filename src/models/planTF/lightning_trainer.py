@@ -141,8 +141,12 @@ class LightningTrainer(pl.LightningModule):
         )
 
         ego_keyframes_gt = ego_target[:, self.model.keyframes_indices]
-        key_frames_loss = F.smooth_l1_loss(keyframes, ego_keyframes_gt, reduction="none").mean(-1)
-        key_frames_ade_loss = key_frames_loss.mean()
+        key_frames_loss = F.smooth_l1_loss(keyframes, ego_keyframes_gt, reduction="none").mean(-1) # (B, K)
+        
+        train_epoch_progress = (self.current_epoch-self.pretraining_epochs) / (self.epochs-self.pretraining_epochs)
+        keyframes_loss_effective = key_frames_loss[:, key_frames_loss.shape[-1]-int(self.model.num_keyframes*train_epoch_progress):]
+
+        key_frames_ade_loss = keyframes_loss_effective.mean()
         key_frames_fde_loss = key_frames_loss[:, -1].mean()
 
         if self.training:
