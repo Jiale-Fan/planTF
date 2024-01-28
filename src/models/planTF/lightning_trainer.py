@@ -22,6 +22,7 @@ from src.models.planTF.training_objectives import nll_loss_multimodes_joint, nll
 from src.models.planTF.pairing_matrix import proj_name_to_mat
 
 from torch.nn.utils.rnn import pad_sequence
+import math
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,7 @@ class LightningTrainer(pl.LightningModule):
         self.masker_var_weight = masker_var_weight
         self.stage_two_init_flag = False
         self.prediction_timesteps = prediction_timesteps
+        self.post_epochs = 5
 
 
     def on_fit_start(self) -> None:
@@ -143,8 +145,11 @@ class LightningTrainer(pl.LightningModule):
         ego_keyframes_gt = ego_target[:, self.model.keyframes_indices]
         key_frames_loss = F.smooth_l1_loss(keyframes, ego_keyframes_gt, reduction="none").mean(-1) # (B, K)
         
-        train_epoch_progress = (self.current_epoch-self.pretraining_epochs) / (self.epochs-self.pretraining_epochs)
-        keyframes_loss_effective = key_frames_loss[:, key_frames_loss.shape[-1]-int(self.model.num_keyframes*train_epoch_progress):]
+        train_epoch_progress = (self.current_epoch-self.pretraining_epochs) / (self.epochs-self.post_epochs-self.pretraining_epochs)
+        clipped_progress = min(max(train_epoch_progress, 0), 1)
+
+
+        keyframes_loss_effective = key_frames_loss[:, min(31, key_frames_loss.shape[-1]-int(key_frames_loss.shape[-1]*clipped_progress)):]
 
         key_frames_ade_loss = keyframes_loss_effective.mean()
         key_frames_fde_loss = key_frames_loss[:, -1].mean()

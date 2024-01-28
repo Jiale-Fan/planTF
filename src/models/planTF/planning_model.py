@@ -41,6 +41,8 @@ class PlanningModel(TorchModuleWrapper):
         mask_rate_tf=0.9,
         keyframes_interval = 5,
         out_channels=4,
+        use_attn_mask=True,
+        use_memory_mask=False
     ) -> None:
         super().__init__(
             feature_builders=[feature_builder],
@@ -56,6 +58,8 @@ class PlanningModel(TorchModuleWrapper):
         self.mask_rate_tf = mask_rate_tf
         self.keyframes_interval = keyframes_interval
         self.num_heads = num_heads
+        self.use_attn_mask = use_attn_mask
+        self.use_memory_mask = use_memory_mask
 
         self.pos_emb = build_mlp(4, [dim] * 2)
         self.agent_encoder = AgentEncoder(
@@ -169,8 +173,11 @@ class PlanningModel(TorchModuleWrapper):
 
 
         # ablation study: no mask
-        # tgt_mask = None
-        # memory_mask = None
+        if not self.use_attn_mask:
+            tgt_mask = None
+        if not self.use_memory_mask:
+            memory_mask = None  
+            
 
         if self.training:
             for blk in self.decoder_blocks:
