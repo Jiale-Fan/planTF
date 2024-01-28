@@ -21,6 +21,8 @@ imitation_planner:
     state_dropout: 0.75
     use_ego_history: false
     state_attn_encoder: true
+    use_attn_mask: true
+    use_memory_mask: true
     # plot: true
 
     feature_builder:

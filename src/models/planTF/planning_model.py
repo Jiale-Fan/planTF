@@ -42,7 +42,7 @@ class PlanningModel(TorchModuleWrapper):
         keyframes_interval = 5,
         out_channels=4,
         use_attn_mask=True,
-        use_memory_mask=False
+        use_memory_mask=True,
     ) -> None:
         super().__init__(
             feature_builders=[feature_builder],
@@ -166,6 +166,7 @@ class PlanningModel(TorchModuleWrapper):
         agent_key_padding = agent_key_padding[:, 1:]
         key_padding_mask = key_padding_mask[:, 1:]
         map_info, _ = self.initial_map_encoding(self.map_encoder_plan, data, on_route_info=True)
+        map_info = map_info.detach().clone()
         context = torch.cat([context_agt, map_info], dim=1) # [batch, n_elem, n_dim]
 
         queries = self.keyframes_seed.repeat(bs, 1, 1) # [batch, num_keyframes, n_dim]
