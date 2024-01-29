@@ -149,15 +149,12 @@ class LightningTrainer(pl.LightningModule):
         train_epoch_progress = (self.current_epoch-self.pretraining_epochs) / (self.epochs-self.pretraining_epochs)
 
         # for debug 
-        train_epoch_progress = 0.3
+        # train_epoch_progress = 0.3
 
         keyframes_loss_effective = key_frames_loss[:, key_frames_loss.shape[-1]-int(self.model.num_keyframes*train_epoch_progress):]
 
         key_frames_ade_loss = keyframes_loss_effective.mean()
         key_frames_fde_loss = key_frames_loss[:, -1].mean()
-
-        
-
 
         if self.training:
             trajectory_ref_loss = res["trajectory_ref_loss"]
