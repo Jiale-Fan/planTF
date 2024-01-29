@@ -41,6 +41,8 @@ class PlanningModel(TorchModuleWrapper):
         mask_rate_tf=0.9,
         keyframes_interval = 5,
         out_channels=4,
+        use_attn_mask = True,
+        use_memory_mask = True,
     ) -> None:
         super().__init__(
             feature_builders=[feature_builder],
@@ -56,6 +58,9 @@ class PlanningModel(TorchModuleWrapper):
         self.mask_rate_tf = mask_rate_tf
         self.keyframes_interval = keyframes_interval
         self.num_heads = num_heads
+
+        self.use_attn_mask = use_attn_mask
+        self.use_memory_mask = use_memory_mask
 
         self.pos_emb = build_mlp(4, [dim] * 2)
         self.agent_encoder = AgentEncoder(
@@ -169,8 +174,10 @@ class PlanningModel(TorchModuleWrapper):
 
 
         # ablation study: no mask
-        # tgt_mask = None
-        # memory_mask = None
+        if not self.use_attn_mask:
+            tgt_mask = None
+        if not self.use_memory_mask:
+            memory_mask = None
 
         if self.training:
             for blk in self.decoder_blocks:
@@ -220,6 +227,13 @@ class PlanningModel(TorchModuleWrapper):
             )
 
         return out
+    
+    def get_irm_loss(self, keyframe_loss):
+        grads = torch.autograd.grad(keyframe_loss, [t if t.requires_grad else None for t in list(self.decoder_blocks.parameters())], create_graph=True)
+        grad_norm = torch.norm(torch.stack([torch.norm(g) for g in grads if g is not None]))
+        return grad_norm
+
+    
 
     def get_keyframe_indices(self):
         '''

@@ -37,6 +37,7 @@ class LightningTrainer(pl.LightningModule):
         pretraining_epochs=6,
         masker_var_weight=1.0,
         prediction_timesteps=40,
+        lam = 0.5,
     ) -> None:
         super().__init__()
         self.save_hyperparameters(ignore=["model"])
@@ -54,6 +55,8 @@ class LightningTrainer(pl.LightningModule):
         self.masker_var_weight = masker_var_weight
         self.stage_two_init_flag = False
         self.prediction_timesteps = prediction_timesteps
+
+        self.lam = lam
 
 
     def on_fit_start(self) -> None:
@@ -144,20 +147,31 @@ class LightningTrainer(pl.LightningModule):
         key_frames_loss = F.smooth_l1_loss(keyframes, ego_keyframes_gt, reduction="none").mean(-1) # (B, K)
         
         train_epoch_progress = (self.current_epoch-self.pretraining_epochs) / (self.epochs-self.pretraining_epochs)
+
+        # for debug 
+        train_epoch_progress = 0.3
+
         keyframes_loss_effective = key_frames_loss[:, key_frames_loss.shape[-1]-int(self.model.num_keyframes*train_epoch_progress):]
 
         key_frames_ade_loss = keyframes_loss_effective.mean()
         key_frames_fde_loss = key_frames_loss[:, -1].mean()
+
+        
+
 
         if self.training:
             trajectory_ref_loss = res["trajectory_ref_loss"]
             ego_reg_loss_batch = F.smooth_l1_loss(trajectory_ref_loss, ego_target, reduction="none").mean((-2,-1))
             ego_reg_loss = ego_reg_loss_batch.mean()
             # ego_reg_loss_var = ego_reg_loss_batch.var()
+
+            irm_loss = self.model.get_irm_loss(key_frames_ade_loss)
+
         else:
             ego_reg_loss = 0
+            irm_loss = 0
 
-        total_loss = ego_reg_loss + agent_reg_loss + key_frames_ade_loss
+        total_loss = ego_reg_loss + agent_reg_loss + key_frames_ade_loss + self.lam*irm_loss
 
         return {
             "loss": total_loss,
