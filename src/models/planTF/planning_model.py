@@ -32,7 +32,7 @@ class PlanningModel(TorchModuleWrapper):
         decoder_depth=4,
         drop_path=0.2,
         num_heads=8,
-        num_modes=1,
+        num_modes=6,
         use_ego_history=False,
         state_attn_encoder=True,
         state_dropout=0.75,
@@ -42,7 +42,8 @@ class PlanningModel(TorchModuleWrapper):
         keyframes_interval = 5,
         out_channels=4,
         use_attn_mask=True,
-        use_memory_mask=False
+        use_memory_mask=True,
+        latent_space_dim=8,
     ) -> None:
         super().__init__(
             feature_builders=[feature_builder],
@@ -60,6 +61,7 @@ class PlanningModel(TorchModuleWrapper):
         self.num_heads = num_heads
         self.use_attn_mask = use_attn_mask
         self.use_memory_mask = use_memory_mask
+        self.latent_space_dim = latent_space_dim
 
         self.pos_emb = build_mlp(4, [dim] * 2)
         self.agent_encoder = AgentEncoder(
@@ -100,15 +102,38 @@ class PlanningModel(TorchModuleWrapper):
             for dp in [x.item() for x in torch.linspace(0, drop_path, decoder_depth)]
         )
 
+        self.dim_ajust_beh = nn.Linear(self.latent_space_dim, dim)
+        self.dim_ajust_beh_back = nn.Linear(dim, self.latent_space_dim)
+
+        self.behavior_generator = nn.TransformerDecoderLayer(
+            d_model=dim,
+            nhead=num_heads,
+            dim_feedforward=2048,
+            dropout=0.2,
+            activation="relu",
+            batch_first=True,
+        )
+
+        self.latent_var_decoder = nn.TransformerDecoderLayer(
+            d_model=dim,
+            nhead=num_heads,
+            dim_feedforward=2048,
+            dropout=0.2,
+            activation="relu",
+            batch_first=True,
+        )
+
+        self.gaussian_para_mlp = GaussianParamerizationMLP(dim, self.latent_space_dim, num_layers=1)
+
         self.norm_enc = nn.LayerNorm(dim)
         self.norm_dec = nn.LayerNorm(dim)
 
         self.keyframes_indices = self.get_keyframe_indices().to('cuda')
         self.num_keyframes = self.keyframes_indices.sum().to(torch.long).item()
 
-        self.trajectory_decoder_full = MlpTrajectoryDecoder(
-            embed_dim=dim+self.num_keyframes*out_channels,
-            num_modes=num_modes,
+        self.trajectory_decoder = MlpTrajectoryDecoder(
+            embed_dim=dim,
+            num_modes=1,
             future_steps=future_steps,
             out_channels=out_channels,
         )
@@ -116,15 +141,19 @@ class PlanningModel(TorchModuleWrapper):
         self.element_type_embedding = nn.Embedding(7, dim)
 
 
-        self.keyframes_seed = nn.Parameter(torch.randn(1, self.num_keyframes, dim).to('cuda'), requires_grad=True)
+        self.keyframes_seed = nn.Parameter(torch.randn(1, 1, dim).to('cuda'), requires_grad=True)
 
-        self.agent_predictor = build_mlp(dim, [dim * 2, future_steps * 2], norm="ln")
+        self.agent_predictor = TFTrajectoryDecoder(
+            embed_dim=dim,
+            num_modes=num_modes,
+            future_steps=future_steps,
+            out_channels=7,
+        )
         self.agent_context_mlp = build_mlp(dim*2, [dim], norm="ln")
         self.keyframe_mlp = build_mlp(dim, [4], norm="ln")
 
         self.apply(self._init_weights)
 
-        
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -155,7 +184,17 @@ class PlanningModel(TorchModuleWrapper):
             x = blk(x, key_padding_mask=key_padding_mask)
         x = self.norm_enc(x)
 
-        prediction_full = self.agent_predictor(x[:, :A]).view(bs, -1, self.future_steps, 2) 
+        # get the distribution of the agents' future trajectories
+        prediction, probabilities = self.agent_predictor(x[:, 0:A], x[:, A:], agent_key_padding, map_key_padding)
+
+        latents = self.sample_latent_variables(bs) # [batch_size, latent_space_dim]
+        latents_emb_dim = self.dim_ajust_beh(latents) # [batch_size, dim]
+        behavior_traj_emb = self.behavior_generator(tgt=latents_emb_dim, 
+                                                memory=x_map.detach().clone(),  
+                                                memory_key_padding_mask=map_key_padding) # [batch_size, n_elem, dim]
+        behavior_trajs, _ = self.trajectory_decoder(behavior_traj_emb)
+        mutual_info_loss = self.calculate_mutual_info_loss(latents, behavior_traj_emb, x_map.detach().clone(), map_key_padding)
+        
 
         # concatenate the initial state to the context containing the prediction, take the elements corresponding to the agents
         
@@ -165,42 +204,31 @@ class PlanningModel(TorchModuleWrapper):
         context_agt = context_agt[:, 1:]
         agent_key_padding = agent_key_padding[:, 1:]
         key_padding_mask = key_padding_mask[:, 1:]
-        map_info, _ = self.initial_map_encoding(self.map_encoder_plan, data, on_route_info=True)
-        context = torch.cat([context_agt, map_info], dim=1) # [batch, n_elem, n_dim]
+        context = torch.cat([context_agt, x_map.detach().clone()], dim=1) # [batch, n_elem, n_dim]
 
         queries = self.keyframes_seed.repeat(bs, 1, 1) # [batch, num_keyframes, n_dim]
-        tgt_mask = self.get_decoder_tgt_masks(bs) # [batch*head, keyframes, keyframes]
 
+ 
+        for blk in self.decoder_blocks:
+            queries = blk(tgt=queries, 
+                            memory=context,
+                            tgt_mask=None,
+                            memory_mask=None,
+                            memory_key_padding_mask=key_padding_mask)
+    
+        final_rep = queries # [batch, keyframes, n_dim]
+        # keyframes = self.keyframe_mlp(final_rep) # [batch, keyframes, 4]
 
-        # ablation study: no mask
-        if not self.use_attn_mask:
-            tgt_mask = None
-        if not self.use_memory_mask:
-            memory_mask = None  
-            
+        traj_emb = self.behavior_generator(tgt=final_rep, 
+                                                memory=x_map.detach().clone(),  
+                                                memory_key_padding_mask=map_key_padding) # [batch_size, n_elem, dim]
+        trajectory, _ = self.trajectory_decoder(traj_emb)
+        probability = torch.ones(bs, 1)
 
-        if self.training:
-            for blk in self.decoder_blocks:
-                memory_mask = self.get_decoder_memory_masks(agent_key_padding, map_key_padding, data["map"]["polygon_on_route"].bool()) # [batch*head, n_elem, 1, n_elem]
-                queries = blk(tgt=queries, 
-                                memory=context,
-                                tgt_mask=tgt_mask,
-                                memory_mask=memory_mask,
-                                memory_key_padding_mask=key_padding_mask)
-        else:
-            for blk in self.decoder_blocks:
-                queries = blk(tgt=queries, 
-                                memory=context,
-                                tgt_mask=tgt_mask,
-                                memory_mask=None,
-                                memory_key_padding_mask=key_padding_mask)
-        final_rep = self.norm_dec(queries) # [batch, keyframes, n_dim]
-        keyframes = self.keyframe_mlp(final_rep) # [batch, keyframes, 4]
-
-        ego_emb_hist = x[:, 0] # [batch, n_dim]
-        ego_emb = torch.cat([ego_emb_hist, keyframes.view(bs, -1)], dim=-1) # [batch, dim+keyframes*4]
-        trajectory, probability = self.trajectory_decoder_full(ego_emb) # [batch, num_modes, future_steps, 4]
-        trajectory[:, :, self.keyframes_indices, :] = keyframes.unsqueeze(1) # [batch, num_modes, future_steps, 4]
+        # ego_emb_hist = x[:, 0] # [batch, n_dim]
+        # ego_emb = torch.cat([ego_emb_hist, keyframes.view(bs, -1)], dim=-1) # [batch, dim+keyframes*4]
+        # trajectory, probability = self.trajectory_decoder(ego_emb) # [batch, num_modes, future_steps, 4]
+        # trajectory[:, :, self.keyframes_indices, :] = keyframes.unsqueeze(1) # [batch, num_modes, future_steps, 4]
 
         out = {
             # "trajectory_per": trajectory_per,
@@ -208,18 +236,13 @@ class PlanningModel(TorchModuleWrapper):
             # "prediction_per": prediction_per,
             "trajectory": trajectory,
             "probability": probability,
-            "prediction": prediction_full,
-            "keyframes": keyframes,
+            "prediction": prediction,
+            "prediction_probabilities": probabilities,
+            "behavior_trajectory": behavior_trajs,
+            "mutual_info_loss": mutual_info_loss,
         }
 
-        if self.training:
-            keyframes_gt = data["agent"]["target"][:, 0, self.keyframes_indices, :]
-            keyframes_gt_input = torch.cat([keyframes_gt[..., :-1], torch.cos(keyframes_gt[..., -1:]), torch.sin(keyframes_gt[..., -1:])], dim=-1)
-            ego_emb_hist = x[:, 0] # [batch, n_dim]
-            ego_emb = torch.cat([ego_emb_hist, keyframes_gt_input.view(bs, -1)], dim=-1) # [batch, dim+keyframes*4]
-            trajectory_ref_loss, _ = self.trajectory_decoder_full(ego_emb) # [batch, num_modes, future_steps, 4]
-            out["trajectory_ref_loss"] = trajectory_ref_loss.squeeze(1)
-        else:
+        if not self.training:
             output_trajectory = trajectory[:, 0]
             angle = torch.atan2(output_trajectory[..., 3], output_trajectory[..., 2])
             out["output_trajectory"] = torch.cat(
@@ -227,6 +250,32 @@ class PlanningModel(TorchModuleWrapper):
             )
 
         return out
+    
+    def sample_latent_variables(self, bs):
+        '''
+            return: [batch_size, latent_space_dim]
+            sample from a standard normal distribution and normalize it
+        '''
+        z = torch.randn(bs, self.latent_space_dim, device='cuda')
+        z = z / z.norm(dim=-1, keepdim=True)
+        z = z.unsqueeze(1)
+        return z
+    
+    def calculate_mutual_info_loss(self, latents, beh_traj_emb, map_emb, map_mask):
+        '''
+            input: latents: [batch_size, latent_space_dim]
+                   beh_traj_emb: [batch_size, dim]
+            return: mutual_info_loss: [1]
+        '''
+        back_latents_emb = self.latent_var_decoder(tgt=beh_traj_emb,
+                                                   memory=map_emb.detach().clone(),
+                                                memory_key_padding_mask=map_mask)
+        mu, sigma = self.gaussian_para_mlp(back_latents_emb)
+        dist = torch.distributions.normal.Normal(mu, sigma)
+        log_prob = dist.log_prob(latents)
+        mutual_info_loss = -log_prob.mean()
+        return mutual_info_loss
+        
 
     def get_keyframe_indices(self):
         '''
@@ -349,3 +398,24 @@ class PlanningModel(TorchModuleWrapper):
             detached[name] = params_pred[name].detach().clone()
         self.map_encoder_plan.load_state_dict(detached)
         pass
+
+    def freeze_trajectory_decoder(self):
+        for param in self.trajectory_decoder.parameters():
+            param.requires_grad = False
+        pass
+
+class GaussianParamerizationMLP(nn.Module):
+    def __init__(self, in_dim, out_dim, hidden_dim=128, num_layers=2) -> None:
+        super().__init__()
+
+        self.in_dim = in_dim
+        self.out_dim = out_dim
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+
+        self.mlp = build_mlp(in_dim, [hidden_dim] * num_layers+[out_dim * 2])
+
+    def forward(self, x):
+        mu, log_sigma = self.mlp(x).chunk(2, dim=-1)
+        sigma = torch.exp(log_sigma)
+        return mu, sigma

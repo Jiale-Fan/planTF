@@ -118,14 +118,33 @@ class LightningTrainer(pl.LightningModule):
 
 
     def _compute_objectives(self, res, data) -> Dict[str, torch.Tensor]:
-        trajectory, prediction, keyframes = (
+        trajectory, prediction, prediction_probabilities, behavior_trajectory = (
             res["trajectory"],
             res["prediction"],
-            res["keyframes"]
+            res["prediction_probabilities"],
+            res["behavior_trajectory"],
         )        
 
         targets = data["agent"]["target"]
         valid_mask = data["agent"]["valid_mask"][:, :, -trajectory.shape[-2] :]
+
+        nll_loss_dist, _, _, ade_dist, _= nll_loss_multimodes_joint(prediction.permute(1,3,0,2,4), targets.permute(0,2,1,3), 
+                                      prediction_probabilities, valid_mask.permute(0,2,1),
+                                        entropy_weight=40.0,
+                                        kl_weight=20.0,
+                                        use_FDEADE_aux_loss=True,
+                                        predict_yaw=True)
+        
+        nll_loss_beh, _, _, ade_beh, _ = nll_loss_multimodes_joint(prediction.detach().clone()[:,:,0:1].permute(1,3,0,2,4),
+                                   behavior_trajectory.permute(0,2,1,3), 
+                                   prediction_probabilities.detach().clone(), valid_mask.permute(0,2,1),
+                                        entropy_weight=40.0,
+                                        kl_weight=20.0,
+                                        use_FDEADE_aux_loss=True,
+                                        predict_yaw=True)
+
+        nll_loss_dist = nll_loss_dist+ade_dist
+        nll_loss_beh = nll_loss_beh+ade_beh
 
         ego_target_pos, ego_target_heading = targets[:, 0, :, :2], targets[:, 0, :, 2]
         ego_target = torch.cat(
@@ -138,38 +157,17 @@ class LightningTrainer(pl.LightningModule):
             dim=-1,
         )
 
-        agent_reg_loss = F.smooth_l1_loss(
-            prediction[valid_mask], targets[valid_mask][:, :2]
-        )
+        ego_reg_loss_batch = F.smooth_l1_loss(trajectory.squeeze(1), ego_target, reduction="none").mean((-2,-1))
+        ego_reg_loss = ego_reg_loss_batch.mean()
 
-        ego_keyframes_gt = ego_target[:, self.model.keyframes_indices]
-        key_frames_loss = F.smooth_l1_loss(keyframes, ego_keyframes_gt, reduction="none").mean(-1) # (B, K)
-        
-        train_epoch_progress = (self.current_epoch-self.pretraining_epochs) / (self.epochs-self.post_epochs-self.pretraining_epochs)
-        clipped_progress = min(max(train_epoch_progress, 0), 1)
-
-
-        keyframes_loss_effective = key_frames_loss[:, min(31, key_frames_loss.shape[-1]-int(key_frames_loss.shape[-1]*clipped_progress)):]
-
-        key_frames_ade_loss = keyframes_loss_effective.mean()
-        key_frames_fde_loss = key_frames_loss[:, -1].mean()
-
-        if self.training:
-            trajectory_ref_loss = res["trajectory_ref_loss"]
-            ego_reg_loss_batch = F.smooth_l1_loss(trajectory_ref_loss, ego_target, reduction="none").mean((-2,-1))
-            ego_reg_loss = ego_reg_loss_batch.mean()
-            # ego_reg_loss_var = ego_reg_loss_batch.var()
-        else:
-            ego_reg_loss = 0
-
-        total_loss = ego_reg_loss + agent_reg_loss + key_frames_ade_loss
+        total_loss = ego_reg_loss
 
         return {
             "loss": total_loss,
-            "loss_keyframe": key_frames_ade_loss,
-            "loss_keyframe_fde": key_frames_fde_loss,
-            "loss_pred": agent_reg_loss,
-            "loss_ref": ego_reg_loss,
+            "ego_reg_loss": ego_reg_loss,
+            "nll_loss_dist": nll_loss_dist*1e-3,
+            "nll_loss_beh": nll_loss_beh*1e-3,
+            "mutual_info_loss": res["mutual_info_loss"],
         }
 
     def _compute_metrics(self, output, data, prefix) -> Dict[str, torch.Tensor]:
@@ -242,7 +240,7 @@ class LightningTrainer(pl.LightningModule):
 
         if self.current_epoch < self.pretraining_epochs:
             opt_main.zero_grad()
-            self.manual_backward(losses["loss_pred"]+losses["loss_ref"]) 
+            self.manual_backward(losses["nll_loss_dist"]+losses["nll_loss_beh"]+losses["mutual_info_loss"]) 
             opt_main.step()
         else:
         # if True:
@@ -252,9 +250,10 @@ class LightningTrainer(pl.LightningModule):
                 # the init of stage two copies the map encoder for prediction
                 # to the map encoder for planning. Since we've replaced the original
                 # parameters, we can not do backward in this step
+                self.model.freeze_trajectory_decoder()
             else:
                 opt_main.zero_grad()
-                self.manual_backward(losses["loss"])
+                self.manual_backward(losses["ego_reg_loss"])
                 opt_main.step()
             
         metrics = self._compute_metrics(res, features["feature"].data, prefix)
