@@ -402,6 +402,8 @@ class PlanningModel(TorchModuleWrapper):
     def freeze_trajectory_decoder(self):
         for param in self.trajectory_decoder.parameters():
             param.requires_grad = False
+        for param in self.behavior_generator.parameters():
+            param.requires_grad = False
         pass
 
 class GaussianParamerizationMLP(nn.Module):
