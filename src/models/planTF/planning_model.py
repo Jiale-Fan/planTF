@@ -7,6 +7,7 @@ from nuplan.planning.training.preprocessing.target_builders.ego_trajectory_targe
 )
 
 from src.feature_builders.nuplan_feature_builder import NuplanFeatureBuilder
+from src.features.nuplan_feature import NuplanFeature
 
 from .layers.common_layers import build_mlp
 from .layers.transformer_encoder_layer import TransformerEncoderLayer
@@ -63,11 +64,22 @@ class PlanningModel(TorchModuleWrapper):
         self.use_memory_mask = use_memory_mask
 
         self.pos_emb = build_mlp(4, [dim] * 2)
-        self.agent_encoder = AgentEncoder(
+        self.agent_encoder_pred = AgentEncoder(
             state_channel=state_channel,
             history_channel=history_channel,
             dim=dim,
             hist_steps=history_steps,
+            drop_path=drop_path,
+            use_ego_history=use_ego_history,
+            state_attn_encoder=state_attn_encoder,
+            state_dropout=state_dropout,
+        )
+
+        self.agent_encoder_plan = AgentEncoder(
+            state_channel=state_channel,
+            history_channel=history_channel,
+            dim=dim,
+            hist_steps=history_steps+future_steps,
             drop_path=drop_path,
             use_ego_history=use_ego_history,
             state_attn_encoder=state_attn_encoder,
@@ -119,7 +131,7 @@ class PlanningModel(TorchModuleWrapper):
 
         self.keyframes_seed = nn.Parameter(torch.randn(1, self.num_keyframes, dim).to('cuda'), requires_grad=True)
 
-        self.agent_predictor = build_mlp(dim, [dim * 2, future_steps * 2], norm="ln")
+        self.agent_predictor = build_mlp(dim, [dim * 2, future_steps * 4], norm="ln")
         self.agent_context_mlp = build_mlp(dim*2, [dim], norm="ln")
         self.keyframe_mlp = build_mlp(dim, [4], norm="ln")
 
@@ -143,8 +155,8 @@ class PlanningModel(TorchModuleWrapper):
 
     def forward(self, data):     
         # encode the information of the agents and the map separately without cross attention
-        x_agent, agent_key_padding = self.initial_agents_encoding(data)
-        x_map, map_key_padding = self.initial_map_encoding(self.map_encoder_pred, data, on_route_info=False)
+        x_agent, agent_key_padding = self.encode_agents_info(self.agent_encoder_pred, data)
+        x_map, map_key_padding = self.initial_map_encoding(self.map_encoder_pred, data, on_route_info=True)
         bs, A = x_agent.shape[:2]
         x = torch.cat([x_agent, x_map], dim=1) # [batch, n_elem, n_dim]
         key_padding_mask = torch.cat([agent_key_padding, map_key_padding], dim=-1) # [batch, n_elem]
@@ -156,18 +168,24 @@ class PlanningModel(TorchModuleWrapper):
             x = blk(x, key_padding_mask=key_padding_mask)
         x = self.norm_enc(x)
 
-        prediction_full = self.agent_predictor(x[:, :A]).view(bs, -1, self.future_steps, 2) 
+        prediction_full = self.agent_predictor(x[:, :A]).view(bs, -1, self.future_steps, 4) 
+
+        data_pred = self.updata_agent_info_with_pred(data, prediction_full)
+        rot_angle = self.sample_rotation_angle()
+
+        if self.training:
+            data_pred_rot = get_rotated_data(data_pred, rot_angle)
+        else:
+            data_pred_rot = data_pred
+
+        x_agent_p, agent_key_padding_p = self.encode_agents_info(self.agent_encoder_plan, data_pred)
 
         # concatenate the initial state to the context containing the prediction, take the elements corresponding to the agents
-        
-        concated = torch.cat([x_initial, x], dim=-1)[:, :A].detach().clone()
-        context_agt = self.agent_context_mlp(concated) # [batch, n_elem, n_dim]
-        # exclude the first element of the context, which is the ego
-        context_agt = context_agt[:, 1:]
-        agent_key_padding = agent_key_padding[:, 1:]
+        x_agent_p = x_agent_p[:, 1:]
+        agent_key_padding_p = agent_key_padding_p[:, 1:]
         key_padding_mask = key_padding_mask[:, 1:]
-        map_info, _ = self.initial_map_encoding(self.map_encoder_plan, data, on_route_info=True)
-        context = torch.cat([context_agt, map_info], dim=1) # [batch, n_elem, n_dim]
+        map_info, _ = self.initial_map_encoding(self.map_encoder_plan, data_pred_rot, on_route_info=True)
+        context = torch.cat([x_agent_p, map_info], dim=1) # [batch, n_elem, n_dim]
 
         queries = self.keyframes_seed.repeat(bs, 1, 1) # [batch, num_keyframes, n_dim]
         tgt_mask = self.get_decoder_tgt_masks(bs) # [batch*head, keyframes, keyframes]
@@ -181,7 +199,7 @@ class PlanningModel(TorchModuleWrapper):
 
         if self.training:
             for blk in self.decoder_blocks:
-                memory_mask = self.get_decoder_memory_masks(agent_key_padding, map_key_padding, data["map"]["polygon_on_route"].bool()) # [batch*head, n_elem, 1, n_elem]
+                memory_mask = self.get_decoder_memory_masks(agent_key_padding_p, map_key_padding, data["map"]["polygon_on_route"].bool()) # [batch*head, n_elem, 1, n_elem]
                 queries = blk(tgt=queries, 
                                 memory=context,
                                 tgt_mask=tgt_mask,
@@ -210,6 +228,7 @@ class PlanningModel(TorchModuleWrapper):
             "probability": probability,
             "prediction": prediction_full,
             "keyframes": keyframes,
+            "rot_angle": rot_angle,
         }
 
         if self.training:
@@ -228,12 +247,14 @@ class PlanningModel(TorchModuleWrapper):
 
         return out
     
+    def sample_rotation_angle(self):
+        return torch.FloatTensor([0.0]).uniform_(-torch.pi/3, torch.pi/3)
+    
     def get_irm_loss(self, keyframe_loss):
         grads = torch.autograd.grad(keyframe_loss, [t if t.requires_grad else None for t in list(self.decoder_blocks.parameters())], create_graph=True)
         grad_norm = torch.norm(torch.stack([torch.norm(g) for g in grads if g is not None]))
         return grad_norm
-
-    
+        
 
     def get_keyframe_indices(self):
         '''
@@ -242,7 +263,7 @@ class PlanningModel(TorchModuleWrapper):
         indices = torch.zeros(self.future_steps, device='cuda', dtype=torch.bool)
         indices[self.keyframes_interval-1::self.keyframes_interval] = 1
         # indices[0:20:2] = 1 # TODO: to tune
-        indices[:20] = 1
+        # indices[:20] = 1
         return indices
     
     # def get_loss_final_modules(self):
@@ -252,18 +273,35 @@ class PlanningModel(TorchModuleWrapper):
     #             modules.append((module_name, module))
 
     #     return modules
-    def initial_agents_encoding(self, data):
+
+    def updata_agent_info_with_pred(self, data, pred_traj):
+        agent_pos = data["agent"]["position"][:, :, :self.history_steps]
+        agent_heading = data["agent"]["heading"][:, :, :self.history_steps]
+
+        if pred_traj!=None:
+            agent_pos = torch.cat([agent_pos, pred_traj[..., :2]], dim=-2)
+            agent_heading = torch.cat([agent_heading, torch.atan2(pred_traj[..., 3], pred_traj[..., 2])], dim=-1)
+
+        agent_pos = data["agent"]["position"] = agent_pos
+        agent_heading = data["agent"]["heading"] = agent_heading
+
+        return data
+
+    def encode_agents_info(self, encoder: AgentEncoder, data):
         '''
             input: data: dictionary containing map and agent info
-                   on_route_info: bool indicating whether on_route info is used
+                   pred_traj: [batch, n_elem, n_dim]
             output: x: [batch, n_elem, n_dim]
                     key_padding_mask: [batch, n_elem] with 0 for valid elements and 1 for invalid elements
         '''
-        agent_pos = data["agent"]["position"][:, :, self.history_steps - 1]
-        agent_heading = data["agent"]["heading"][:, :, self.history_steps - 1]
-        agent_mask = data["agent"]["valid_mask"][:, :, : self.history_steps]
-        agent_category = data["agent"]["category"].to(torch.long) # 4 possible types
 
+
+        encode_time_step = encoder.hist_steps
+       
+        agent_pos = data["agent"]["position"][:, :, encode_time_step - 1]
+        agent_heading = data["agent"]["heading"][:, :, encode_time_step - 1]
+        agent_mask = data["agent"]["valid_mask"][:, :, : encode_time_step]
+        agent_category = data["agent"]["category"].to(torch.long)
         '''
         self.interested_objects_types = [
             TrackedObjectType.EGO,
@@ -284,7 +322,7 @@ class PlanningModel(TorchModuleWrapper):
         )
         pos_embed = self.pos_emb(pos) + types_embedding
         agent_key_padding = ~(agent_mask.any(-1))
-        x_agent = self.agent_encoder(data) + pos_embed
+        x_agent = encoder(data) + pos_embed
         return x_agent, agent_key_padding
     
     def initial_map_encoding(self, map_encoder, data, on_route_info):
@@ -356,3 +394,10 @@ class PlanningModel(TorchModuleWrapper):
             detached[name] = params_pred[name].detach().clone()
         self.map_encoder_plan.load_state_dict(detached)
         pass
+
+
+def get_rotated_data(data, rot_angle):
+    np_data=NuplanFeature(data).to_numpy().data
+    np_data["current_state"][2] = rot_angle
+    new_data = NuplanFeature.normalize(np_data, batch=True).to_feature_tensor().to_device(data["map"]["polygon_center"].device).data
+    return new_data

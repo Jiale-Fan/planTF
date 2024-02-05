@@ -65,10 +65,13 @@ class NuplanFeature(AbstractModelFeature):
 
     @classmethod
     def normalize(
-        self, data, first_time=False, radius=None, hist_steps=21
+        self, data, first_time=False, radius=None, hist_steps=21, batch = False
     ) -> NuplanFeature:
         cur_state = data["current_state"]
-        center_xy, center_angle = cur_state[:2].copy(), cur_state[2].copy()
+        if batch == False:
+            center_xy, center_angle = cur_state[:2].copy(), cur_state[2].copy()
+        else:
+            center_xy, center_angle = cur_state[0, :2].copy(), cur_state[0, 2].copy()
 
         rotate_mat = np.array(
             [
@@ -100,16 +103,28 @@ class NuplanFeature(AbstractModelFeature):
         )
         data["map"]["polygon_orientation"] -= center_angle
 
-        target_position = (
-            data["agent"]["position"][:, hist_steps:]
-            - data["agent"]["position"][:, hist_steps - 1][:, None]
-        )
-        target_heading = (
-            data["agent"]["heading"][:, hist_steps:]
-            - data["agent"]["heading"][:, hist_steps - 1][:, None]
-        )
-        target = np.concatenate([target_position, target_heading[..., None]], -1)
-        target[~data["agent"]["valid_mask"][:, hist_steps:]] = 0
+        if not batch:
+            target_position = (
+                data["agent"]["position"][:, hist_steps:]
+                - data["agent"]["position"][:, hist_steps - 1][:, None]
+            )
+            target_heading = (
+                data["agent"]["heading"][:, hist_steps:]
+                - data["agent"]["heading"][:, hist_steps - 1][:, None]
+            )
+            target = np.concatenate([target_position, target_heading[..., None]], -1)
+            target[~data["agent"]["valid_mask"][:, hist_steps:]] = 0
+        else:
+            target_position = (
+                data["agent"]["position"][:, :, hist_steps:]
+                - data["agent"]["position"][:, :, hist_steps - 1][:, :, None]
+            )
+            target_heading = (
+                data["agent"]["heading"][:, :, hist_steps:]
+                - data["agent"]["heading"][:, :, hist_steps - 1][:, :, None]
+            )
+            target = np.concatenate([target_position, target_heading[..., None]], -1)
+            target[~data["agent"]["valid_mask"][:, :, hist_steps:]] = 0
         data["agent"]["target"] = target
 
         if first_time:

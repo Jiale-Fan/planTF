@@ -20,8 +20,11 @@ from src.metrics import MR, minADE, minFDE
 from src.optim.warmup_cos_lr import WarmupCosLR
 from src.models.planTF.training_objectives import nll_loss_multimodes_joint, nll_loss_multimodes
 from src.models.planTF.pairing_matrix import proj_name_to_mat
+from src.models.planTF.planning_model import get_rotated_data
 
 from torch.nn.utils.rnn import pad_sequence
+from src.features.nuplan_feature import NuplanFeature
+
 
 logger = logging.getLogger(__name__)
 
@@ -119,31 +122,44 @@ class LightningTrainer(pl.LightningModule):
 
 
     def _compute_objectives(self, res, data) -> Dict[str, torch.Tensor]:
-        trajectory, prediction, keyframes = (
+        trajectory, prediction, keyframes, rot_angle = (
             res["trajectory"],
             res["prediction"],
-            res["keyframes"]
+            res["keyframes"],
+            res["rot_angle"],
         )        
 
         targets = data["agent"]["target"]
         valid_mask = data["agent"]["valid_mask"][:, :, -trajectory.shape[-2] :]
 
-        ego_target_pos, ego_target_heading = targets[:, 0, :, :2], targets[:, 0, :, 2]
-        ego_target = torch.cat(
+        targets_with_angles = torch.cat(
             [
-                ego_target_pos,
+                targets[:, :, :, :2],
                 torch.stack(
-                    [ego_target_heading.cos(), ego_target_heading.sin()], dim=-1
+                    [targets[:, :, :, 2].cos(), targets[:, :, :, 2].sin()], dim=-1
                 ),
             ],
             dim=-1,
         )
 
         agent_reg_loss = F.smooth_l1_loss(
-            prediction[valid_mask], targets[valid_mask][:, :2]
+            prediction[valid_mask], targets_with_angles[valid_mask]
         )
 
-        ego_keyframes_gt = ego_target[:, self.model.keyframes_indices]
+        data_rot = get_rotated_data(data, rot_angle)
+        targets_rot = data_rot["agent"]["target"]
+        ego_target_pos_rot, ego_target_heading_rot = targets_rot[:, 0, :, :2], targets_rot[:, 0, :, 2]
+        ego_target_rot = torch.cat(
+            [
+                ego_target_pos_rot,
+                torch.stack(
+                    [ego_target_heading_rot.cos(), ego_target_heading_rot.sin()], dim=-1
+                ),
+            ],
+            dim=-1,
+        )
+
+        ego_keyframes_gt = ego_target_rot[:, self.model.keyframes_indices].to(keyframes.device)
         key_frames_loss = F.smooth_l1_loss(keyframes, ego_keyframes_gt, reduction="none").mean(-1) # (B, K)
         
         train_epoch_progress = (self.current_epoch-self.pretraining_epochs) / (self.epochs-self.pretraining_epochs)
@@ -157,18 +173,24 @@ class LightningTrainer(pl.LightningModule):
         key_frames_fde_loss = key_frames_loss[:, -1].mean()
 
         if self.training:
+            ego_target_pos, ego_target_heading = targets[:, 0, :, :2], targets[:, 0, :, 2]
+            ego_target = torch.cat(
+                [
+                    ego_target_pos,
+                    torch.stack(
+                        [ego_target_heading.cos(), ego_target_heading.sin()], dim=-1
+                    ),
+                ],
+                dim=-1,
+            )
             trajectory_ref_loss = res["trajectory_ref_loss"]
             ego_reg_loss_batch = F.smooth_l1_loss(trajectory_ref_loss, ego_target, reduction="none").mean((-2,-1))
             ego_reg_loss = ego_reg_loss_batch.mean()
             # ego_reg_loss_var = ego_reg_loss_batch.var()
-
-            irm_loss = self.model.get_irm_loss(key_frames_ade_loss)
-
         else:
             ego_reg_loss = 0
-            irm_loss = 0
 
-        total_loss = ego_reg_loss + agent_reg_loss + key_frames_ade_loss + self.lam*irm_loss
+        total_loss = ego_reg_loss + agent_reg_loss + key_frames_ade_loss
 
         return {
             "loss": total_loss,
