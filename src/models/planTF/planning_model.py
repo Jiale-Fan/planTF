@@ -170,7 +170,7 @@ class PlanningModel(TorchModuleWrapper):
 
         prediction_full = self.agent_predictor(x[:, :A]).view(bs, -1, self.future_steps, 4) 
 
-        data_pred = self.updata_agent_info_with_pred(data, prediction_full)
+        data_pred = self.updata_agent_info_with_pred(data, prediction_full.clone().detach())
         rot_angle = self.sample_rotation_angle(bs)
 
         if self.training:
@@ -178,7 +178,7 @@ class PlanningModel(TorchModuleWrapper):
         else:
             data_pred_rot = data_pred
 
-        x_agent_p, agent_key_padding_p = self.encode_agents_info(self.agent_encoder_plan, data_pred)
+        x_agent_p, agent_key_padding_p = self.encode_agents_info(self.agent_encoder_plan, data_pred_rot)
 
         # concatenate the initial state to the context containing the prediction, take the elements corresponding to the agents
         x_agent_p = x_agent_p[:, 1:]
