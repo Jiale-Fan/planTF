@@ -64,7 +64,8 @@ class PlanningModel(TorchModuleWrapper):
         self.use_memory_mask = use_memory_mask
 
         self.pos_emb = build_mlp(4, [dim] * 2)
-        self.agent_encoder_pred = AgentEncoder(
+
+        self.agent_encoder_plan = AgentEncoder(
             state_channel=state_channel,
             history_channel=history_channel,
             dim=dim,
@@ -75,30 +76,9 @@ class PlanningModel(TorchModuleWrapper):
             state_dropout=state_dropout,
         )
 
-        self.agent_encoder_plan = AgentEncoder(
-            state_channel=state_channel,
-            history_channel=history_channel,
-            dim=dim,
-            hist_steps=history_steps+future_steps,
-            drop_path=drop_path,
-            use_ego_history=use_ego_history,
-            state_attn_encoder=state_attn_encoder,
-            state_dropout=state_dropout,
-        )
-
-        self.map_encoder_pred = MapEncoder(
-            dim=dim,
-            polygon_channel=polygon_channel,
-        )
-
         self.map_encoder_plan = MapEncoder(
             dim=dim,
             polygon_channel=polygon_channel,
-        )
-
-        self.encoder_blocks_pred = nn.ModuleList(
-            TransformerEncoderLayer(dim=dim, num_heads=num_heads, drop_path=dp)
-            for dp in [x.item() for x in torch.linspace(0, drop_path, encoder_depth)]
         )
 
         self.decoder_blocks = nn.ModuleList(
@@ -153,43 +133,23 @@ class PlanningModel(TorchModuleWrapper):
         elif isinstance(m, nn.Embedding):
             nn.init.normal_(m.weight, mean=0.0, std=0.2)
 
-    def forward(self, data):     
-        # encode the information of the agents and the map separately without cross attention
-        x_agent, agent_key_padding = self.encode_agents_info(self.agent_encoder_pred, data)
-        x_map, map_key_padding = self.initial_map_encoding(self.map_encoder_pred, data, on_route_info=True)
-        bs, A = x_agent.shape[:2]
-        x = torch.cat([x_agent, x_map], dim=1) # [batch, n_elem, n_dim]
-        key_padding_mask = torch.cat([agent_key_padding, map_key_padding], dim=-1) # [batch, n_elem]
-        x_initial = x
-        # x: [batch, n_elem, n_dim]. n_elem is not a fixed number, it depends on the number of agents and polygons in the scene
-
-        # prediction encoder: trained in pretraining stage
-        for blk in self.encoder_blocks_pred:
-            x = blk(x, key_padding_mask=key_padding_mask)
-        x = self.norm_enc(x)
-
-        prediction_full = self.agent_predictor(x[:, :A]).view(bs, -1, self.future_steps, 4) 
-
-        data_pred = self.updata_agent_info_with_pred(data, prediction_full.clone().detach())
+    def forward(self, data): 
+        bs = data["agent"]["position"].shape[0]
         rot_angle = self.sample_rotation_angle(bs)
 
         if self.training:
-            data_pred_rot = get_rotated_data(data_pred, rot_angle)
+            data_pred_rot = get_rotated_data(data, rot_angle)
         else:
-            data_pred_rot = data_pred
+            data_pred_rot = data
 
         x_agent_p, agent_key_padding_p = self.encode_agents_info(self.agent_encoder_plan, data_pred_rot)
-
-        # concatenate the initial state to the context containing the prediction, take the elements corresponding to the agents
-        x_agent_p = x_agent_p[:, 1:]
-        agent_key_padding_p = agent_key_padding_p[:, 1:]
-        key_padding_mask = key_padding_mask[:, 1:]
-        map_info, _ = self.initial_map_encoding(self.map_encoder_plan, data_pred_rot, on_route_info=True)
+        
+        map_info, map_key_padding = self.initial_map_encoding(self.map_encoder_plan, data_pred_rot, on_route_info=True)
+        key_padding_mask = torch.cat([agent_key_padding_p, map_key_padding], dim=-1) # [batch, n_elem]
         context = torch.cat([x_agent_p, map_info], dim=1) # [batch, n_elem, n_dim]
 
         queries = self.keyframes_seed.repeat(bs, 1, 1) # [batch, num_keyframes, n_dim]
         tgt_mask = self.get_decoder_tgt_masks(bs) # [batch*head, keyframes, keyframes]
-
 
         # ablation study: no mask
         if not self.use_attn_mask:
@@ -215,7 +175,7 @@ class PlanningModel(TorchModuleWrapper):
         final_rep = self.norm_dec(queries) # [batch, keyframes, n_dim]
         keyframes = self.keyframe_mlp(final_rep) # [batch, keyframes, 4]
 
-        ego_emb_hist = x[:, 0] # [batch, n_dim]
+        ego_emb_hist = x_agent_p[:, 0] # [batch, n_dim]
         ego_emb = torch.cat([ego_emb_hist, keyframes.view(bs, -1)], dim=-1) # [batch, dim+keyframes*4]
         trajectory, probability = self.trajectory_decoder_full(ego_emb) # [batch, num_modes, future_steps, 4]
         trajectory[:, :, self.keyframes_indices, :] = keyframes.unsqueeze(1) # [batch, num_modes, future_steps, 4]
@@ -226,7 +186,6 @@ class PlanningModel(TorchModuleWrapper):
             # "prediction_per": prediction_per,
             "trajectory": trajectory,
             "probability": probability,
-            "prediction": prediction_full,
             "keyframes": keyframes,
             "rot_angle": rot_angle,
         }
@@ -234,7 +193,7 @@ class PlanningModel(TorchModuleWrapper):
         if self.training:
             keyframes_gt = data["agent"]["target"][:, 0, self.keyframes_indices, :]
             keyframes_gt_input = torch.cat([keyframes_gt[..., :-1], torch.cos(keyframes_gt[..., -1:]), torch.sin(keyframes_gt[..., -1:])], dim=-1)
-            ego_emb_hist = x[:, 0] # [batch, n_dim]
+            ego_emb_hist = x_agent_p[:, 0] # [batch, n_dim]
             ego_emb = torch.cat([ego_emb_hist, keyframes_gt_input.view(bs, -1)], dim=-1) # [batch, dim+keyframes*4]
             trajectory_ref_loss, _ = self.trajectory_decoder_full(ego_emb) # [batch, num_modes, future_steps, 4]
             out["trajectory_ref_loss"] = trajectory_ref_loss.squeeze(1)
@@ -282,8 +241,8 @@ class PlanningModel(TorchModuleWrapper):
             agent_pos = torch.cat([agent_pos, pred_traj[..., :2]], dim=-2)
             agent_heading = torch.cat([agent_heading, torch.atan2(pred_traj[..., 3], pred_traj[..., 2])], dim=-1)
 
-        agent_pos = data["agent"]["position"] = agent_pos
-        agent_heading = data["agent"]["heading"] = agent_heading
+        data["agent"]["position"] = agent_pos
+        data["agent"]["heading"] = agent_heading
 
         return data
 

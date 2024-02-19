@@ -122,9 +122,8 @@ class LightningTrainer(pl.LightningModule):
 
 
     def _compute_objectives(self, res, data) -> Dict[str, torch.Tensor]:
-        trajectory, prediction, keyframes, rot_angle = (
+        trajectory, keyframes, rot_angle = (
             res["trajectory"],
-            res["prediction"],
             res["keyframes"],
             res["rot_angle"],
         )        
@@ -142,9 +141,9 @@ class LightningTrainer(pl.LightningModule):
             dim=-1,
         )
 
-        agent_reg_loss = F.smooth_l1_loss(
-            prediction[valid_mask], targets_with_angles[valid_mask]
-        )
+        # agent_reg_loss = F.smooth_l1_loss(
+        #     prediction[valid_mask], targets_with_angles[valid_mask]
+        # )
 
         data_rot = get_rotated_data(data, rot_angle)
         targets_rot = data_rot["agent"]["target"]
@@ -190,13 +189,13 @@ class LightningTrainer(pl.LightningModule):
         else:
             ego_reg_loss = 0
 
-        total_loss = ego_reg_loss + agent_reg_loss + key_frames_ade_loss
+        total_loss = ego_reg_loss + key_frames_ade_loss
 
         return {
             "loss": total_loss,
             "loss_keyframe": key_frames_ade_loss,
             "loss_keyframe_fde": key_frames_fde_loss,
-            "loss_pred": agent_reg_loss,
+            # "loss_pred": agent_reg_loss,
             "loss_ref": ego_reg_loss,
         }
 
@@ -268,22 +267,26 @@ class LightningTrainer(pl.LightningModule):
 
         opt_main = opts
 
-        if self.current_epoch < self.pretraining_epochs:
-            opt_main.zero_grad()
-            self.manual_backward(losses["loss_pred"]+losses["loss_ref"]) 
-            opt_main.step()
-        else:
-        # if True:
-            if not self.stage_two_init_flag:
-                self.model.init_stage_two()
-                self.stage_two_init_flag = True
-                # the init of stage two copies the map encoder for prediction
-                # to the map encoder for planning. Since we've replaced the original
-                # parameters, we can not do backward in this step
-            else:
-                opt_main.zero_grad()
-                self.manual_backward(losses["loss"])
-                opt_main.step()
+        # if self.current_epoch < self.pretraining_epochs:
+        #     opt_main.zero_grad()
+        #     self.manual_backward(losses["loss_pred"]+losses["loss_ref"]) 
+        #     opt_main.step()
+        # else:
+        # # if True:
+        #     if not self.stage_two_init_flag:
+        #         self.model.init_stage_two()
+        #         self.stage_two_init_flag = True
+        #         # the init of stage two copies the map encoder for prediction
+        #         # to the map encoder for planning. Since we've replaced the original
+        #         # parameters, we can not do backward in this step
+        #     else:
+        #         opt_main.zero_grad()
+        #         self.manual_backward(losses["loss"])
+        #         opt_main.step()
+
+        opt_main.zero_grad()
+        self.manual_backward(losses["loss"])
+        opt_main.step()
             
         metrics = self._compute_metrics(res, features["feature"].data, prefix)
         self._log_step(losses["loss"], losses, metrics, prefix) 
