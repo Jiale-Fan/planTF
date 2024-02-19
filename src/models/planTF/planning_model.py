@@ -171,7 +171,7 @@ class PlanningModel(TorchModuleWrapper):
         prediction_full = self.agent_predictor(x[:, :A]).view(bs, -1, self.future_steps, 4) 
 
         data_pred = self.updata_agent_info_with_pred(data, prediction_full)
-        rot_angle = self.sample_rotation_angle()
+        rot_angle = self.sample_rotation_angle(bs)
 
         if self.training:
             data_pred_rot = get_rotated_data(data_pred, rot_angle)
@@ -247,8 +247,8 @@ class PlanningModel(TorchModuleWrapper):
 
         return out
     
-    def sample_rotation_angle(self):
-        return torch.FloatTensor([0.0]).uniform_(-torch.pi/3, torch.pi/3)
+    def sample_rotation_angle(self, bs):
+        return torch.FloatTensor([0.0]*bs).uniform_(-torch.pi/3, torch.pi/3)
     
     def get_irm_loss(self, keyframe_loss):
         grads = torch.autograd.grad(keyframe_loss, [t if t.requires_grad else None for t in list(self.decoder_blocks.parameters())], create_graph=True)
@@ -397,7 +397,11 @@ class PlanningModel(TorchModuleWrapper):
 
 
 def get_rotated_data(data, rot_angle):
+    """
+        data: dictionary containing map and agent info
+        rot_angle: [batch_size]
+    """
     np_data=NuplanFeature(data).to_numpy().data
-    np_data["current_state"][2] = rot_angle
+    np_data["current_state"][:, 2] = rot_angle
     new_data = NuplanFeature.normalize(np_data, batch=True).to_feature_tensor().to_device(data["map"]["polygon_center"].device).data
     return new_data

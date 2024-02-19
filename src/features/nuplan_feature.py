@@ -62,6 +62,19 @@ class NuplanFeature(AbstractModelFeature):
 
     def is_valid(self) -> bool:
         return self.data["polylines"].shape[0] > 0
+    
+    @classmethod
+    def batch_rotation_matmul(self, matrix: np.mat, rotate_mat: np.mat):
+        original_shape = matrix.shape
+        if len(matrix.shape) == 4:
+            b = np.repeat(rotate_mat.transpose(2,0,1)[:, np.newaxis, :, :], matrix.shape[1], axis=1)
+        elif len(matrix.shape) == 5:
+            b = np.repeat(rotate_mat.transpose(2,0,1)[:, np.newaxis, :, :], matrix.shape[1], axis=1)
+            b = np.repeat(b[:, :, np.newaxis, :, :], matrix.shape[2], axis=2)
+        flatten_matrix = matrix.reshape(-1, original_shape[-2], original_shape[-1])
+        flatten_b = b.reshape(-1, b.shape[-2], b.shape[-1])
+        res = np.matmul(flatten_matrix, flatten_b)
+        return res.reshape(original_shape)
 
     @classmethod
     def normalize(
@@ -70,40 +83,37 @@ class NuplanFeature(AbstractModelFeature):
         cur_state = data["current_state"]
         if batch == False:
             center_xy, center_angle = cur_state[:2].copy(), cur_state[2].copy()
-        else:
-            center_xy, center_angle = cur_state[0, :2].copy(), cur_state[0, 2].copy()
 
-        rotate_mat = np.array(
+            rotate_mat = np.array(
             [
                 [np.cos(center_angle), -np.sin(center_angle)],
                 [np.sin(center_angle), np.cos(center_angle)],
             ],
             dtype=np.float64,
-        )
+            )
 
-        data["current_state"][:3] = 0
-        data["agent"]["position"] = np.matmul(
-            data["agent"]["position"] - center_xy, rotate_mat
-        )
-        data["agent"]["velocity"] = np.matmul(data["agent"]["velocity"], rotate_mat)
-        data["agent"]["heading"] -= center_angle
+            data["current_state"][:3] = 0
+            data["agent"]["position"] = np.matmul(
+                data["agent"]["position"] - center_xy, rotate_mat
+            )
+            data["agent"]["velocity"] = np.matmul(data["agent"]["velocity"], rotate_mat)
+            data["agent"]["heading"] -= center_angle
 
-        data["map"]["point_position"] = np.matmul(
-            data["map"]["point_position"] - center_xy, rotate_mat
-        )
-        data["map"]["point_vector"] = np.matmul(data["map"]["point_vector"], rotate_mat)
-        data["map"]["point_orientation"] -= center_angle
+            data["map"]["point_position"] = np.matmul(
+                data["map"]["point_position"] - center_xy, rotate_mat
+            )
+            data["map"]["point_vector"] = np.matmul(data["map"]["point_vector"], rotate_mat)
+            data["map"]["point_orientation"] -= center_angle
 
-        data["map"]["polygon_center"][..., :2] = np.matmul(
-            data["map"]["polygon_center"][..., :2] - center_xy, rotate_mat
-        )
-        data["map"]["polygon_center"][..., 2] -= center_angle
-        data["map"]["polygon_position"] = np.matmul(
-            data["map"]["polygon_position"] - center_xy, rotate_mat
-        )
-        data["map"]["polygon_orientation"] -= center_angle
+            data["map"]["polygon_center"][..., :2] = np.matmul(
+                data["map"]["polygon_center"][..., :2] - center_xy, rotate_mat
+            )
+            data["map"]["polygon_center"][..., 2] -= center_angle
+            data["map"]["polygon_position"] = np.matmul(
+                data["map"]["polygon_position"] - center_xy, rotate_mat
+            )
+            data["map"]["polygon_orientation"] -= center_angle
 
-        if not batch:
             target_position = (
                 data["agent"]["position"][:, hist_steps:]
                 - data["agent"]["position"][:, hist_steps - 1][:, None]
@@ -114,7 +124,42 @@ class NuplanFeature(AbstractModelFeature):
             )
             target = np.concatenate([target_position, target_heading[..., None]], -1)
             target[~data["agent"]["valid_mask"][:, hist_steps:]] = 0
+
+            data["agent"]["target"] = target
+
         else:
+            center_xy, center_angle = cur_state[:, :2].copy(), cur_state[:, 2].copy()
+
+            rotate_mat = np.array(
+                [
+                    [np.cos(center_angle), -np.sin(center_angle)],
+                    [np.sin(center_angle), np.cos(center_angle)],
+                ],
+                dtype=np.float64,
+            )
+
+            data["current_state"][:, :3] = 0
+            data["agent"]["position"] = NuplanFeature.batch_rotation_matmul(
+                data["agent"]["position"] - center_xy[:, None, None, :], rotate_mat
+            )
+            data["agent"]["velocity"] = NuplanFeature.batch_rotation_matmul(data["agent"]["velocity"], rotate_mat)
+            data["agent"]["heading"] -= center_angle[:,None,None]
+
+            data["map"]["point_position"] = NuplanFeature.batch_rotation_matmul(
+                data["map"]["point_position"] - center_xy[:, None, None, None, :], rotate_mat
+            )
+            data["map"]["point_vector"] = NuplanFeature.batch_rotation_matmul(data["map"]["point_vector"], rotate_mat)
+            data["map"]["point_orientation"] -= center_angle[:,None,None,None]
+
+            data["map"]["polygon_center"][..., :2] = np.matmul(
+                data["map"]["polygon_center"][..., :2] - center_xy[:, None, :], rotate_mat.transpose(2,0,1)
+            )
+            data["map"]["polygon_center"][..., 2] -= center_angle[:,None]
+            data["map"]["polygon_position"] = np.matmul(
+                data["map"]["polygon_position"] - center_xy[:, None, :], rotate_mat.transpose(2,0,1)
+            )
+            data["map"]["polygon_orientation"] -= center_angle[:,None]
+
             target_position = (
                 data["agent"]["position"][:, :, hist_steps:]
                 - data["agent"]["position"][:, :, hist_steps - 1][:, :, None]
@@ -125,7 +170,8 @@ class NuplanFeature(AbstractModelFeature):
             )
             target = np.concatenate([target_position, target_heading[..., None]], -1)
             target[~data["agent"]["valid_mask"][:, :, hist_steps:]] = 0
-        data["agent"]["target"] = target
+
+            data["agent"]["target"] = target
 
         if first_time:
             point_position = data["map"]["point_position"]
