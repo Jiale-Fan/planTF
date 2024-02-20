@@ -161,7 +161,8 @@ class LightningTrainer(pl.LightningModule):
         ego_keyframes_gt = ego_target_rot[:, self.model.keyframes_indices].to(keyframes.device)
         key_frames_loss = F.smooth_l1_loss(keyframes, ego_keyframes_gt, reduction="none").mean(-1) # (B, K)
         
-        train_epoch_progress = (self.current_epoch-self.pretraining_epochs) / (self.epochs-self.pretraining_epochs)
+        train_epoch_progress = (self.current_epoch-self.pretraining_epochs) / (self.epochs-5-self.pretraining_epochs)
+        train_epoch_progress = min(1.0, train_epoch_progress)
 
         # for debug 
         # train_epoch_progress = 0.3
