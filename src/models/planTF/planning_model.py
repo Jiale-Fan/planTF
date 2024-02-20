@@ -135,12 +135,14 @@ class PlanningModel(TorchModuleWrapper):
 
     def forward(self, data): 
         bs = data["agent"]["position"].shape[0]
-        rot_angle = self.sample_rotation_angle(bs)
+        # rot_angle = self.sample_rotation_angle(bs)
 
-        if self.training:
-            data_pred_rot = get_rotated_data(data, rot_angle)
-        else:
-            data_pred_rot = data
+        # if self.training:
+        #     data_pred_rot = get_rotated_data(data, rot_angle)
+        # else:
+        #     data_pred_rot = data
+
+        data_pred_rot = data
 
         x_agent_p, agent_key_padding_p = self.encode_agents_info(self.agent_encoder_plan, data_pred_rot)
         
@@ -187,7 +189,7 @@ class PlanningModel(TorchModuleWrapper):
             "trajectory": trajectory,
             "probability": probability,
             "keyframes": keyframes,
-            "rot_angle": rot_angle,
+            # "rot_angle": rot_angle,
         }
 
         if self.training:

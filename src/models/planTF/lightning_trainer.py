@@ -122,10 +122,10 @@ class LightningTrainer(pl.LightningModule):
 
 
     def _compute_objectives(self, res, data) -> Dict[str, torch.Tensor]:
-        trajectory, keyframes, rot_angle = (
+        trajectory, keyframes= (
             res["trajectory"],
             res["keyframes"],
-            res["rot_angle"],
+            # res["rot_angle"],
         )        
 
         targets = data["agent"]["target"]
@@ -145,7 +145,7 @@ class LightningTrainer(pl.LightningModule):
         #     prediction[valid_mask], targets_with_angles[valid_mask]
         # )
 
-        data_rot = get_rotated_data(data, rot_angle)
+        data_rot = data
         targets_rot = data_rot["agent"]["target"]
         ego_target_pos_rot, ego_target_heading_rot = targets_rot[:, 0, :, :2], targets_rot[:, 0, :, 2]
         ego_target_rot = torch.cat(
