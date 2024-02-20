@@ -37,7 +37,7 @@ class LightningTrainer(pl.LightningModule):
         weight_decay,
         epochs,
         warmup_epochs,
-        pretraining_epochs=6,
+        pretraining_epochs=0,
         masker_var_weight=1.0,
         prediction_timesteps=40,
         lam = 0.5,
