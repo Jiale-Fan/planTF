@@ -7,6 +7,7 @@ from nuplan.planning.training.preprocessing.target_builders.ego_trajectory_targe
 )
 
 from src.feature_builders.nuplan_feature_builder import NuplanFeatureBuilder
+from src.features.nuplan_feature import NuplanFeature
 
 from .layers.common_layers import build_mlp
 from .layers.transformer_encoder_layer import TransformerEncoderLayer
@@ -131,12 +132,30 @@ class PlanningModel(TorchModuleWrapper):
             "prediction": prediction,
         }
 
-        if not self.training:
-            best_mode = probability.argmax(dim=-1)
-            output_trajectory = trajectory[torch.arange(bs), best_mode]
-            angle = torch.atan2(output_trajectory[..., 3], output_trajectory[..., 2])
-            out["output_trajectory"] = torch.cat(
-                [output_trajectory[..., :2], angle.unsqueeze(-1)], dim=-1
-            )
+
+        best_mode = probability.argmax(dim=-1)
+        output_trajectory = trajectory[torch.arange(bs), best_mode]
+        angle = torch.atan2(output_trajectory[..., 3], output_trajectory[..., 2])
+        out["output_trajectory"] = torch.cat(
+            [output_trajectory[..., :2], angle.unsqueeze(-1)], dim=-1
+        )
 
         return out
+    
+    def rollout(self, data, output_trajectory):
+        """
+        Rollout the planned trajectory, return the ego-centric scene in sparse future frames.
+            data: dict, input data
+            planned_trajectory: torch.Tensor, [bs, future_steps, 3]
+        """
+        future_keyframes = output_trajectory[:, 0:5:30, :]
+
+        data_unpacked = NuplanFeature(data=data).unpack()
+        bs, frames = future_keyframes.shape[0:2]
+
+        for i in range(bs):
+            normed = []
+            for j in range(frames):
+                data_unpacked[i].data["current_state"] = output_trajectory[i, j]
+                normed.append(data_unpacked[i].normalize())
+                
