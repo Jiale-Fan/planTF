@@ -91,7 +91,7 @@ class LightningTrainer(pl.LightningModule):
         ade = torch.norm(trajectory[..., :2] - ego_target[:, None, :, :2], dim=-1)
         best_mode = torch.argmin(ade.sum(-1), dim=-1)
         best_traj = trajectory[torch.arange(trajectory.shape[0]), best_mode]
-        ego_reg_loss = F.smooth_l1_loss(best_traj, ego_target)
+        ego_reg_loss = F.mse_loss(best_traj, ego_target)
         ego_cls_loss = F.cross_entropy(probability, best_mode.detach())
 
         agent_reg_loss = F.smooth_l1_loss(
