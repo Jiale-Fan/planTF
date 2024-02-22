@@ -68,13 +68,14 @@ class LightningTrainer(pl.LightningModule):
         return losses["loss"]
 
     def _compute_objectives(self, res, data) -> Dict[str, torch.Tensor]:
-        trajectory, probability, prediction = (
+        trajectory, probability, estimation, mask = (
             res["trajectory"],
             res["probability"],
-            res["prediction"],
+            res["estimation"],
+            res["mask"],
         )
         targets = data["agent"]["target"]
-        valid_mask = data["agent"]["valid_mask"][:, :, -trajectory.shape[-2] :]
+        # valid_mask = data["agent"]["valid_mask"][:, :, -trajectory.shape[-2] :]
 
         ego_target_pos, ego_target_heading = targets[:, 0, :, :2], targets[:, 0, :, 2]
         ego_target = torch.cat(
@@ -86,26 +87,43 @@ class LightningTrainer(pl.LightningModule):
             ],
             dim=-1,
         )
-        agent_target, agent_mask = targets[:, 1:], valid_mask[:, 1:]
+        # agent_target, agent_mask = targets[:, 1:], valid_mask[:, 1:]
 
-        ade = torch.norm(trajectory[..., :2] - ego_target[:, None, :, :2], dim=-1)
+        ade = torch.norm(trajectory[..., :2] - ego_target[:, None, :, :2], dim=-1) # [bs, n_modes, n_steps]
         best_mode = torch.argmin(ade.sum(-1), dim=-1)
         best_traj = trajectory[torch.arange(trajectory.shape[0]), best_mode]
-        ego_reg_loss = F.mse_loss(best_traj, ego_target)
+        ego_reg_loss = F.smooth_l1_loss(best_traj, ego_target, reduction='none').mean((1, 2))
+        ego_reg_loss_mean = ego_reg_loss.mean()
         ego_cls_loss = F.cross_entropy(probability, best_mode.detach())
 
-        agent_reg_loss = F.smooth_l1_loss(
-            prediction[agent_mask], agent_target[agent_mask][:, :2]
-        )
+        estimation_loss = self._compute_estimation_loss(ego_reg_loss, estimation, mask)
 
-        loss = ego_reg_loss + ego_cls_loss + agent_reg_loss
+        loss = ego_reg_loss_mean + ego_cls_loss + estimation_loss
 
         return {
             "loss": loss,
-            "reg_loss": ego_reg_loss,
+            "reg_loss": ego_reg_loss_mean,
             "cls_loss": ego_cls_loss,
-            "prediction_loss": agent_reg_loss,
+            "estimation_loss": estimation_loss,
         }
+    
+    def _compute_estimation_loss(self, ego_reg_loss, estimation, mask):
+        '''
+            Compute the negative log likelihood of the estimation
+            The first element of the estimation is the mean of the gaussian
+            The second element of the estimation is the standard deviation of the gaussian
+
+            ego_reg_loss: [bs]
+            estimation: [bs, n_emb, 2]
+            mask: [bs, n_emb]
+
+        '''
+        ego_reg_loss = ego_reg_loss.clone().detach()
+        mean, std = estimation[..., 0], estimation[..., 1]
+        loss = torch.log(std) + 0.5 * ((ego_reg_loss[:, None] - mean) / std) ** 2
+        masked_loss = loss * mask.squeeze(-1)
+        return masked_loss.sum()/mask.sum()
+
 
     def _compute_metrics(self, output, data, prefix) -> Dict[str, torch.Tensor]:
         metrics = self.metrics[prefix](output, data["agent"]["target"][:, 0])
@@ -156,7 +174,10 @@ class LightningTrainer(pl.LightningModule):
         :param batch_idx: batch's index (unused)
         :return: model's loss tensor
         """
-        return self._step(batch, "train")
+        
+        t = self._step(batch, "train")
+        self.model.EMA_update()
+        return t
 
     def validation_step(
         self, batch: Tuple[FeaturesType, TargetsType, ScenarioListType], batch_idx: int
