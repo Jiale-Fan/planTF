@@ -1,7 +1,7 @@
  export PYTHONPATH=$PYTHONPATH:$(pwd)
 
-cwd=$(pwd)
-CKPT_ROOT="$cwd/checkpoints"
+# cwd=$(pwd)
+CKPT_ROOT="~/Documents/checkpoints/"
 
 PLANNER="planTF"
 SPLIT=$1
@@ -16,7 +16,9 @@ for challenge in $CHALLENGES; do
         worker.threads_per_node=16 \
         experiment_uid=$SPLIT/$planner \
         verbose=true \
-        planner.imitation_planner.planner_ckpt="$CKPT_ROOT/$PLANNER.ckpt"
+        planner.imitation_planner.planner_ckpt="/home/jiale/Documents/checkpoints/masking_v1.0.ckpt"
 done
 
 
+# sh ./script/plantf_benchmarks.sh test14-random
+# sh ./script/plantf_benchmarks.sh test14-hard

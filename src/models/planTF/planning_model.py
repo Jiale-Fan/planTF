@@ -39,7 +39,7 @@ class PlanningModel(TorchModuleWrapper):
         state_dropout=0.75,
         ema_update_alpha=0.999,
         mask_rate=0.7,
-        eval_mode="random", # "best", "random" or "worst"
+        eval_mode="best", # "best", "random", "worst", or "no_mask"
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
     ) -> None:
         super().__init__(
@@ -157,16 +157,18 @@ class PlanningModel(TorchModuleWrapper):
 
         M = self.get_mask(key_padding_mask)
         if not self.training: 
-            if self.eval_mode == "best":
-                _,_,estimation = self.teacher_model(x, M, key_padding_mask)[1].argmax(dim=-1).unsqueeze(-1)
+            if self.eval_mode == "worst":
+                _,_,estimation = self.teacher_model(x, M, key_padding_mask)
                 scores = estimation[..., 0]
                 M = self.get_mask(key_padding_mask, scores)
             elif self.eval_mode == "random":
                 pass
-            elif self.eval_mode == "worst":
-                _,_,estimation = self.teacher_model(x, M, key_padding_mask)[1].argmin(dim=-1).unsqueeze(-1)
-                scores = -estimation[..., 0]
+            elif self.eval_mode == "best":
+                _,_,estimation = self.teacher_model(x, M, key_padding_mask)
+                scores = estimation[..., 0].pow(-1)
                 M = self.get_mask(key_padding_mask, scores)
+            elif self.eval_mode == "no_mask":
+                M = torch.zeros_like(M)
             else:
                 raise NotImplementedError
         # x_p = (x_initial*(~M)+ (pos_embed+self.masked_embedding_offset)*M)*(~key_padding_mask.unsqueeze(-1)) 
