@@ -59,7 +59,8 @@ class LightningTrainer(pl.LightningModule):
         self, batch: Tuple[FeaturesType, TargetsType, ScenarioListType], prefix: str
     ) -> torch.Tensor:
         features, _, _ = batch
-        res = self.forward(features["feature"].data)
+        progress = self.current_epoch*1.0 / self.epochs
+        res = self.forward(features["feature"].data, progress)
 
         losses = self._compute_objectives(res, features["feature"].data)
         metrics = self._compute_metrics(res, features["feature"].data, prefix)

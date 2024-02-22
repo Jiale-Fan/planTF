@@ -39,6 +39,8 @@ class PlanningModel(TorchModuleWrapper):
         state_dropout=0.75,
         ema_update_alpha=0.999,
         mask_rate=0.7,
+        alpha_0=0, 
+        alpha_T=0.5,
         eval_mode="best", # "best", "random", "worst", or "no_mask"
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
     ) -> None:
@@ -71,8 +73,6 @@ class PlanningModel(TorchModuleWrapper):
             dim=dim,
             polygon_channel=polygon_channel,
         )
-
-
         # new stuff
 
         self.element_type_embedding = nn.Embedding(7, dim)
@@ -96,6 +96,9 @@ class PlanningModel(TorchModuleWrapper):
         )
         self.teacher_model.requires_grad_(False)
 
+        self.alpha_0 = alpha_0
+        self.alpha_T = alpha_T
+
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
@@ -112,14 +115,16 @@ class PlanningModel(TorchModuleWrapper):
         elif isinstance(m, nn.Embedding):
             nn.init.normal_(m.weight, mean=0.0, std=0.02)
 
-    def get_mask(self, key_padding_mask, scores=None):
+    def get_mask(self, key_padding_mask, scores=None, fraction=None):
         '''
             input: key_padding_mask: [batch, n_elem]
             output: mask: [batch, n_elem] with mask_rate of its valid elements set to 1
         '''
+        if fraction is None:
+            fraction = self.mask_rate
         padding_masks = ~key_padding_mask
         valid_num = padding_masks.sum(dim=-1)
-        unmasked_num = (valid_num * self.mask_rate).to(torch.long)
+        unmasked_num = (valid_num * fraction).to(torch.long)
         if scores is None:
             scores = torch.stack([torch.randperm(padding_masks.shape[-1])+1 for _ in range(padding_masks.shape[0])], dim=0)
         scores = scores.to(padding_masks.device)*padding_masks
@@ -128,7 +133,7 @@ class PlanningModel(TorchModuleWrapper):
         mask = scores > indices_split.unsqueeze(-1)
         return mask.unsqueeze(-1)
 
-    def forward(self, data):
+    def forward(self, data, progress):
 
         # data preparation
         agent_pos = data["agent"]["position"][:, :, self.history_steps - 1]
@@ -171,8 +176,17 @@ class PlanningModel(TorchModuleWrapper):
                 M = torch.zeros_like(M)
             else:
                 raise NotImplementedError
+        else:
+            M = torch.zeros_like(M)
+            _,_,estimation = self.teacher_model(x, M, key_padding_mask)
+            scores = estimation[..., 0].pow(-1)
+            frac = self.alpha_0 + (self.alpha_T - self.alpha_0) * progress
+            M_score = self.get_mask(key_padding_mask, scores, frac)
+            padding_mask = key_padding_mask | M_score.squeeze(-1)
+            M_random = self.get_mask(padding_mask, fraction=self.mask_rate-frac)
+            M_final = M_score | M_random
+            M = M_final
         # x_p = (x_initial*(~M)+ (pos_embed+self.masked_embedding_offset)*M)*(~key_padding_mask.unsqueeze(-1)) 
-
         # masking_rate of the original input are masked
 
         trajectory, probability, estimation = self.student_model(x, M, key_padding_mask)
