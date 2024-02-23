@@ -41,7 +41,7 @@ class PlanningModel(TorchModuleWrapper):
         mask_rate=0.7,
         alpha_0=0, 
         alpha_T=0.5,
-        eval_mode="best", # "best", "random", "worst", or "no_mask"
+        eval_mode="no_mask", # "best", "random", "worst", or "no_mask"
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
     ) -> None:
         super().__init__(
@@ -133,7 +133,7 @@ class PlanningModel(TorchModuleWrapper):
         mask = scores > indices_split.unsqueeze(-1)
         return mask.unsqueeze(-1)
 
-    def forward(self, data, progress):
+    def forward(self, data, progress=None):
 
         # data preparation
         agent_pos = data["agent"]["position"][:, :, self.history_steps - 1]
