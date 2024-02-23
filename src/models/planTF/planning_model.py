@@ -265,7 +265,7 @@ class TSModel(nn.Module):
         x = x_input
         x = (x*(~M)+ (self.masked_embedding_offset)*M)*(~key_padding_mask.unsqueeze(-1)) 
 
-        x = torch.concat([self.ego_embedding.repeat(x_input.shape[0], 1, 1), x_input], dim=1)
+        x = torch.concat([self.ego_embedding.repeat(x_input.shape[0], 1, 1), x], dim=1)
         key_padding_mask_p = torch.cat([torch.zeros(x_input.shape[0], 1).to('cuda'), key_padding_mask], dim=-1)
 
         for blk in self.encoder_blocks:
