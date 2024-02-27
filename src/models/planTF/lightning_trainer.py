@@ -30,6 +30,7 @@ class LightningTrainer(pl.LightningModule):
         weight_decay,
         epochs,
         warmup_epochs,
+        pretrain_epochs = 15,
     ) -> None:
         super().__init__()
         self.save_hyperparameters(ignore=["model"])
@@ -39,6 +40,9 @@ class LightningTrainer(pl.LightningModule):
         self.weight_decay = weight_decay
         self.epochs = epochs
         self.warmup_epochs = warmup_epochs
+        self.pretrain_epochs = pretrain_epochs
+
+        self.initial_finetune_flag = False
 
     def on_fit_start(self) -> None:
         metrics_collection = MetricCollection(
@@ -59,8 +63,8 @@ class LightningTrainer(pl.LightningModule):
         self, batch: Tuple[FeaturesType, TargetsType, ScenarioListType], prefix: str
     ) -> torch.Tensor:
         features, _, _ = batch
-        progress = self.current_epoch*1.0 / self.epochs
-        res = self.model(features["feature"].data, progress)
+
+        res = self.model(features["feature"].data)
 
         losses = self._compute_objectives(res, features["feature"].data)
         metrics = self._compute_metrics(res, features["feature"].data, prefix)
@@ -69,11 +73,9 @@ class LightningTrainer(pl.LightningModule):
         return losses["loss"]
 
     def _compute_objectives(self, res, data) -> Dict[str, torch.Tensor]:
-        trajectory, probability, estimation, mask = (
+        trajectory, probability= (
             res["trajectory"],
             res["probability"],
-            res["estimation"],
-            res["mask"],
         )
         targets = data["agent"]["target"]
         # valid_mask = data["agent"]["valid_mask"][:, :, -trajectory.shape[-2] :]
@@ -97,34 +99,25 @@ class LightningTrainer(pl.LightningModule):
         ego_reg_loss_mean = ego_reg_loss.mean()
         ego_cls_loss = F.cross_entropy(probability, best_mode.detach())
 
-        estimation_loss = self._compute_estimation_loss(ego_reg_loss, estimation, mask)
-
-        loss = ego_reg_loss_mean + ego_cls_loss + estimation_loss
+        if self.current_epoch < self.pretrain_epochs:
+            loss = res["pretrain_loss"]
+        else:
+            if not self.initial_finetune_flag:
+                self.model.initial_finetune()
+                print("Initial finetune done")
+                loss = res["pretrain_loss"]
+            else: 
+                loss = ego_reg_loss_mean + ego_cls_loss
 
         return {
             "loss": loss,
             "reg_loss": ego_reg_loss_mean,
             "cls_loss": ego_cls_loss,
-            "estimation_loss": estimation_loss,
+            "pretrain_loss": res["pretrain_loss"],
+            "hist_loss": res["hist_loss"],
+            "future_loss": res["future_loss"],
+            "lane_pred_loss": res["lane_pred_loss"],
         }
-    
-    def _compute_estimation_loss(self, ego_reg_loss, estimation, mask):
-        '''
-            Compute the negative log likelihood of the estimation
-            The first element of the estimation is the mean of the gaussian
-            The second element of the estimation is the standard deviation of the gaussian
-
-            ego_reg_loss: [bs]
-            estimation: [bs, n_emb, 2]
-            mask: [bs, n_emb]
-
-        '''
-        ego_reg_loss = ego_reg_loss.clone().detach()
-        mean, std = estimation[..., 0], estimation[..., 1]
-        loss = torch.log(std) + 0.5 * ((ego_reg_loss[:, None] - mean) / std) ** 2
-        masked_loss = loss * mask
-        return masked_loss.sum()/mask.sum()
-
 
     def _compute_metrics(self, output, data, prefix) -> Dict[str, torch.Tensor]:
         metrics = self.metrics[prefix](output, data["agent"]["target"][:, 0])

@@ -11,18 +11,20 @@ class AgentEncoder(nn.Module):
         state_channel=6,
         history_channel=9,
         dim=128,
-        hist_steps=21,
         use_ego_history=False,
         drop_path=0.2,
         state_attn_encoder=True,
         state_dropout=0.75,
+        starting_step=0,
+        ending_step=21,
     ) -> None:
         super().__init__()
         self.dim = dim
         self.state_channel = state_channel
         self.use_ego_history = use_ego_history
-        self.hist_steps = hist_steps
         self.state_attn_encoder = state_attn_encoder
+        self.starting_step = starting_step
+        self.ending_step = ending_step
 
         self.history_encoder = NATSequenceEncoder(
             in_chans=history_channel, embed_dim=dim // 4, drop_path_rate=drop_path
@@ -52,14 +54,15 @@ class AgentEncoder(nn.Module):
         )
 
     def forward(self, data):
-        T = self.hist_steps
+        # T = self.hist_steps
 
-        position = data["agent"]["position"][:, :, :T]
-        heading = data["agent"]["heading"][:, :, :T]
-        velocity = data["agent"]["velocity"][:, :, :T]
-        shape = data["agent"]["shape"][:, :, :T]
+        position = data["agent"]["position"][:, :, self.starting_step:self.ending_step]
+        heading = data["agent"]["heading"][:, :, self.starting_step:self.ending_step]
+        velocity = data["agent"]["velocity"][:, :, self.starting_step:self.ending_step]
+        shape = data["agent"]["shape"][:, :, self.starting_step:self.ending_step]
         category = data["agent"]["category"].long()
-        valid_mask = data["agent"]["valid_mask"][:, :, :T]
+        valid_mask = data["agent"]["valid_mask"][:, :, self.starting_step:self.ending_step]
+
 
         heading_vec = self.to_vector(heading, valid_mask)
         valid_mask_vec = valid_mask[..., 1:] & valid_mask[..., :-1]
