@@ -161,31 +161,40 @@ class PlanningModel(TorchModuleWrapper):
         x = torch.cat([x_agent, x_polygon], dim=1) + pos_embed
 
         M = self.get_mask(key_padding_mask)
-        if not self.training: 
-            if self.eval_mode == "worst":
-                _,_,estimation = self.teacher_model(x, M, key_padding_mask)
-                scores = estimation[..., 0]
-                M = self.get_mask(key_padding_mask, scores)
-            elif self.eval_mode == "random":
-                pass
-            elif self.eval_mode == "best":
-                _,_,estimation = self.teacher_model(x, M, key_padding_mask)
-                scores = estimation[..., 0].pow(-1)
-                M = self.get_mask(key_padding_mask, scores)
-            elif self.eval_mode == "no_mask":
-                M = torch.zeros_like(M)
-            else:
-                raise NotImplementedError
-        else:
+
+        if not self.training:
             M = torch.zeros_like(M)
-            _,_,estimation = self.teacher_model(x, M, key_padding_mask)
-            scores = estimation[..., 0].pow(-1)
-            frac = self.alpha_0 + (self.alpha_T - self.alpha_0) * progress
-            M_score = self.get_mask(key_padding_mask, scores, frac)
-            padding_mask = key_padding_mask | M_score.squeeze(-1)
-            M_random = self.get_mask(padding_mask, fraction=self.mask_rate-frac)
-            M_final = M_score | M_random
-            M = M_final
+        if progress is not None:
+            if progress > 0.5:
+                M = torch.zeros_like(M)
+
+        # if not self.training: 
+        #     if self.eval_mode == "worst":
+        #         _,_,estimation = self.teacher_model(x, M, key_padding_mask)
+        #         scores = estimation[..., 0]
+        #         M = self.get_mask(key_padding_mask, scores)
+        #     elif self.eval_mode == "random":
+        #         pass
+        #     elif self.eval_mode == "best":
+        #         _,_,estimation = self.teacher_model(x, M, key_padding_mask)
+        #         scores = estimation[..., 0].pow(-1)
+        #         M = self.get_mask(key_padding_mask, scores)
+        #     elif self.eval_mode == "no_mask":
+        #         M = torch.zeros_like(M)
+        #     else:
+        #         raise NotImplementedError
+        # else:
+        #     M = torch.zeros_like(M)
+        #     _,_,estimation = self.teacher_model(x, M, key_padding_mask)
+        #     scores = estimation[..., 0].pow(-1)
+        #     frac = self.alpha_0 + (self.alpha_T - self.alpha_0) * progress
+        #     M_score = self.get_mask(key_padding_mask, scores, frac)
+        #     padding_mask = key_padding_mask | M_score.squeeze(-1)
+        #     M_random = self.get_mask(padding_mask, fraction=self.mask_rate-frac)
+        #     M_final = M_score | M_random
+        #     M = M_final
+
+
         # x_p = (x_initial*(~M)+ (pos_embed+self.masked_embedding_offset)*M)*(~key_padding_mask.unsqueeze(-1)) 
         # masking_rate of the original input are masked
 
@@ -253,7 +262,7 @@ class TSModel(nn.Module):
             for dp in [x.item() for x in torch.linspace(0, drop_path, encoder_depth)]
         )
 
-        self.masked_embedding_offset = nn.Parameter(torch.randn(1, 1, dim).to('cuda'), requires_grad=True)
+        # self.masked_embedding_offset = nn.Parameter(torch.randn(1, 1, dim).to('cuda'), requires_grad=True)
         self.ego_embedding = nn.Parameter(torch.randn(1, 1, dim).to('cuda'), requires_grad=True)
 
         self.estimation_head = build_mlp(dim, [dim * 2, 2], norm="ln")
@@ -263,7 +272,9 @@ class TSModel(nn.Module):
         M = mask
         x_e = x_input.clone().detach()
         x = x_input
-        x = (x*(~M)+ (self.masked_embedding_offset)*M)*(~key_padding_mask.unsqueeze(-1)) 
+        # x = (x*(~M)+ (self.masked_embedding_offset)*M)*(~key_padding_mask.unsqueeze(-1)) 
+
+        key_padding_mask = key_padding_mask | M.squeeze(-1)
 
         x = torch.concat([self.ego_embedding.repeat(x_input.shape[0], 1, 1), x], dim=1)
         key_padding_mask_p = torch.cat([torch.zeros(x_input.shape[0], 1).to('cuda'), key_padding_mask], dim=-1)
