@@ -41,6 +41,7 @@ class PlanningModel(TorchModuleWrapper):
         mask_rate=0.7,
         alpha_0=0, 
         alpha_T=0.5,
+        pretraining_epoch_fraction=0.7,
         eval_mode="no_mask", # "best", "random", "worst", or "no_mask"
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
     ) -> None:
@@ -56,6 +57,7 @@ class PlanningModel(TorchModuleWrapper):
         self.alpha = ema_update_alpha
         self.mask_rate = mask_rate
         self.eval_mode = eval_mode
+        self.pretraining_epoch_fraction = pretraining_epoch_fraction
 
         self.pos_emb = build_mlp(4, [dim] * 2)
         self.agent_encoder = AgentEncoder(
@@ -131,7 +133,7 @@ class PlanningModel(TorchModuleWrapper):
         sorted_idx = torch.sort(scores, dim=-1, descending=True)[0]
         indices_split = torch.stack([sorted_idx[i,unmasked_num[i]] for i in range(padding_masks.shape[0])])
         mask = scores > indices_split.unsqueeze(-1)
-        return mask.unsqueeze(-1)
+        return mask
 
     def forward(self, data, progress=None):
 
@@ -160,39 +162,40 @@ class PlanningModel(TorchModuleWrapper):
 
         x = torch.cat([x_agent, x_polygon], dim=1) + pos_embed
 
-        M = self.get_mask(key_padding_mask)
+        M_zero = torch.zeros(x.shape[0:2], dtype=torch.bool, device=x.device)
 
-        if not self.training:
-            M = torch.zeros_like(M)
-        if progress is not None:
-            if progress > 0.5:
-                M = torch.zeros_like(M)
-
-        # if not self.training: 
-        #     if self.eval_mode == "worst":
-        #         _,_,estimation = self.teacher_model(x, M, key_padding_mask)
-        #         scores = estimation[..., 0]
-        #         M = self.get_mask(key_padding_mask, scores)
-        #     elif self.eval_mode == "random":
-        #         pass
-        #     elif self.eval_mode == "best":
-        #         _,_,estimation = self.teacher_model(x, M, key_padding_mask)
-        #         scores = estimation[..., 0].pow(-1)
-        #         M = self.get_mask(key_padding_mask, scores)
-        #     elif self.eval_mode == "no_mask":
-        #         M = torch.zeros_like(M)
-        #     else:
-        #         raise NotImplementedError
-        # else:
-        #     M = torch.zeros_like(M)
-        #     _,_,estimation = self.teacher_model(x, M, key_padding_mask)
-        #     scores = estimation[..., 0].pow(-1)
-        #     frac = self.alpha_0 + (self.alpha_T - self.alpha_0) * progress
-        #     M_score = self.get_mask(key_padding_mask, scores, frac)
-        #     padding_mask = key_padding_mask | M_score.squeeze(-1)
-        #     M_random = self.get_mask(padding_mask, fraction=self.mask_rate-frac)
-        #     M_final = M_score | M_random
-        #     M = M_final
+        if self.training: 
+            # training mode, do hard patch mining with curriculum
+            # use the teacher model to get the importance scores corresponding to each embedding
+            _,_,estimation = self.teacher_model(x, M_zero, key_padding_mask)
+            scores = estimation[..., 0].pow(-1)
+            # see if the progress is within pretraining stages
+            pretrain_frac = progress/self.pretraining_epoch_fraction
+            if pretrain_frac < 1:
+                frac = self.alpha_0 + (self.alpha_T - self.alpha_0) * pretrain_frac
+                M_score = self.get_mask(key_padding_mask, scores, frac)
+                padding_mask = key_padding_mask | M_score.squeeze(-1)
+                M_random = self.get_mask(padding_mask, fraction=self.mask_rate-frac)
+                M = M_score | M_random
+            else: 
+                # no mask will be applied
+                M = M_zero
+        else:
+            # evaluation mode
+            if self.eval_mode == "worst":
+                _,_,estimation = self.teacher_model(x, M_zero, key_padding_mask)
+                scores = estimation[..., 0]
+                M = self.get_mask(key_padding_mask, scores)
+            elif self.eval_mode == "random":
+                pass
+            elif self.eval_mode == "best":
+                _,_,estimation = self.teacher_model(x, M_zero, key_padding_mask)
+                scores = estimation[..., 0].pow(-1)
+                M = self.get_mask(key_padding_mask, scores)
+            elif self.eval_mode == "no_mask":
+                M = M_zero
+            else:
+                raise NotImplementedError
 
 
         # x_p = (x_initial*(~M)+ (pos_embed+self.masked_embedding_offset)*M)*(~key_padding_mask.unsqueeze(-1)) 
@@ -204,7 +207,7 @@ class PlanningModel(TorchModuleWrapper):
             "trajectory": trajectory,
             "probability": probability,
             "estimation": estimation,
-            "mask": (~M)*(~key_padding_mask.unsqueeze(-1)),
+            "mask": (~M)*(~key_padding_mask),
         }
 
 
@@ -274,10 +277,10 @@ class TSModel(nn.Module):
         x = x_input
         # x = (x*(~M)+ (self.masked_embedding_offset)*M)*(~key_padding_mask.unsqueeze(-1)) 
 
-        key_padding_mask = key_padding_mask | M.squeeze(-1)
+        key_padding_mask_p = key_padding_mask | M
 
         x = torch.concat([self.ego_embedding.repeat(x_input.shape[0], 1, 1), x], dim=1)
-        key_padding_mask_p = torch.cat([torch.zeros(x_input.shape[0], 1).to('cuda'), key_padding_mask], dim=-1)
+        key_padding_mask_p = torch.cat([torch.zeros((x_input.shape[0], 1), dtype=torch.bool, device=x.device), key_padding_mask_p], dim=-1)
 
         for blk in self.encoder_blocks:
             x = blk(x, key_padding_mask=key_padding_mask_p)

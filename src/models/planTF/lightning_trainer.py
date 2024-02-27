@@ -122,7 +122,7 @@ class LightningTrainer(pl.LightningModule):
         ego_reg_loss = ego_reg_loss.clone().detach()
         mean, std = estimation[..., 0], estimation[..., 1]
         loss = torch.log(std) + 0.5 * ((ego_reg_loss[:, None] - mean) / std) ** 2
-        masked_loss = loss * mask.squeeze(-1)
+        masked_loss = loss * mask
         return masked_loss.sum()/mask.sum()
 
 
