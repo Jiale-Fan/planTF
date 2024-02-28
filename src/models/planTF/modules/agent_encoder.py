@@ -4,6 +4,41 @@ import torch.nn as nn
 from ..layers.common_layers import build_mlp
 from ..layers.embedding import NATSequenceEncoder
 
+class EgoEncoder(nn.Module):
+    def __init__(
+        self,
+        state_channel=6,
+        dim=128,
+        state_dropout=0.75,
+    ) -> None:
+        super().__init__()
+        self.dim = dim
+        self.state_channel = state_channel
+
+        self.ego_state_emb = StateAttentionEncoder(
+            state_channel, dim, state_dropout
+        )
+
+        self.ego_type_emb = nn.Parameter(torch.Tensor(1, dim))
+
+    @staticmethod
+    def to_vector(feat, valid_mask):
+        vec_mask = valid_mask[..., :-1] & valid_mask[..., 1:]
+
+        while len(vec_mask.shape) < len(feat.shape):
+            vec_mask = vec_mask.unsqueeze(-1)
+
+        return torch.where(
+            vec_mask,
+            feat[:, :, 1:, ...] - feat[:, :, :-1, ...],
+            torch.zeros_like(feat[:, :, 1:, ...]),
+        )
+
+    def forward(self, ego_feature):
+
+        x_ego = self.ego_state_emb(ego_feature)
+        x_ego = x_ego + self.ego_type_emb
+        return x_ego
 
 class AgentEncoder(nn.Module):
     def __init__(

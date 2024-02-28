@@ -30,7 +30,7 @@ class LightningTrainer(pl.LightningModule):
         weight_decay,
         epochs,
         warmup_epochs,
-        pretrain_epochs = 15,
+        pretrain_epochs = 10,
     ) -> None:
         super().__init__()
         self.save_hyperparameters(ignore=["model"])
@@ -73,12 +73,13 @@ class LightningTrainer(pl.LightningModule):
         return losses["loss"]
 
     def _compute_objectives(self, res, data) -> Dict[str, torch.Tensor]:
-        trajectory, probability= (
+        trajectory, probability, prediction= (
             res["trajectory"],
             res["probability"],
+            res["prediction"],
         )
         targets = data["agent"]["target"]
-        # valid_mask = data["agent"]["valid_mask"][:, :, -trajectory.shape[-2] :]
+        valid_mask = data["agent"]["valid_mask"][:, :, -trajectory.shape[-2] :]
 
         ego_target_pos, ego_target_heading = targets[:, 0, :, :2], targets[:, 0, :, 2]
         ego_target = torch.cat(
@@ -99,15 +100,23 @@ class LightningTrainer(pl.LightningModule):
         ego_reg_loss_mean = ego_reg_loss.mean()
         ego_cls_loss = F.cross_entropy(probability, best_mode.detach())
 
+        agent_target, agent_mask = targets[:, 1:], valid_mask[:, 1:]
+        agent_reg_loss = F.smooth_l1_loss(
+            prediction[agent_mask], agent_target[agent_mask][:, :2]
+        )
+
+        # loss = ego_reg_loss_mean + ego_cls_loss + agent_reg_loss
+        
         if self.current_epoch < self.pretrain_epochs:
             loss = res["pretrain_loss"]
         else:
             if not self.initial_finetune_flag:
-                self.model.initial_finetune()
+                self.model.initialize_finetune()
                 print("Initial finetune done")
                 loss = res["pretrain_loss"]
+                self.initial_finetune_flag = True
             else: 
-                loss = ego_reg_loss_mean + ego_cls_loss
+                loss = ego_reg_loss_mean + ego_cls_loss + agent_reg_loss
 
         return {
             "loss": loss,
@@ -170,7 +179,6 @@ class LightningTrainer(pl.LightningModule):
         """
         
         t = self._step(batch, "train")
-        self.model.EMA_update()
         return t
 
     def validation_step(

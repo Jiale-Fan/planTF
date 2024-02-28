@@ -101,7 +101,7 @@ class PretrainModel(nn.Module):
     def agent_random_masking(
         hist_tokens, fut_tokens, mask_ratio, future_padding_mask, num_actors
     ):
-        pred_masks = ~future_padding_mask  # [B, A]
+        pred_masks = ~future_padding_mask.all(-1)  # [B, A]
         fut_num_tokens = pred_masks.sum(-1)  # [B]
 
         len_keeps = (fut_num_tokens * (1 - mask_ratio)).int()
@@ -173,10 +173,27 @@ class PretrainModel(nn.Module):
 
         return x_masked, new_key_padding_mask, ids_keep_list
 
-    def forward(self, hist_feat, lane_feat, future_feat, agent_padding_mask, lane_padding_mask, pos_feat,
+    def forward(self, hist_feat, lane_feat, future_feat, hist_mask, fut_mask, lane_padding_mask, pos_feat,
                 lane_normalized, hist_target, fut_target, types_embedding):
+        """
+        Args:
+            hist_feat: (B, N, C)
+            lane_feat: (B, M, C)
+            future_feat: (B, N, C)
+            hist_padding_mask: (B, N, hist_steps), 0 indicates padding
+            fut_padding_mask: (B, N, future_steps)
+            lane_padding_mask: (B, M)
+            pos_feat: (B, 2*N+M, 4)
+            lane_normalized: (B, M, 20, 2)
+            hist_target: (B, N, hist_steps, 2)
+            fut_target: (B, N, fut_steps, 2)
+            types_embedding: (B, 2*N+M, 4)
+        """
         B, N, _ = hist_feat.shape
         _, M, _ = lane_feat.shape
+
+        agent_padding_mask = ~(hist_mask.any(-1))
+        fut_padding_mask = ~(fut_mask.any(-1))
 
         (
             hist_masked_tokens,
@@ -189,8 +206,8 @@ class PretrainModel(nn.Module):
             hist_feat,
             future_feat,
             self.actor_mask_ratio,
-            agent_padding_mask,
-            num_actors=agent_padding_mask.sum(-1), # TODO check
+            ~fut_mask,
+            num_actors=((~agent_padding_mask)|(~fut_padding_mask)).sum(-1),
         )
 
         lane_mask_ratio = self.lane_mask_ratio
@@ -251,7 +268,7 @@ class PretrainModel(nn.Module):
         decoder_key_padding_mask = torch.cat(
             [
                 agent_padding_mask,
-                agent_padding_mask,
+                fut_padding_mask,
                 lane_padding_mask,
             ],
             dim=1,
@@ -274,18 +291,20 @@ class PretrainModel(nn.Module):
         )
 
         # hist pred loss
-        x_hat = self.history_pred(hist_token).view(-1, 20, 2)
-        x_reg_mask = ~agent_padding_mask
+        x_hat = self.history_pred(hist_token).view(-1, self.history_steps, 2)
+        x_reg_mask = hist_mask.clone().detach()
+        hist_target_reshape = hist_target.view(-1, self.history_steps, 2)
         x_reg_mask[~hist_pred_mask] = False
         x_reg_mask = x_reg_mask.view(-1, self.history_steps)
-        hist_loss = F.l1_loss(x_hat[x_reg_mask], hist_target[x_reg_mask])
+        hist_loss = F.l1_loss(x_hat[x_reg_mask], hist_target_reshape[x_reg_mask])
 
         # future pred loss
-        y_hat = self.future_pred(future_token).view(-1, 81, 2)  # B*N, 120
-        reg_mask = ~agent_padding_mask
+        y_hat = self.future_pred(future_token).view(-1, self.future_steps, 2)  # B*N, 120
+        reg_mask = fut_mask.clone().detach()
+        fut_target_reshape = fut_target.view(-1, self.future_steps, 2)
         reg_mask[~future_pred_mask] = False
         reg_mask = reg_mask.view(-1, self.future_steps)
-        future_loss = F.l1_loss(y_hat[reg_mask], fut_target[reg_mask])
+        future_loss = F.l1_loss(y_hat[reg_mask], fut_target_reshape[reg_mask])
 
         loss = (
             self.loss_weight[0] * future_loss
