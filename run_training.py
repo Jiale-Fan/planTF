@@ -144,13 +144,15 @@ python run_training.py \
 # command to debug train
 
 '''
+export PYTHONPATH=$PYTHONPATH:$(pwd)
+ulimit -n 102400
 export CUDA_VISIBLE_DEVICES=0,1,2
 python run_training.py \
   py_func=train +training=train_planTF \
-  worker=single_machine_thread_pool worker.max_workers=2 \
-  scenario_builder=nuplan cache.cache_path=/data1/nuplan/jiale2/exp/cache_plantf_hundred cache.use_cache_without_dataset=true \
-  data_loader.params.batch_size=4 data_loader.params.num_workers=2 \
-  lr=1e-3 epochs=5 warmup_epochs=3 weight_decay=0.0001 \
-  lightning.trainer.params.check_val_every_n_epoch=5 \
-  wandb.mode=online wandb.project=nuplan wandb.name=plantf_100k
+  worker=single_machine_thread_pool worker.max_workers=16 \
+  scenario_builder=nuplan cache.cache_path=/media/jiale/Jiale_SSD/cache/cache_plantf_aug cache.use_cache_without_dataset=true \
+  data_loader.params.batch_size=42 data_loader.params.num_workers=16 \
+  lr=1e-3 epochs=35 warmup_epochs=3 weight_decay=0.0001 \
+  lightning.trainer.params.check_val_every_n_epoch=2 \
+  wandb.mode=online wandb.project=nuplan wandb.name=mask-rec-v1.0
   '''  
