@@ -106,7 +106,6 @@ class PlanningModel(TorchModuleWrapper):
             )
             for i in range(encoder_depth)
         )
-
         self.norm = nn.LayerNorm(dim)
 
         self.pretrain_model = PretrainModel(
@@ -123,6 +122,21 @@ class PlanningModel(TorchModuleWrapper):
                     future_steps=future_steps,
                     loss_weight=[1.0, 1.0, 0.35],
                 )
+        
+        self.decoder_blocks = nn.ModuleList(
+            Block(
+                dim=dim,
+                num_heads=num_heads,
+                mlp_ratio=mlp_ratio,
+                qkv_bias=qkv_bias,
+                drop_path=dpr[i],
+            )
+            for i in range(self.pretrain_model.decoder_depth)
+        )
+        self.decoder_norm = nn.LayerNorm(dim)
+
+        self.ego_decoding_token = nn.Parameter(torch.Tensor(1, 1, dim))
+
         self.pretrain_model.initialize_weights()
 
         self.trajectory_decoder = TrajectoryDecoder(
@@ -214,7 +228,12 @@ class PlanningModel(TorchModuleWrapper):
             x = blk(x, key_padding_mask=key_padding_mask)
         x = self.norm(x)
 
-        trajectory, probability = self.trajectory_decoder(x[:, 0])
+        x_decoder = torch.cat([x, self.ego_decoding_token.expand(bs, -1, -1)], dim=1)
+        decoder_key_padding_mask = torch.cat([torch.zeros(bs, 1, dtype=torch.bool, device=x.device), key_padding_mask], dim=-1)
+        for blk in self.decoder_blocks:
+            x_decoder = blk(x_decoder, key_padding_mask=decoder_key_padding_mask)
+
+        trajectory, probability = self.trajectory_decoder(x_decoder[:, 0])
         prediction = self.agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2)
 
         out = {
@@ -259,4 +278,10 @@ class PlanningModel(TorchModuleWrapper):
     
     def initialize_finetune(self):
         for param_pre, param_plan in zip(self.pretrain_model.blocks.parameters(), self.blocks.parameters()):
+            param_plan.data = param_pre.data.clone().detach()
+        for param_pre, param_plan in zip(self.pretrain_model.decoder_blocks.parameters(), self.decoder_blocks.parameters()):
+            param_plan.data = param_pre.data.clone().detach()
+        for param_pre, param_plan in zip(self.pretrain_model.norm.parameters(), self.norm.parameters()):
+            param_plan.data = param_pre.data.clone().detach()
+        for param_pre, param_plan in zip(self.pretrain_model.decoder_norm.parameters(), self.decoder_norm.parameters()):
             param_plan.data = param_pre.data.clone().detach()
