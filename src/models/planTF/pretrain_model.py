@@ -31,6 +31,7 @@ class PretrainModel(nn.Module):
         self.loss_weight = loss_weight
         self.history_steps = history_steps
         self.future_steps = future_steps
+        self.decoder_depth = decoder_depth
 
         self.pos_embed = nn.Sequential(
             nn.Linear(4, embed_dim),

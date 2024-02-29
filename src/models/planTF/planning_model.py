@@ -228,13 +228,13 @@ class PlanningModel(TorchModuleWrapper):
             x = blk(x, key_padding_mask=key_padding_mask)
         x = self.norm(x)
 
-        x_decoder = torch.cat([x, self.ego_decoding_token.expand(bs, -1, -1)], dim=1)
+        x_decoder = torch.cat([self.ego_decoding_token.expand(bs, -1, -1), x], dim=1)
         decoder_key_padding_mask = torch.cat([torch.zeros(bs, 1, dtype=torch.bool, device=x.device), key_padding_mask], dim=-1)
         for blk in self.decoder_blocks:
             x_decoder = blk(x_decoder, key_padding_mask=decoder_key_padding_mask)
 
         trajectory, probability = self.trajectory_decoder(x_decoder[:, 0])
-        prediction = self.agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2)
+        prediction = self.agent_predictor(x_decoder[:, 2:A+1]).view(bs, -1, self.future_steps, 2)
 
         out = {
             "trajectory": trajectory,
