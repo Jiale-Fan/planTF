@@ -29,8 +29,15 @@ class TrajectoryDecoder(nn.Module):
         )
 
     def forward(self, x):
-        x = self.multimodal_proj(x).view(-1, self.num_modes, self.embed_dim)
-        loc = self.loc(x).view(-1, self.num_modes, self.future_steps, self.out_channels)
-        pi = self.pi(x).squeeze(-1)
+        if x.dim() == 2:
+            x = x.unsqueeze(1)
+        B, N, _ = x.shape
+        x = self.multimodal_proj(x).view(B, N, self.num_modes, self.embed_dim)
+        loc = self.loc(x).view(B, N, self.num_modes, self.future_steps, self.out_channels)
+        pi = self.pi(x).squeeze(-1) # (B, N, num_modes)
+
+        if N == 1:
+            loc = loc.squeeze(1)
+            pi = pi.squeeze(1)
 
         return loc, pi

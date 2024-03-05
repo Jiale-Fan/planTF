@@ -5,6 +5,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.nn.utils.rnn import pad_sequence
 from .modules.transformer_blocks import Block
+from .modules.trajectory_decoder import TrajectoryDecoder
 
 
 class PretrainModel(nn.Module):
@@ -22,6 +23,7 @@ class PretrainModel(nn.Module):
         history_steps: int = 50,
         future_steps: int = 60,
         loss_weight: List[float] = [1.0, 1.0, 0.35],
+        pred_modes: int = 6,
     ) -> None:
         super().__init__()
 
@@ -32,6 +34,7 @@ class PretrainModel(nn.Module):
         self.history_steps = history_steps
         self.future_steps = future_steps
         self.decoder_depth = decoder_depth
+        self.num_modes = pred_modes
 
         self.pos_embed = nn.Sequential(
             nn.Linear(4, embed_dim),
@@ -76,8 +79,12 @@ class PretrainModel(nn.Module):
         self.future_mask_token = nn.Parameter(torch.Tensor(1, 1, embed_dim))
         self.history_mask_token = nn.Parameter(torch.Tensor(1, 1, embed_dim))
 
-        self.future_pred = nn.Linear(embed_dim, future_steps * 2)
-        self.history_pred = nn.Linear(embed_dim, history_steps * 2)
+        # self.future_pred = nn.Linear(embed_dim, future_steps * 2)
+        # self.history_pred = nn.Linear(embed_dim, history_steps * 2)
+        # self.lane_pred = nn.Linear(embed_dim, 20 * 2)
+
+        self.future_pred = TrajectoryDecoder(embed_dim, pred_modes, future_steps, 2)
+        self.history_pred = TrajectoryDecoder(embed_dim, pred_modes, history_steps, 2)
         self.lane_pred = nn.Linear(embed_dim, 20 * 2)
 
         self.initialize_weights()
@@ -279,8 +286,8 @@ class PretrainModel(nn.Module):
             x_decoder = blk(x_decoder, key_padding_mask=decoder_key_padding_mask)
 
         x_decoder = self.decoder_norm(x_decoder)
-        hist_token = x_decoder[:, :N].reshape(-1, self.embed_dim)
-        future_token = x_decoder[:, N : 2 * N].reshape(-1, self.embed_dim)
+        hist_token = x_decoder[:, :N]
+        future_token = x_decoder[:, N : 2 * N]
         lane_token = x_decoder[:, -M:]
 
         # lane pred loss
@@ -292,20 +299,24 @@ class PretrainModel(nn.Module):
         )
 
         # hist pred loss
-        x_hat = self.history_pred(hist_token).view(-1, self.history_steps, 2)
+        x_hat = self.history_pred(hist_token)[0] # (B, N, self.num_modes, self.history_steps, 2)
+        diff_x = F.l1_loss(x_hat, hist_target.unsqueeze(2).repeat(1,1,self.num_modes,1,1), reduction='none').mean(-1)  # (B, N, self.num_modes, self.history_steps)
+        diff_x_reshape = diff_x.view(-1, self.num_modes, self.history_steps).permute(1, 0, 2) # (self.num_modes, B*N, self.history_steps)
         x_reg_mask = hist_mask.clone().detach()
-        hist_target_reshape = hist_target.view(-1, self.history_steps, 2)
         x_reg_mask[~hist_pred_mask] = False
-        x_reg_mask = x_reg_mask.view(-1, self.history_steps)
-        hist_loss = F.l1_loss(x_hat[x_reg_mask], hist_target_reshape[x_reg_mask])
+        x_reg_mask = x_reg_mask.view(-1, self.history_steps).unsqueeze(0).repeat(self.num_modes, 1, 1) # (self.num_modes, B*N, self.history_steps)
+        diff_x_valid = (diff_x_reshape*x_reg_mask).sum(-1).permute(1, 0).min(-1)[0]
+        hist_loss = diff_x_valid.sum()/x_reg_mask.sum()
 
         # future pred loss
-        y_hat = self.future_pred(future_token).view(-1, self.future_steps, 2)  # B*N, 120
+        y_hat = self.future_pred(future_token)[0]
+        diff_y = F.l1_loss(y_hat, fut_target.unsqueeze(2).repeat(1,1,self.num_modes,1,1), reduction='none').mean(-1)
+        diff_y_reshape = diff_y.view(-1, self.num_modes, self.future_steps).permute(1, 0, 2)
         reg_mask = fut_mask.clone().detach()
-        fut_target_reshape = fut_target.view(-1, self.future_steps, 2)
         reg_mask[~future_pred_mask] = False
-        reg_mask = reg_mask.view(-1, self.future_steps)
-        future_loss = F.l1_loss(y_hat[reg_mask], fut_target_reshape[reg_mask])
+        reg_mask = reg_mask.view(-1, self.future_steps).unsqueeze(0).repeat(self.num_modes, 1, 1)
+        diff_y_valid = (diff_y_reshape*reg_mask).sum(-1).permute(1, 0).min(-1)[0]
+        future_loss = diff_y_valid.sum()/reg_mask.sum()
 
         loss = (
             self.loss_weight[0] * future_loss

@@ -116,7 +116,8 @@ class LightningTrainer(pl.LightningModule):
                 loss = res["pretrain_loss"]
                 self.initial_finetune_flag = True
             else: 
-                loss = ego_reg_loss_mean + ego_cls_loss + agent_reg_loss
+                # loss = ego_reg_loss_mean + ego_cls_loss + agent_reg_loss
+                loss = ego_reg_loss_mean + ego_cls_loss
 
         return {
             "loss": loss,
