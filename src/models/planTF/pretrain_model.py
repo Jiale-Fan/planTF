@@ -11,13 +11,11 @@ from .modules.trajectory_decoder import TrajectoryDecoder
 class PretrainModel(nn.Module):
     def __init__(
         self,
+        blocks: nn.Module, 
+        decoder_blocks: nn.Module,
+        norm: nn.Module,
+        decoder_norm: nn.Module,
         embed_dim=128,
-        encoder_depth=4,
-        decoder_depth=4,
-        num_heads=8,
-        mlp_ratio=4.0,
-        qkv_bias=False,
-        drop_path=0.2,
         actor_mask_ratio: float = 0.5,
         lane_mask_ratio: float = 0.5,
         history_steps: int = 50,
@@ -33,27 +31,13 @@ class PretrainModel(nn.Module):
         self.loss_weight = loss_weight
         self.history_steps = history_steps
         self.future_steps = future_steps
-        self.decoder_depth = decoder_depth
         self.num_modes = pred_modes
 
-        self.pos_embed = nn.Sequential(
-            nn.Linear(4, embed_dim),
-            nn.GELU(),
-            nn.Linear(embed_dim, embed_dim),
-        )
-        dpr = [x.item() for x in torch.linspace(0, drop_path, encoder_depth)]
-        self.blocks = nn.ModuleList(
-            Block(
-                dim=embed_dim,
-                num_heads=num_heads,
-                mlp_ratio=mlp_ratio,
-                qkv_bias=qkv_bias,
-                drop_path=dpr[i],
-            )
-            for i in range(encoder_depth)
-        )
-        self.norm = nn.LayerNorm(embed_dim)
-
+        self.blocks = blocks
+        self.decoder_blocks = decoder_blocks
+        self.norm = norm
+        self.decoder_norm = decoder_norm
+        
         # decoder
         self.decoder_embed = nn.Linear(embed_dim, embed_dim, bias=True)
         self.decoder_pos_embed = nn.Sequential(
@@ -61,19 +45,6 @@ class PretrainModel(nn.Module):
             nn.GELU(),
             nn.Linear(embed_dim, embed_dim),
         )
-
-        dpr = [x.item() for x in torch.linspace(0, drop_path, decoder_depth)]
-        self.decoder_blocks = nn.ModuleList(
-            Block(
-                dim=embed_dim,
-                num_heads=num_heads,
-                mlp_ratio=mlp_ratio,
-                qkv_bias=qkv_bias,
-                drop_path=dpr[i],
-            )
-            for i in range(decoder_depth)
-        )
-        self.decoder_norm = nn.LayerNorm(embed_dim)
 
         self.lane_mask_token = nn.Parameter(torch.Tensor(1, 1, embed_dim))
         self.future_mask_token = nn.Parameter(torch.Tensor(1, 1, embed_dim))

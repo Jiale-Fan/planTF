@@ -108,21 +108,6 @@ class PlanningModel(TorchModuleWrapper):
         )
         self.norm = nn.LayerNorm(dim)
 
-        self.pretrain_model = PretrainModel(
-                    embed_dim=dim,
-                    encoder_depth=encoder_depth,
-                    decoder_depth=4,
-                    num_heads=num_heads,
-                    mlp_ratio=mlp_ratio,
-                    qkv_bias=qkv_bias,
-                    drop_path=drop_path,
-                    actor_mask_ratio=0.5,
-                    lane_mask_ratio=0.5,
-                    history_steps=history_steps,
-                    future_steps=future_steps,
-                    loss_weight=[1.0, 1.0, 0.35],
-                )
-        
         self.decoder_blocks = nn.ModuleList(
             Block(
                 dim=dim,
@@ -131,9 +116,22 @@ class PlanningModel(TorchModuleWrapper):
                 qkv_bias=qkv_bias,
                 drop_path=dpr[i],
             )
-            for i in range(self.pretrain_model.decoder_depth)
+            for i in range(encoder_depth)
         )
         self.decoder_norm = nn.LayerNorm(dim)
+
+        self.pretrain_model = PretrainModel(
+                    embed_dim=dim,
+                    blocks=self.blocks,
+                    norm=self.norm,
+                    decoder_blocks=self.decoder_blocks,
+                    decoder_norm=self.decoder_norm,
+                    actor_mask_ratio=0.5,
+                    lane_mask_ratio=0.5,
+                    history_steps=history_steps,
+                    future_steps=future_steps,
+                    loss_weight=[1.0, 1.0, 0.35],
+                )
 
         self.ego_decoding_token = nn.Parameter(torch.Tensor(1, 1, dim))
 
@@ -147,7 +145,6 @@ class PlanningModel(TorchModuleWrapper):
         )
 
         self.agent_predictor = build_mlp(dim, [dim * 2, future_steps * 2], norm="ln")
-
 
         self.apply(self._init_weights)
 
