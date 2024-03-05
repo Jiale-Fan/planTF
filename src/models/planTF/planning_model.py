@@ -220,9 +220,9 @@ class PlanningModel(TorchModuleWrapper):
         polygon_key_padding = ~(polygon_mask.any(-1))
         key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding], dim=-1)
 
-        # x_ego = self.ego_encoder(data["current_state"][:, : self.state_channel])
-        # x = torch.cat([x_ego.unsqueeze(1), hist_feat[:, 1:], lane_feat], dim=1)
-        x = torch.cat([hist_feat, lane_feat], dim=1)
+        x_ego = self.ego_encoder(data["current_state"][:, : self.state_channel])
+        x = torch.cat([x_ego.unsqueeze(1), hist_feat[:, 1:], lane_feat], dim=1)
+        # x = torch.cat([hist_feat, lane_feat], dim=1)
         
         for blk in self.blocks:
             x = blk(x, key_padding_mask=key_padding_mask)
