@@ -165,7 +165,7 @@ class PlanningModel(TorchModuleWrapper):
         elif isinstance(m, nn.Embedding):
             nn.init.normal_(m.weight, mean=0.0, std=0.02)
 
-    def forward(self, data):
+    def forward(self, data, pretrain_progress):
 
         # data preparation
         agent_pos = data["agent"]["position"][:, :, self.history_steps - 1]
@@ -253,7 +253,7 @@ class PlanningModel(TorchModuleWrapper):
             fut_target = data["agent"]["position"][:, :, self.history_steps:] - agent_pos[:, :, None, :]
 
             pretrained_out = self.pretrain_model(hist_feat, lane_feat, future_feat, hist_mask, fut_mask, polygon_key_padding, pos_feat,
-                    lane_normalized, hist_target, fut_target, types_embedding)
+                    lane_normalized, hist_target, fut_target, types_embedding, pretrain_progress)
             
             pretrained_out["pretrain_loss"] = pretrained_out.pop("loss")
             out.update(pretrained_out)

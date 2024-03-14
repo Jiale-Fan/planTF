@@ -64,7 +64,7 @@ class LightningTrainer(pl.LightningModule):
     ) -> torch.Tensor:
         features, _, _ = batch
 
-        res = self.model(features["feature"].data)
+        res = self.model(features["feature"].data, min(self.current_epoch*1.0/self.pretrain_epochs, 1.0))
 
         losses = self._compute_objectives(res, features["feature"].data)
         metrics = self._compute_metrics(res, features["feature"].data, prefix)

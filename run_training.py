@@ -146,7 +146,7 @@ python run_training.py \
 '''
 export PYTHONPATH=$PYTHONPATH:$(pwd)
 ulimit -n 102400
-export CUDA_VISIBLE_DEVICES=1,2
+export CUDA_VISIBLE_DEVICES=0,1,2
 python run_training.py \
   py_func=train +training=train_planTF \
   worker=single_machine_thread_pool worker.max_workers=16 \
