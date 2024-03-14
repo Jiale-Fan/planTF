@@ -126,6 +126,10 @@ class LightningTrainer(pl.LightningModule):
             "hist_loss": res["hist_loss"],
             "future_loss": res["future_loss"],
             "lane_pred_loss": res["lane_pred_loss"],
+            "hist_rec_pred_loss": res["hist_rec_pred_loss"],
+            "fut_rec_pred_loss": res["fut_rec_pred_loss"],
+            "lane_rec_pred_loss": res["lane_rec_pred_loss"],
+            "hard_ratio": res["hard_ratio"],
         }
 
     def _compute_metrics(self, output, data, prefix) -> Dict[str, torch.Tensor]:

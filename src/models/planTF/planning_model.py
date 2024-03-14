@@ -271,6 +271,10 @@ class PlanningModel(TorchModuleWrapper):
                 "hist_loss": torch.tensor(0.0),
                 "future_loss": torch.tensor(0.0),
                 "lane_pred_loss": torch.tensor(0.0),
+                "hist_rec_pred_loss": torch.tensor(0.0),
+                "fut_rec_pred_loss": torch.tensor(0.0),
+                "lane_rec_pred_loss": torch.tensor(0.0),
+                "hard_ratio": torch.tensor(0.0),
             }
             out.update(pretrained_out)
 
