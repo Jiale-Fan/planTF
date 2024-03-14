@@ -23,7 +23,7 @@ class PretrainModel(nn.Module):
         future_steps: int = 60,
         loss_weight: List[float] = [1.0, 1.0, 0.35],
         alpha = 0.999, 
-        alpha_0 = 0.3, 
+        alpha_0 = 0, 
         alpha_T = 0.5,
     ) -> None:
         super().__init__()
@@ -72,7 +72,10 @@ class PretrainModel(nn.Module):
             for i in range(decoder_depth)
         )
         self.decoder_norm = nn.LayerNorm(embed_dim)
-        self.loss_predictor = nn.Linear(embed_dim, 1)
+        self.loss_predictor = nn.Sequential(
+            nn.Linear(embed_dim, 1),
+            nn.Sigmoid(),
+        )
 
         # teacher model
         self.blocks_t = nn.ModuleList(
@@ -104,7 +107,10 @@ class PretrainModel(nn.Module):
             for i in range(decoder_depth)
         )
         self.decoder_norm_t = nn.LayerNorm(embed_dim)
-        self.loss_predictor_t = nn.Linear(embed_dim, 1)
+        self.loss_predictor_t = nn.Sequential(
+            nn.Linear(embed_dim, 1),
+            nn.Sigmoid(),
+        )
 
         # learnable embeddings
         self.lane_mask_token = nn.Parameter(torch.Tensor(1, 1, embed_dim))
