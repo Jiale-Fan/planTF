@@ -165,7 +165,7 @@ class PlanningModel(TorchModuleWrapper):
         elif isinstance(m, nn.Embedding):
             nn.init.normal_(m.weight, mean=0.0, std=0.02)
 
-    def forward(self, data, pretrain_progress):
+    def forward(self, data, pretrain_progress=0.0):
 
         # data preparation
         agent_pos = data["agent"]["position"][:, :, self.history_steps - 1]
