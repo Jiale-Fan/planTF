@@ -59,6 +59,7 @@ class TransformerEncoderLayer(nn.Module):
             batch_first=True,
         )
         self.drop_path1 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+        self.gating1 = OutputGatingLayer(dim)
 
         self.norm2 = norm_layer(dim)
         self.mlp = Mlp(
@@ -68,6 +69,7 @@ class TransformerEncoderLayer(nn.Module):
             drop=drop,
         )
         self.drop_path2 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+        self.gating2 = OutputGatingLayer(dim)
 
     def forward(
         self,
@@ -83,6 +85,16 @@ class TransformerEncoderLayer(nn.Module):
             attn_mask=mask,
             key_padding_mask=key_padding_mask,
         )[0]
-        src = src + self.drop_path1(src2)
-        src = src + self.drop_path2(self.mlp(self.norm2(src)))
+        src = src + self.drop_path1(self.gating1(src, src2))
+        src = src + self.drop_path2(self.gating2(src, self.mlp(self.norm2(src))))
         return src
+    
+class OutputGatingLayer(nn.Module):
+    def __init__(self, dim):
+        super().__init__()
+        self.fc = nn.Linear(dim, dim)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x, y):
+        z = x+torch.multiply(self.sigmoid(self.fc(x)), y)
+        return z

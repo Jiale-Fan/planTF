@@ -57,11 +57,45 @@ class NuplanFeature(AbstractModelFeature):
     def deserialize(cls, data: Dict[str, Any]) -> NuplanFeature:
         return NuplanFeature(data=data)
 
-    def unpack(self) -> List[AbstractModelFeature]:
-        raise NotImplementedError
+    def unpack(self) -> List[NuplanFeature]:
+        bs = self.data["current_state"].shape[0]
+        list_dict = [{} for _ in range(bs)]
+        for k, v in self.data.items():
+            if isinstance(v, dict):
+                for i in range(bs):
+                    list_dict[i][k] = {}
+                for kk, vv in v.items():
+                    for i in range(bs):
+                        list_dict[i][k][kk] = vv[i]
+            else:
+                for i in range(bs):
+                    list_dict[i][k] = v[i]
+
+        return [NuplanFeature(data=d) for d in list_dict]
 
     def is_valid(self) -> bool:
         return self.data["polylines"].shape[0] > 0
+    
+    @classmethod
+    def proximity_filter(
+        self, data, radius, hist_steps=21
+    ) -> NuplanFeature:
+        point_position = data["map"]["point_position"]
+        x_max, x_min = radius, -radius
+        y_max, y_min = radius, -radius
+        valid_mask = (
+            (point_position[:, 0, :, 0] < x_max)
+            & (point_position[:, 0, :, 0] > x_min)
+            & (point_position[:, 0, :, 1] < y_max)
+            & (point_position[:, 0, :, 1] > y_min)
+        )
+        valid_polygon = valid_mask.any(-1)
+        data["map"]["valid_mask"] = valid_mask
+
+        for k, v in data["map"].items():
+            data["map"][k] = v[valid_polygon]
+
+        return NuplanFeature(data=data)
 
     @classmethod
     def normalize(
