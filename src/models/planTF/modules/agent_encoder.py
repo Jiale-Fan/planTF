@@ -2,7 +2,37 @@ import torch
 import torch.nn as nn
 
 from ..layers.common_layers import build_mlp
-from ..layers.embedding import NATSequenceEncoder
+from ..layers.embedding import NATSequenceEncoder, Projector
+from .transformer_blocks import Block
+
+class TempoNet(nn.Module):
+    def __init__(
+        self,
+        state_channel=6,
+        depth=3,
+        num_head=8,
+        dim_head=64,
+    ):
+        self.projector = Projector(dim=dim_head, in_channels=state_channel)
+        self.blocks = nn.ModuleList(
+            Block(
+                dim=dim_head,
+                num_heads=num_head,
+                mlp_ratio=4,
+                qkv_bias=False,
+                drop_path=0.1,
+            )
+            for i in range(depth)
+        )
+        self.norm = nn.LayerNorm(dim_head)
+
+    def forward(self, x, key_padding_mask=None):
+        x = self.projector(x)
+        for block in self.blocks:
+            x = block(x, key_padding_mask=key_padding_mask)
+        x = self.norm(x)
+        return x
+
 
 class EgoEncoder(nn.Module):
     def __init__(

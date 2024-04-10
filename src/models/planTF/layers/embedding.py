@@ -4,6 +4,22 @@ import torch.nn.functional as F
 from natten import NeighborhoodAttention1D
 from timm.models.layers import DropPath
 
+class Projector(nn.Module):
+    def __init__(self, dim=128, in_channels=43):
+        super().__init__()
+
+        self.dim = dim
+        self.in_channels = in_channels
+
+        self.projector = nn.Sequential(
+            nn.Linear(in_channels, dim),
+            nn.ReLU(),
+        )
+
+    def forward(self, feature):
+        x = self.projector(feature)
+        return x
+
 
 class NATSequenceEncoder(nn.Module):
     def __init__(

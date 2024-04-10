@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 
 from ..layers.embedding import PointsEncoder
+from einops import rearrange
 
 
 class MapEncoder(nn.Module):

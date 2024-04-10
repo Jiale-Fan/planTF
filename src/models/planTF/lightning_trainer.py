@@ -64,12 +64,18 @@ class LightningTrainer(pl.LightningModule):
     ) -> torch.Tensor:
         features, _, _ = batch
 
-        res = self.model(features["feature"].data, min(self.current_epoch*1.0/self.pretrain_epochs, 1.0))
+        res = self.model(features["feature"].data, self.current_epoch)
 
-        losses = self._compute_objectives(res, features["feature"].data)
-        metrics = self._compute_metrics(res, features["feature"].data, prefix)
+        losses = res.losses
+
+        if 'trajectory' in res and 'probability' in res:
+            planning_loss = self._compute_objectives(res, features["feature"].data)
+            metrics = self._compute_metrics(res, features["feature"].data, prefix)
+            losses.update(planning_loss) 
+
+        assert 'loss' in losses
+
         self._log_step(losses["loss"], losses, metrics, prefix)
-
         return losses["loss"]
 
     def _compute_objectives(self, res, data) -> Dict[str, torch.Tensor]:
