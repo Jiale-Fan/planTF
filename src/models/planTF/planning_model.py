@@ -23,18 +23,40 @@ from einops import rearrange
 from .layers.embedding import Projector
 
 from enum import Enum
+import math
 
 
 # no meaning, required by nuplan
 trajectory_sampling = TrajectorySampling(num_poses=8, time_horizon=8, interval_length=1)
 
 class Stage(Enum):
-    PRETRAIN_ROAD = 0
+    PRETRAIN_SEP = 0
     PRETRAIN_MIX = 1
     PRETRAIN_REPRESENTATION = 2
     FINE_TUNING = 3
 
+class PositionalEncoding(nn.Module):
+    '''
+    Standard positional encoding.
+    '''
+    def __init__(self, d_model, dropout=0.1, max_len=20):
+        super(PositionalEncoding, self).__init__()
+        self.dropout = nn.Dropout(p=dropout)
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0).transpose(0, 1)
+        self.register_buffer('pe', pe)
 
+    def forward(self, x):
+        '''
+        :param x: must be (T, B, H)
+        :return:
+        '''
+        x = x + self.pe[:x.size(0), :]
+        return self.dropout(x)
 
 
 class PlanningModel(TorchModuleWrapper):
@@ -78,7 +100,8 @@ class PlanningModel(TorchModuleWrapper):
 
         self.no_lane_segment_points = 20
 
-
+        # modules begin
+        self.pe = PositionalEncoding(dim, dropout=0.1, max_len=1000)
         self.pos_emb = build_mlp(4, [dim] * 2)
 
         self.tempo_net = TempoNet(
@@ -87,6 +110,63 @@ class PlanningModel(TorchModuleWrapper):
             num_head=8,
             dim_head=64,
         )
+        
+
+        self.agent_seed = nn.Parameter(torch.randn(dim))
+
+        self.agent_projector = Projector(dim=dim, in_channels=self.state_channel)
+        self.map_projector = Projector(dim=dim, in_channels=self.no_lane_segment_points*2+polygon_channel)
+        self.lane_pred = build_mlp(dim, [512, self.no_lane_segment_points*2])
+        self.agent_frame_pred = build_mlp(64, [512, 3])
+
+        dpr = [x.item() for x in torch.linspace(0, drop_path, encoder_depth)]
+
+        self.blocks = nn.ModuleList(
+            Block(
+                dim=dim,
+                num_heads=num_heads,
+                mlp_ratio=mlp_ratio,
+                qkv_bias=qkv_bias,
+                drop_path=dpr[i],
+            )
+            for i in range(encoder_depth)
+        )
+        self.norm = nn.LayerNorm(dim)
+
+        # self.pretrain_model = PretrainModel(
+        #             embed_dim=dim,
+        #             encoder_depth=encoder_depth,
+        #             decoder_depth=4,
+        #             num_heads=num_heads,
+        #             mlp_ratio=mlp_ratio,
+        #             qkv_bias=qkv_bias,
+        #             drop_path=drop_path,
+        #             actor_mask_ratio=0.5,
+        #             lane_mask_ratio=0.5,
+        #             history_steps=history_steps,
+        #             future_steps=future_steps,
+        #             loss_weight=[1.0, 1.0, 0.35],
+        #         )
+        # self.pretrain_model.initialize_weights()
+
+        # self.decoder_norm = nn.LayerNorm(dim)
+
+        # self.ego_decoding_token = nn.Parameter(torch.Tensor(1, 1, dim))
+
+        
+
+        self.trajectory_decoder = TrajectoryDecoder(
+            embed_dim=dim,
+            num_modes=num_modes,
+            future_steps=future_steps,
+            out_channels=4,
+        )
+
+        self.agent_predictor = build_mlp(dim, [dim * 2, future_steps * 2], norm="ln")
+
+        self.apply(self._init_weights)
+
+
         # self.agent_encoder_hist = AgentEncoder(
         #     state_channel=state_channel,
         #     history_channel=history_channel,
@@ -116,60 +196,6 @@ class PlanningModel(TorchModuleWrapper):
         #     polygon_channel=polygon_channel,
         # )
 
-        self.agent_seed = nn.Parameter(torch.randn(dim))
-
-        self.agent_projector = Projector(dim=dim, in_channels=self.state_channel)
-        self.map_projector = Projector(dim=dim, in_channels=self.no_lane_segment_points*2+polygon_channel)
-        self.lane_pred = build_mlp(dim, [512, self.no_lane_segment_points*2])
-        self.frame_pred = build_mlp(64, [512, 3])
-
-        dpr = [x.item() for x in torch.linspace(0, drop_path, encoder_depth)]
-
-        self.blocks = nn.ModuleList(
-            Block(
-                dim=dim,
-                num_heads=num_heads,
-                mlp_ratio=mlp_ratio,
-                qkv_bias=qkv_bias,
-                drop_path=dpr[i],
-            )
-            for i in range(encoder_depth)
-        )
-        self.norm = nn.LayerNorm(dim)
-
-        self.pretrain_model = PretrainModel(
-                    embed_dim=dim,
-                    encoder_depth=encoder_depth,
-                    decoder_depth=4,
-                    num_heads=num_heads,
-                    mlp_ratio=mlp_ratio,
-                    qkv_bias=qkv_bias,
-                    drop_path=drop_path,
-                    actor_mask_ratio=0.5,
-                    lane_mask_ratio=0.5,
-                    history_steps=history_steps,
-                    future_steps=future_steps,
-                    loss_weight=[1.0, 1.0, 0.35],
-                )
-        
-        self.decoder_norm = nn.LayerNorm(dim)
-
-        self.ego_decoding_token = nn.Parameter(torch.Tensor(1, 1, dim))
-
-        self.pretrain_model.initialize_weights()
-
-        self.trajectory_decoder = TrajectoryDecoder(
-            embed_dim=dim,
-            num_modes=num_modes,
-            future_steps=future_steps,
-            out_channels=4,
-        )
-
-        self.agent_predictor = build_mlp(dim, [dim * 2, future_steps * 2], norm="ln")
-
-
-        self.apply(self._init_weights)
-
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
             torch.nn.init.xavier_uniform_(m.weight)
@@ -184,19 +210,31 @@ class PlanningModel(TorchModuleWrapper):
         elif isinstance(m, nn.Embedding):
             nn.init.normal_(m.weight, mean=0.0, std=0.02)
 
+    def get_pretrain_modules(self):
+        # targeted_list = [self.pos_emb, self.tempo_net, self.agent_seed, self.agent_projector, 
+        #         self.map_projector, self.lane_pred, self.agent_frame_pred, self.blocks, self.norm]
+        # module_list = [[name, module] for name, module in self.named_modules() if module in targeted_list]
+        return [self.pos_emb, self.tempo_net, self.agent_seed, self.agent_projector, 
+                self.map_projector, self.lane_pred, self.agent_frame_pred, self.blocks, self.norm]
+
+    def get_finetune_modules(self):
+        return [self.trajectory_decoder, self.agent_predictor]
+
+
     def get_stage(self, current_epoch):
         if current_epoch < 10:
-            return Stage.PRETRAIN_ROAD
-        elif current_epoch < 20:
-            return Stage.PRETRAIN_MIX
-        elif current_epoch < 25:
-            return Stage.PRETRAIN_REPRESENTATION
+            return Stage.PRETRAIN_SEP
+        # elif current_epoch < 20:
+        #     return Stage.PRETRAIN_MIX
+        # elif current_epoch < 25:
+        #     return Stage.PRETRAIN_REPRESENTATION
+        # else:
         else:
             return Stage.FINE_TUNING
 
     def forward(self, data, current_epoch):
         stage = self.get_stage(current_epoch)
-        if stage == Stage.PRETRAIN_ROAD:
+        if stage == Stage.PRETRAIN_SEP:
             return self.forward_pretrain_separate(data)
         elif stage == Stage.PRETRAIN_MIX:
             return self.forward_pretrain_mix(data)
@@ -378,18 +416,20 @@ class PlanningModel(TorchModuleWrapper):
         agent_embedding = self.agent_projector(agent_features) # B A D
         (agent_masked_tokens, agent_ids_keep_list) = self.trajectory_random_masking(agent_embedding, self.trajectory_mask_ratio, agent_mask, seed=self.agent_seed)
 
-        y = self.tempo_net(agent_masked_tokens, agent_key_padding)
+        positional_embedding = self.pe(agent_masked_tokens)
+
+        y = self.tempo_net(agent_masked_tokens+positional_embedding, agent_key_padding)
         y = self.norm(y)
 
         # frame pred loss
-        frame_pred = self.frame_pred(y)
+        frame_pred = self.agent_frame_pred(y)
         agent_pred_mask = ~polygon_mask  
         for i, idx in enumerate(agent_ids_keep_list):
             agent_pred_mask[i, idx] = False
         agent_pred_loss = F.mse_loss(
             frame_pred[agent_pred_mask], agent_features[agent_pred_mask]
         )
-
+ 
 
         out = {
             "MRM_loss": lane_pred_loss,
@@ -420,10 +460,17 @@ class PlanningModel(TorchModuleWrapper):
         polygon_key_padding = ~(polygon_mask.any(-1))
         key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding], dim=-1)
 
-        x_agent = self.agent_encoder(data)
-        x_polygon = self.map_encoder(data)
+        # agent embedding
+        agent_features, agent_mask = self.extract_agent_feature(data)
+        agent_embedding = self.agent_projector(agent_features) # B A D
+        positional_embedding = self.pe(agent_embedding)
+        x_agent = self.tempo_net(agent_embedding+positional_embedding, agent_key_padding)
 
-        x = torch.cat([x_agent, x_polygon], dim=1) + pos_embed
+        # map embedding
+        map_features, polygon_mask = self.extract_map_feature(data)
+        lane_embedding = self.map_projector(map_features)
+
+        x = torch.cat([x_agent, lane_embedding], dim=1) + pos_embed
 
         for blk in self.encoder_blocks:
             x = blk(x, key_padding_mask=key_padding_mask)

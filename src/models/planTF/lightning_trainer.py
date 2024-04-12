@@ -18,6 +18,7 @@ from torchmetrics import MetricCollection
 
 from src.metrics import MR, minADE, minFDE
 from src.optim.warmup_cos_lr import WarmupCosLR
+from src.models.planTF.planning_model import Stage
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,8 @@ class LightningTrainer(pl.LightningModule):
         self.epochs = epochs
         self.warmup_epochs = warmup_epochs
         self.pretrain_epochs = pretrain_epochs
+
+        self.automatic_optimization=False
 
         self.initial_finetune_flag = False
 
@@ -74,6 +77,22 @@ class LightningTrainer(pl.LightningModule):
             losses.update(planning_loss) 
 
         assert 'loss' in losses
+
+        opts = self.optimizers()
+        opt_pre, opt_fine_p, opt_fine_f = opts
+
+        if self.model.get_stage() == Stage.PRETRAIN_SEP:
+            opt_pre.zero_grad()
+            self.manual_backward(losses["loss"]) 
+            opt_pre.step()
+        elif self.model.get_stage() == Stage.FINE_TUNING: 
+            opt_fine_p.zero_grad()
+            opt_fine_f.zero_grad()
+            self.manual_backward(losses["loss"]) 
+            opt_fine_p.step()
+            opt_fine_f.step()
+
+        # TODO: manual gradient clipping?
 
         self._log_step(losses["loss"], losses, metrics, prefix)
         return losses["loss"]
@@ -224,14 +243,10 @@ class LightningTrainer(pl.LightningModule):
         """
         return self.model(features)
 
-    def configure_optimizers(
-        self,
-    ) -> Union[Optimizer, Dict[str, Union[Optimizer, _LRScheduler]]]:
-        """
-        Configures the optimizers and learning schedules for the training.
-
-        :return: optimizer or dictionary of optimizers and schedules
-        """
+    def get_optim_groups(self, modules):
+        '''
+            modules: List[Tuple[str, nn.Module]]
+        '''
         decay = set()
         no_decay = set()
         whitelist_weight_modules = (
@@ -251,7 +266,8 @@ class LightningTrainer(pl.LightningModule):
             nn.LayerNorm,
             nn.Embedding,
         )
-        for module_name, module in self.named_modules():
+
+        for module_name, module in modules:
             for param_name, param in module.named_parameters():
                 full_param_name = (
                     "%s.%s" % (module_name, param_name) if module_name else param_name
@@ -259,19 +275,26 @@ class LightningTrainer(pl.LightningModule):
                 if "bias" in param_name:
                     no_decay.add(full_param_name)
                 elif "weight" in param_name:
-                    if isinstance(module, whitelist_weight_modules):
-                        decay.add(full_param_name)
-                    elif isinstance(module, blacklist_weight_modules):
+                    # if isinstance(module, whitelist_weight_modules):
+                    #     decay.add(full_param_name)
+                    # elif isinstance(module, blacklist_weight_modules):
+                    #     no_decay.add(full_param_name)
+                    if isinstance(module, blacklist_weight_modules):
                         no_decay.add(full_param_name)
+                    else:
+                        decay.add(full_param_name)
                 elif not ("weight" in param_name or "bias" in param_name):
                     no_decay.add(full_param_name)
+
         param_dict = {
             param_name: param for param_name, param in self.named_parameters()
         }
-        inter_params = decay & no_decay
-        union_params = decay | no_decay
-        assert len(inter_params) == 0
-        assert len(param_dict.keys() - union_params) == 0
+
+        # inter_params = decay & no_decay
+        # union_params = decay | no_decay
+
+        # assert len(inter_params) == 0
+        # assert len(param_dict.keys() - union_params) == 0
 
         optim_groups = [
             {
@@ -288,18 +311,65 @@ class LightningTrainer(pl.LightningModule):
             },
         ]
 
-        # Get optimizer
-        optimizer = torch.optim.AdamW(
-            optim_groups, lr=self.lr, weight_decay=self.weight_decay
+        return optim_groups
+
+    def configure_optimizers(
+        self,
+    ) -> Union[Optimizer, Dict[str, Union[Optimizer, _LRScheduler]]]:
+        """
+        Configures the optimizers and learning schedules for the training.
+
+        :return: optimizer or dictionary of optimizers and schedules
+        """
+        pretrain_modules_list = self.model.get_pretrain_modules()
+        finetune_modules_list = self.model.get_finetune_modules()
+
+        pretrain_modules = []
+        finetune_modules = []
+
+        for name, module in self.named_modules():
+            if module in pretrain_modules_list:
+                pretrain_modules.append((name, module))
+            elif module in finetune_modules_list:
+                finetune_modules.append((name, module))
+
+        optim_groups_pretrain = self.get_optim_groups(pretrain_modules)
+        optim_groups_finetune = self.get_optim_groups(finetune_modules)
+
+        # Get optimizers
+        optimizer_pretrain = torch.optim.AdamW(
+            optim_groups_pretrain, lr=self.lr, weight_decay=self.weight_decay
+        )
+        optimizer_finetune_p = torch.optim.AdamW(
+            optim_groups_pretrain, lr=0.1*self.lr, weight_decay=self.weight_decay
+        )
+        optimizer_finetune_f = torch.optim.AdamW(
+            optim_groups_finetune, lr=self.lr, weight_decay=self.weight_decay
         )
 
-        # Get lr_scheduler
-        scheduler = WarmupCosLR(
-            optimizer=optimizer,
+        # Get lr_schedulers
+        scheduler_pre = WarmupCosLR(
+            optimizer=optimizer_pretrain,
             lr=self.lr,
             min_lr=1e-6,
             epochs=self.epochs,
             warmup_epochs=self.warmup_epochs,
         )
 
-        return [optimizer], [scheduler]
+        scheduler_fine_p = WarmupCosLR(
+            optimizer=optimizer_finetune_p,
+            lr=self.lr,
+            min_lr=1e-6,
+            epochs=self.epochs,
+            warmup_epochs=self.warmup_epochs,
+        )
+
+        scheduler_fine_f = WarmupCosLR(
+            optimizer=optimizer_finetune_f,
+            lr=self.lr,
+            min_lr=1e-6,
+            epochs=self.epochs,
+            warmup_epochs=self.warmup_epochs,
+        )
+
+        return [optimizer_pretrain, optimizer_finetune_p, optimizer_finetune_f], [scheduler_pre, scheduler_fine_p, scheduler_fine_f]

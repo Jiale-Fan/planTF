@@ -13,6 +13,7 @@ class TempoNet(nn.Module):
         num_head=8,
         dim_head=64,
     ):
+        super().__init__()
         self.projector = Projector(dim=dim_head, in_channels=state_channel)
         self.blocks = nn.ModuleList(
             Block(

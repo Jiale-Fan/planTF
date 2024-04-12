@@ -34,8 +34,9 @@ trainer:
 
     # accumulate_grad_batches: 1  # accumulates gradients every n batches
     # track_grad_norm: -1  # logs the p-norm for inspection
-    gradient_clip_val: 5.0  # value to clip gradients
-    gradient_clip_algorithm: norm  # [value, norm] method to clip gradients
+    
+    # gradient_clip_val: 5.0  # value to clip gradients
+    # gradient_clip_algorithm: norm  # [value, norm] method to clip gradients
     sync_batchnorm: true
     strategy: ddp_find_unused_parameters_true
 
