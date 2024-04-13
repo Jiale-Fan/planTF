@@ -14,7 +14,7 @@ class TempoNet(nn.Module):
         dim_head=64,
     ):
         super().__init__()
-        self.projector = Projector(dim=dim_head, in_channels=state_channel)
+        # self.projector = Projector(dim=dim_head, in_channels=state_channel)
         self.blocks = nn.ModuleList(
             Block(
                 dim=dim_head,
@@ -28,7 +28,7 @@ class TempoNet(nn.Module):
         self.norm = nn.LayerNorm(dim_head)
 
     def forward(self, x, key_padding_mask=None):
-        x = self.projector(x)
+        # x = self.projector(x)
         for block in self.blocks:
             x = block(x, key_padding_mask=key_padding_mask)
         x = self.norm(x)

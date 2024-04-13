@@ -69,33 +69,34 @@ class LightningTrainer(pl.LightningModule):
 
         res = self.model(features["feature"].data, self.current_epoch)
 
-        losses = res.losses
+        metrics = None
 
         if 'trajectory' in res and 'probability' in res:
             planning_loss = self._compute_objectives(res, features["feature"].data)
             metrics = self._compute_metrics(res, features["feature"].data, prefix)
-            losses.update(planning_loss) 
+            res.update(planning_loss) 
 
-        assert 'loss' in losses
+        assert 'loss' in res
 
         opts = self.optimizers()
         opt_pre, opt_fine_p, opt_fine_f = opts
 
-        if self.model.get_stage() == Stage.PRETRAIN_SEP:
-            opt_pre.zero_grad()
-            self.manual_backward(losses["loss"]) 
-            opt_pre.step()
-        elif self.model.get_stage() == Stage.FINE_TUNING: 
-            opt_fine_p.zero_grad()
-            opt_fine_f.zero_grad()
-            self.manual_backward(losses["loss"]) 
-            opt_fine_p.step()
-            opt_fine_f.step()
+        if self.training:
+            if self.model.get_stage(self.current_epoch) == Stage.PRETRAIN_SEP:
+                opt_pre.zero_grad()
+                self.manual_backward(res["loss"]) 
+                opt_pre.step()
+            elif self.model.get_stage(self.current_epoch) == Stage.FINE_TUNING: 
+                opt_fine_p.zero_grad()
+                opt_fine_f.zero_grad()
+                self.manual_backward(res["loss"]) 
+                opt_fine_p.step()
+                opt_fine_f.step()
 
         # TODO: manual gradient clipping?
-
-        self._log_step(losses["loss"], losses, metrics, prefix)
-        return losses["loss"]
+        logged_loss = {k: v for k, v in res.items() if v.dim == 0}
+        self._log_step(res["loss"], logged_loss, metrics, prefix)
+        return res["loss"]
 
     def _compute_objectives(self, res, data) -> Dict[str, torch.Tensor]:
         trajectory, probability, prediction= (
@@ -130,31 +131,32 @@ class LightningTrainer(pl.LightningModule):
             prediction[agent_mask], agent_target[agent_mask][:, :2]
         )
 
-        # loss = ego_reg_loss_mean + ego_cls_loss + agent_reg_loss
+        loss = ego_reg_loss_mean + ego_cls_loss + agent_reg_loss
         
-        if self.current_epoch < self.pretrain_epochs:
-            loss = res["pretrain_loss"]
-        else:
-            if not self.initial_finetune_flag:
-                self.model.initialize_finetune()
-                print("Initial finetune done")
-                loss = res["pretrain_loss"]
-                self.initial_finetune_flag = True
-            else: 
-                loss = ego_reg_loss_mean + ego_cls_loss + agent_reg_loss
+        # if self.current_epoch < self.pretrain_epochs:
+        #     loss = res["pretrain_loss"]
+        # else:
+        #     if not self.initial_finetune_flag:
+        #         self.model.initialize_finetune()
+        #         print("Initial finetune done")
+        #         loss = res["pretrain_loss"]
+        #         self.initial_finetune_flag = True
+        #     else: 
+        #         loss = ego_reg_loss_mean + ego_cls_loss + agent_reg_loss
 
         return {
             "loss": loss,
             "reg_loss": ego_reg_loss_mean,
             "cls_loss": ego_cls_loss,
-            "pretrain_loss": res["pretrain_loss"],
-            "hist_loss": res["hist_loss"],
-            "future_loss": res["future_loss"],
-            "lane_pred_loss": res["lane_pred_loss"],
-            "hist_rec_pred_loss": res["hist_rec_pred_loss"],
-            "fut_rec_pred_loss": res["fut_rec_pred_loss"],
-            "lane_rec_pred_loss": res["lane_rec_pred_loss"],
-            "hard_ratio": res["hard_ratio"],
+            "agent_reg_loss": agent_reg_loss,
+            # "pretrain_loss": res["pretrain_loss"],
+            # "hist_loss": res["hist_loss"],
+            # "future_loss": res["future_loss"],
+            # "lane_pred_loss": res["lane_pred_loss"],
+            # "hist_rec_pred_loss": res["hist_rec_pred_loss"],
+            # "fut_rec_pred_loss": res["fut_rec_pred_loss"],
+            # "lane_rec_pred_loss": res["lane_rec_pred_loss"],
+            # "hard_ratio": res["hard_ratio"],
         }
 
     def _compute_metrics(self, output, data, prefix) -> Dict[str, torch.Tensor]:

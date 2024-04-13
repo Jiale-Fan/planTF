@@ -19,7 +19,7 @@ import torch.nn.functional as F
 from .modules.transformer_blocks import Block
 from .pretrain_model import PretrainModel
 from torch.nn.utils.rnn import pad_sequence
-from einops import rearrange
+from einops import rearrange, reduce, repeat
 from .layers.embedding import Projector
 
 from enum import Enum
@@ -36,26 +36,21 @@ class Stage(Enum):
     FINE_TUNING = 3
 
 class PositionalEncoding(nn.Module):
-    '''
-    Standard positional encoding.
-    '''
-    def __init__(self, d_model, dropout=0.1, max_len=20):
+
+    def __init__(self, d_model, dropout=0.1, max_len=5000):
         super(PositionalEncoding, self).__init__()
         self.dropout = nn.Dropout(p=dropout)
+
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
         div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0).transpose(0, 1)
-        self.register_buffer('pe', pe)
+        pe = pe.unsqueeze(0)
+        self.register_parameter('pe', nn.Parameter(pe, requires_grad=False))
 
     def forward(self, x):
-        '''
-        :param x: must be (T, B, H)
-        :return:
-        '''
-        x = x + self.pe[:x.size(0), :]
+        x = x + self.pe[:, :x.size(1), :]
         return self.dropout(x)
 
 
@@ -63,8 +58,8 @@ class PlanningModel(TorchModuleWrapper):
     def __init__(
         self,
         dim=128,
-        state_channel=7,
-        polygon_channel=6,
+        state_channel=8,
+        polygon_channel=3,
         history_channel=9,
         history_steps=21,
         future_steps=80,
@@ -108,16 +103,16 @@ class PlanningModel(TorchModuleWrapper):
             state_channel=state_channel,
             depth=3,
             num_head=8,
-            dim_head=64,
+            dim_head=dim,
         )
         
 
         self.agent_seed = nn.Parameter(torch.randn(dim))
 
-        self.agent_projector = Projector(dim=dim, in_channels=self.state_channel)
-        self.map_projector = Projector(dim=dim, in_channels=self.no_lane_segment_points*2+polygon_channel)
+        self.agent_projector = Projector(dim=dim, in_channels=8) # NOTE: make consistent to state_channel
+        self.map_projector = Projector(dim=dim, in_channels=self.no_lane_segment_points*2+3) # NOTE: make consistent to polygon_channel
         self.lane_pred = build_mlp(dim, [512, self.no_lane_segment_points*2])
-        self.agent_frame_pred = build_mlp(64, [512, 3])
+        self.agent_frame_pred = build_mlp(dim, [512, 3])
 
         dpr = [x.item() for x in torch.linspace(0, drop_path, encoder_depth)]
 
@@ -231,6 +226,9 @@ class PlanningModel(TorchModuleWrapper):
         # else:
         else:
             return Stage.FINE_TUNING
+        
+        # for debugging
+        return Stage.FINE_TUNING
 
     def forward(self, data, current_epoch):
         stage = self.get_stage(current_epoch)
@@ -267,8 +265,8 @@ class PlanningModel(TorchModuleWrapper):
         # # B M 20
         valid_mask = data["map"]["valid_mask"]
 
-        point_position_feature = torch.zeros(point_position[:,:,0].shape) # B M 20 2
-        point_position_feature[valid_mask] = point_position[valid_mask]
+        point_position_feature = torch.zeros(point_position[:,:,0].shape, device=point_position.device) # B M 20 2
+        point_position_feature[valid_mask] = point_position[:,:,0][valid_mask]
         point_position_feature = rearrange(point_position_feature, 'b m p c -> b m (p c)')
 
         pror_feature = torch.stack([polygon_type, polygon_on_route, polygon_tl_status], dim=-1)
@@ -279,20 +277,21 @@ class PlanningModel(TorchModuleWrapper):
 
     def extract_agent_feature(self, data):
         # B A T 2
-        position = data["agent"]["position"][:, :, self.history_steps - 1]
-        velocity = data["agent"]["velocity"][:, :, self.history_steps - 1]
-        shape = data["agent"]["shape"][:, :, self.history_steps - 1]
+        position = data["agent"]["position"][:, :, :self.history_steps]
+        velocity = data["agent"]["velocity"][:, :, :self.history_steps]
+        shape = data["agent"]["shape"][:, :, :self.history_steps]
 
         # B A T
-        heading = data["agent"]["heading"][:, :, self.history_steps - 1]
-        valid_mask = data["agent"]["valid_mask"][:, :, self.history_steps - 1]
+        heading = data["agent"]["heading"][:, :, :self.history_steps]
+        valid_mask = data["agent"]["valid_mask"][:, :, :self.history_steps]
 
         # B A
         category = data["agent"]["category"].long()
 
         frame_feature = torch.cat([position, heading.unsqueeze(-1), velocity, shape], dim=-1)
-        frame_feature = rearrange(frame_feature, 'b a t c -> b a (t c)')
-        feature = torch.cat([category.unsqueeze(-1), frame_feature], dim=-1)
+        # frame_feature = rearrange(frame_feature, 'b a t c -> b a (t c)')
+        category_rep = repeat(category, 'b a -> b a t d', t=self.history_steps, d = 1)
+        feature = torch.cat([category_rep, frame_feature], dim=-1)
 
         return feature, valid_mask
         
@@ -334,10 +333,39 @@ class PlanningModel(TorchModuleWrapper):
         # )
 
         return x_masked_list, ids_keep_list
+
+
+    def trajectory_random_masking(self, x, future_mask_ratio, frame_valid_mask, seed):
+        '''
+        x: (B, A, T, D). 
+        future_mask_ratio: float
+        key_padding_mask: (B, A, T)
+        seed: (D, )
+
+        each history consists of T frames, but not all frames are valid
+        we first randomly masked out future_mask_ratio of the frames, but there is a possibility that all valid frames are masked
+        therefore we manually give at least one valid frame to keep
+        '''
+        len_keep = math.ceil(self.history_steps * (1 - future_mask_ratio))
+
+        noise = torch.rand(frame_valid_mask.shape[:3], device=x.device)
+        sorted = torch.sort(noise)[0]
+
+         # 1 indicated kept, 0 indicated masked
+        kept_mask = noise < sorted[..., len_keep].unsqueeze(-1)
+        noise_valid = noise * frame_valid_mask
+        kept_mask[noise_valid.max(-1)==noise] = True
+
+        pred_mask = frame_valid_mask*~kept_mask
+
+        # generate the masked tokens
+        x_masked = x*kept_mask.unsqueeze(-1) + (~kept_mask.unsqueeze(-1))*repeat(seed, 'd -> b a t d', b=x.shape[0], a=x.shape[1], t=x.shape[2])
+
+        return x_masked, pred_mask
     
 
     @staticmethod
-    def trajectory_random_masking(x, future_mask_ratio, key_padding_mask, seed):
+    def agent_random_masking(x, future_mask_ratio, key_padding_mask, seed):
         '''
         x: (B, N, D). In the dimension D, the first two elements indicate the start point of the lane segment
         future_mask_ratio: float
@@ -385,7 +413,7 @@ class PlanningModel(TorchModuleWrapper):
             lane_masked_tokens,
             lane_ids_keep_list,
         ) = self.lane_random_masking(
-            map_features, self.lane_mask_ratio, polygon_mask
+            map_features, self.lane_mask_ratio, polygon_key_padding
         )
 
         lane_embedding = self.map_projector(lane_masked_tokens)
@@ -401,33 +429,32 @@ class PlanningModel(TorchModuleWrapper):
         for i, idx in enumerate(lane_ids_keep_list):
             lane_pred_mask[i, idx] = False
 
-        lane_pred = self.lane_pred(x)
+        lane_pred = rearrange(self.lane_pred(x), 'b n (p c) -> b n p c', p=self.no_lane_segment_points, c=2)
         # lane_reg_mask = ~polygon_mask
         # lane_reg_mask[~lane_pred_mask] = False
         lane_pred_loss = F.mse_loss(
-            lane_pred[lane_pred_mask], map_features[lane_pred_mask, 5:]
+            lane_pred[lane_pred_mask], data["map"]["point_position"][:,:,0][lane_pred_mask]
         )
 
         ## 2. MTM
 
         agent_features, agent_mask = self.extract_agent_feature(data)
-        agent_key_padding = ~(agent_mask.any(-1))
+        # agent_key_padding = ~(agent_mask.any(-1))
+        frame_padding_mask = ~agent_mask
 
         agent_embedding = self.agent_projector(agent_features) # B A D
-        (agent_masked_tokens, agent_ids_keep_list) = self.trajectory_random_masking(agent_embedding, self.trajectory_mask_ratio, agent_mask, seed=self.agent_seed)
+        (agent_masked_tokens, frame_pred_mask) = self.trajectory_random_masking(agent_embedding, self.trajectory_mask_ratio, agent_mask, seed=self.agent_seed)
 
-        positional_embedding = self.pe(agent_masked_tokens)
+        agent_masked_tokens_ = rearrange(agent_masked_tokens, 'b a t d -> (b a) t d')
+        agent_masked_tokens_pos_embeded = self.pe(agent_masked_tokens_)
 
-        y = self.tempo_net(agent_masked_tokens+positional_embedding, agent_key_padding)
+        y = self.tempo_net(agent_masked_tokens_pos_embeded)
         y = self.norm(y)
 
         # frame pred loss
-        frame_pred = self.agent_frame_pred(y)
-        agent_pred_mask = ~polygon_mask  
-        for i, idx in enumerate(agent_ids_keep_list):
-            agent_pred_mask[i, idx] = False
+        frame_pred = rearrange(self.agent_frame_pred(y), '(b a) t c -> b a t c', b=agent_features.shape[0], a=agent_features.shape[1])
         agent_pred_loss = F.mse_loss(
-            frame_pred[agent_pred_mask], agent_features[agent_pred_mask]
+            frame_pred[frame_pred_mask], agent_features[frame_pred_mask][..., :3]
         )
  
 
@@ -441,38 +468,31 @@ class PlanningModel(TorchModuleWrapper):
 
 
     def forward_fine_tuning(self, data):
-        agent_pos = data["agent"]["position"][:, :, self.history_steps - 1]
-        agent_heading = data["agent"]["heading"][:, :, self.history_steps - 1]
-        agent_mask = data["agent"]["valid_mask"][:, :, : self.history_steps]
-        polygon_center = data["map"]["polygon_center"]
-        polygon_mask = data["map"]["valid_mask"]
+        
+        map_features, polygon_mask = self.extract_map_feature(data)
+        agent_features, agent_mask = self.extract_agent_feature(data)
 
-        bs, A = agent_pos.shape[0:2]
+        # lane embedding (purely projection)
+        polygon_key_padding = ~(polygon_mask.any(-1))
+        lane_embedding = self.map_projector(map_features)
 
-        position = torch.cat([agent_pos, polygon_center[..., :2]], dim=1)
-        angle = torch.cat([agent_heading, polygon_center[..., 2]], dim=1)
-        pos = torch.cat(
-            [position, torch.stack([angle.cos(), angle.sin()], dim=-1)], dim=-1
-        )
-        pos_embed = self.pos_emb(pos)
-
+        # key padding masks
         agent_key_padding = ~(agent_mask.any(-1))
         polygon_key_padding = ~(polygon_mask.any(-1))
         key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding], dim=-1)
+        bs, A = agent_features.shape[0:2]
 
         # agent embedding
-        agent_features, agent_mask = self.extract_agent_feature(data)
-        agent_embedding = self.agent_projector(agent_features) # B A D
-        positional_embedding = self.pe(agent_embedding)
-        x_agent = self.tempo_net(agent_embedding+positional_embedding, agent_key_padding)
+        
+        agent_embedding = rearrange(self.agent_projector(agent_features), 'b a t d -> (b a) t d') # B A D
+        agent_embedding_pos_embed = self.pe(agent_embedding)
+        x_agent = self.tempo_net(agent_embedding_pos_embed)
+        x_agent_ = rearrange(x_agent, '(b a) t c -> b a t c', b=agent_features.shape[0], a=agent_features.shape[1])
+        x_agent_ = reduce(x_agent_, 'b a t c -> b a c', 'max', t=self.history_steps)
 
-        # map embedding
-        map_features, polygon_mask = self.extract_map_feature(data)
-        lane_embedding = self.map_projector(map_features)
+        x = torch.cat([x_agent_, lane_embedding], dim=1)
 
-        x = torch.cat([x_agent, lane_embedding], dim=1) + pos_embed
-
-        for blk in self.encoder_blocks:
+        for blk in self.blocks:
             x = blk(x, key_padding_mask=key_padding_mask)
         x = self.norm(x)
 
