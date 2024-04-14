@@ -85,13 +85,19 @@ class LightningTrainer(pl.LightningModule):
             if self.model.get_stage(self.current_epoch) == Stage.PRETRAIN_SEP:
                 opt_pre.zero_grad()
                 self.manual_backward(res["loss"]) 
+                self.clip_gradients(opt_pre, gradient_clip_val=5.0, gradient_clip_algorithm="norm")
                 opt_pre.step()
             elif self.model.get_stage(self.current_epoch) == Stage.FINE_TUNING: 
                 opt_fine_p.zero_grad()
                 opt_fine_f.zero_grad()
-                self.manual_backward(res["loss"]) 
+                self.manual_backward(res["loss"])
+                self.clip_gradients(opt_fine_p, gradient_clip_val=5.0, gradient_clip_algorithm="norm") 
+                self.clip_gradients(opt_fine_f, gradient_clip_val=5.0, gradient_clip_algorithm="norm") 
                 opt_fine_p.step()
                 opt_fine_f.step()
+
+        for sch in self.lr_schedulers():
+            sch.step(self.current_epoch)
 
         # TODO: manual gradient clipping?
         logged_loss = {k: v for k, v in res.items() if v.dim == 0}
@@ -343,7 +349,7 @@ class LightningTrainer(pl.LightningModule):
             optim_groups_pretrain, lr=self.lr, weight_decay=self.weight_decay
         )
         optimizer_finetune_p = torch.optim.AdamW(
-            optim_groups_pretrain, lr=0.1*self.lr, weight_decay=self.weight_decay
+            optim_groups_pretrain, lr=self.lr, weight_decay=self.weight_decay
         )
         optimizer_finetune_f = torch.optim.AdamW(
             optim_groups_finetune, lr=self.lr, weight_decay=self.weight_decay
@@ -354,6 +360,7 @@ class LightningTrainer(pl.LightningModule):
             optimizer=optimizer_pretrain,
             lr=self.lr,
             min_lr=1e-6,
+            starting_epoch=0,
             epochs=self.epochs,
             warmup_epochs=self.warmup_epochs,
         )
@@ -362,16 +369,18 @@ class LightningTrainer(pl.LightningModule):
             optimizer=optimizer_finetune_p,
             lr=self.lr,
             min_lr=1e-6,
+            starting_epoch=self.model.pretrain_epoch_stages[0], # NOTE
             epochs=self.epochs,
-            warmup_epochs=self.warmup_epochs,
+            warmup_epochs=10,
         )
 
         scheduler_fine_f = WarmupCosLR(
             optimizer=optimizer_finetune_f,
             lr=self.lr,
             min_lr=1e-6,
+            starting_epoch=self.model.pretrain_epoch_stages[0],
             epochs=self.epochs,
-            warmup_epochs=self.warmup_epochs,
+            warmup_epochs=0,
         )
 
         return [optimizer_pretrain, optimizer_finetune_p, optimizer_finetune_f], [scheduler_pre, scheduler_fine_p, scheduler_fine_f]

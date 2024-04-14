@@ -5,12 +5,13 @@ from torch.optim.lr_scheduler import _LRScheduler
 
 class WarmupCosLR(_LRScheduler):
     def __init__(
-        self, optimizer, min_lr, lr, warmup_epochs, epochs, last_epoch=-1, verbose=False
+        self, optimizer, min_lr, lr, starting_epoch, warmup_epochs, epochs, last_epoch=-1, verbose=False
     ) -> None:
         self.min_lr = min_lr
         self.lr = lr
         self.epochs = epochs
         self.warmup_epochs = warmup_epochs
+        self.starting_epoch = starting_epoch
         super(WarmupCosLR, self).__init__(optimizer, last_epoch, verbose)
 
     def state_dict(self):
@@ -37,15 +38,17 @@ class WarmupCosLR(_LRScheduler):
         return lr
 
     def get_lr(self):
-        if self.last_epoch < self.warmup_epochs:
-            lr = self.lr * (self.last_epoch + 1) / self.warmup_epochs
+        if self.last_epoch < self.starting_epoch:
+            lr = 0.0
+        elif self.last_epoch < self.warmup_epochs + self.starting_epoch:
+            lr = self.lr * (self.last_epoch - self.starting_epoch + 1) / self.warmup_epochs
         else:
             lr = self.min_lr + 0.5 * (self.lr - self.min_lr) * (
                 1
                 + math.cos(
                     math.pi
-                    * (self.last_epoch - self.warmup_epochs)
-                    / (self.epochs - self.warmup_epochs)
+                    * (self.last_epoch - self.warmup_epochs - self.starting_epoch)
+                    / (self.epochs - self.warmup_epochs - self.starting_epoch)
                 )
             )
         if "lr_scale" in self.optimizer.param_groups[0]:

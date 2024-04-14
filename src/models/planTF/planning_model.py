@@ -75,6 +75,7 @@ class PlanningModel(TorchModuleWrapper):
         total_epochs=30,
         lane_mask_ratio=0.5,
         trajectory_mask_ratio=0.7,
+        pretrain_epoch_stages = [10, 20, 25],
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
     ) -> None:
         super().__init__(
@@ -92,6 +93,7 @@ class PlanningModel(TorchModuleWrapper):
 
         self.lane_mask_ratio = lane_mask_ratio
         self.trajectory_mask_ratio = trajectory_mask_ratio
+        self.pretrain_epoch_stages = pretrain_epoch_stages
 
         self.no_lane_segment_points = 20
 
@@ -217,13 +219,12 @@ class PlanningModel(TorchModuleWrapper):
 
 
     def get_stage(self, current_epoch):
-        if current_epoch < 10:
+        if current_epoch < self.pretrain_epoch_stages[0]:
             return Stage.PRETRAIN_SEP
-        # elif current_epoch < 20:
+        # elif current_epoch < self.pretrain_epoch_stages[1]:
         #     return Stage.PRETRAIN_MIX
-        # elif current_epoch < 25:
+        # elif current_epoch < self.pretrain_epoch_stages[2]:
         #     return Stage.PRETRAIN_REPRESENTATION
-        # else:
         else:
             return Stage.FINE_TUNING
         
