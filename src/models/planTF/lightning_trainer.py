@@ -100,7 +100,7 @@ class LightningTrainer(pl.LightningModule):
             sch.step(self.current_epoch)
 
         # TODO: manual gradient clipping?
-        logged_loss = {k: v for k, v in res.items() if v.dim == 0}
+        logged_loss = {k: v for k, v in res.items() if v.dim() == 0}
         self._log_step(res["loss"], logged_loss, metrics, prefix)
         return res["loss"]
 

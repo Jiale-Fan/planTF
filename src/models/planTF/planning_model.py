@@ -25,6 +25,8 @@ from .layers.embedding import Projector
 from enum import Enum
 import math
 
+from .debug_vis import plot_scene_points
+
 
 # no meaning, required by nuplan
 trajectory_sampling = TrajectorySampling(num_poses=8, time_horizon=8, interval_length=1)
@@ -76,6 +78,7 @@ class PlanningModel(TorchModuleWrapper):
         lane_mask_ratio=0.5,
         trajectory_mask_ratio=0.7,
         pretrain_epoch_stages = [10, 20, 25],
+        lane_split_threshold=20,
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
     ) -> None:
         super().__init__(
@@ -96,6 +99,7 @@ class PlanningModel(TorchModuleWrapper):
         self.pretrain_epoch_stages = pretrain_epoch_stages
 
         self.no_lane_segment_points = 20
+        self.lane_split_threshold = lane_split_threshold
 
         # modules begin
         self.pe = PositionalEncoding(dim, dropout=0.1, max_len=1000)
@@ -112,7 +116,7 @@ class PlanningModel(TorchModuleWrapper):
         self.agent_seed = nn.Parameter(torch.randn(dim))
 
         self.agent_projector = Projector(dim=dim, in_channels=8) # NOTE: make consistent to state_channel
-        self.map_projector = Projector(dim=dim, in_channels=self.no_lane_segment_points*2+3) # NOTE: make consistent to polygon_channel
+        self.map_projector = Projector(dim=dim, in_channels=self.no_lane_segment_points*2) # NOTE: make consistent to polygon_channel
         self.lane_pred = build_mlp(dim, [512, self.no_lane_segment_points*2])
         self.agent_frame_pred = build_mlp(dim, [512, 3])
 
@@ -242,8 +246,7 @@ class PlanningModel(TorchModuleWrapper):
         else:
             return self.forward_fine_tuning(data)
 
-    @staticmethod
-    def extract_map_feature(data):
+    def extract_map_feature(self, data):
         # TODO: put property to one-hot?
         # TODO: split them into finer segments?
         # B M 3
@@ -266,16 +269,75 @@ class PlanningModel(TorchModuleWrapper):
         # # B M 20
         valid_mask = data["map"]["valid_mask"]
 
-        point_position_feature = torch.zeros(point_position[:,:,0].shape, device=point_position.device) # B M 20 2
-        point_position_feature[valid_mask] = point_position[:,:,0][valid_mask]
+        # point_position_feature = torch.zeros(point_position[:,:,0].shape, device=point_position.device) # B M 20 2
+        # point_position_feature[valid_mask] = point_position[:,:,0][valid_mask]
+
+        point_position_feature, valid_mask = PlanningModel.split_lane_segment(point_position[:,:,0], valid_mask, split_threshold=self.lane_split_threshold)
+
+
         point_position_feature = rearrange(point_position_feature, 'b m p c -> b m (p c)')
 
-        pror_feature = torch.stack([polygon_type, polygon_on_route, polygon_tl_status], dim=-1)
-        feature = torch.cat([pror_feature, point_position_feature], dim=-1)
+        # pror_feature = torch.stack([polygon_type, polygon_on_route, polygon_tl_status], dim=-1)
+        # feature = torch.cat([pror_feature, point_position_feature], dim=-1)
 
-        return feature, valid_mask
+        return point_position_feature, valid_mask
+
+    @staticmethod
+    def split_lane_segment(point_position_feature, valid_mask, split_threshold=20):
+        '''
+            point_position_feature: (B, M, P=21, D=2)
+            valid_mask: (B, M, P=21)
+        '''
+        # examine whether the segment's distance between starting point and ending point exceeds 5 meters.
+        # if so, we split it into two segments
+        B, M, P, D = point_position_feature.shape
+
+        points_list = []
+        valid_mask_list = []
+
+        for i in range(B):
+
+            points = point_position_feature[i] # (M, P, D)
+            # to prevent the code to be too complicated, if the segment contains less than P points, we assume it does not need to be splited
+            valid_mask_scene = valid_mask[i] # (M, P)
+            
+            mask_valid = valid_mask_scene.any(-1) # (M,)
+            mask_cal_length = valid_mask_scene.all(-1) # (M, )
+
+            lengths = torch.norm(points[:, 0] - points[:, -1], dim=-1) # (M, )
+            long_seg = lengths > split_threshold # (M, )
+            seg_to_split = mask_cal_length & long_seg # (M, )
+
+            while seg_to_split.any():
+
+                seg_splited = rearrange(points[seg_to_split], 'n (s q) d -> (n s) d q', s=2) # this permutation is required by the interpolation function
+                seg_interpolated = torch.nn.functional.interpolate(seg_splited, size=P, mode='linear') # (n s) d P
+                
+                to_keep_mask = mask_valid & (~seg_to_split)
+                points = torch.cat((points[to_keep_mask], rearrange(seg_interpolated, 'n d p -> n p d')), dim=0)
+                valid_mask_scene = torch.cat((valid_mask_scene[to_keep_mask],
+                                            torch.ones(seg_interpolated.shape[0], seg_interpolated.shape[2],
+                                            device=valid_mask.device, dtype=torch.bool)), dim=0)
+                
+                mask_valid = valid_mask_scene.any(-1) # (M,)
+                mask_cal_length = valid_mask_scene.all(-1) # (M, )
+
+                lengths = torch.norm(points[:, 0] - points[:, -1], dim=-1) # (M, )
+                long_seg = lengths > split_threshold # (M, )
+                seg_to_split = mask_cal_length & long_seg # (M, )
+
+            points_list.append(points)
+            valid_mask_list.append(valid_mask_scene)
+
+            
+        new_point_position_feature = pad_sequence(points_list, batch_first=True, padding_value=False)
+        new_valid_mask = pad_sequence(valid_mask_list, batch_first=True, padding_value=False)
+                    
+        return new_point_position_feature, new_valid_mask
 
 
+
+ 
     def extract_agent_feature(self, data):
         # B A T 2
         position = data["agent"]["position"][:, :, :self.history_steps]
@@ -424,7 +486,7 @@ class PlanningModel(TorchModuleWrapper):
         for blk in self.blocks:
             x = blk(x, key_padding_mask=polygon_key_padding)
         x = self.norm(x)
-
+  
         # lane pred loss
         lane_pred_mask = ~polygon_mask
         for i, idx in enumerate(lane_ids_keep_list):
@@ -433,8 +495,8 @@ class PlanningModel(TorchModuleWrapper):
         lane_pred = rearrange(self.lane_pred(x), 'b n (p c) -> b n p c', p=self.no_lane_segment_points, c=2)
         # lane_reg_mask = ~polygon_mask
         # lane_reg_mask[~lane_pred_mask] = False
-        lane_pred_loss = F.mse_loss(
-            lane_pred[lane_pred_mask], data["map"]["point_position"][:,:,0][lane_pred_mask]
+        lane_pred_loss = F.smooth_l1_loss(
+            lane_pred[lane_pred_mask], rearrange(map_features, 'b n (p c) -> b n p c', p=self.no_lane_segment_points, c=2)[lane_pred_mask], reduction='mean'
         )
 
         ## 2. MTM
@@ -454,7 +516,7 @@ class PlanningModel(TorchModuleWrapper):
 
         # frame pred loss
         frame_pred = rearrange(self.agent_frame_pred(y), '(b a) t c -> b a t c', b=agent_features.shape[0], a=agent_features.shape[1])
-        agent_pred_loss = F.mse_loss(
+        agent_pred_loss = F.smooth_l1_loss(
             frame_pred[frame_pred_mask], agent_features[frame_pred_mask][..., :3]
         )
  
