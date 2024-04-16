@@ -79,6 +79,7 @@ class LightningTrainer(pl.LightningModule):
         assert 'loss' in res
 
         opts = self.optimizers()
+        schs = self.lr_schedulers()
         opt_pre, opt_fine_p, opt_fine_f = opts
 
         if self.training:
@@ -86,7 +87,7 @@ class LightningTrainer(pl.LightningModule):
                 opt_pre.zero_grad()
                 self.manual_backward(res["loss"]) 
                 self.clip_gradients(opt_pre, gradient_clip_val=5.0, gradient_clip_algorithm="norm")
-                opts[0].step(self.current_epoch)
+                schs[0].step(self.current_epoch)
             elif self.model.get_stage(self.current_epoch) == Stage.FINE_TUNING: 
                 opt_fine_p.zero_grad()
                 opt_fine_f.zero_grad()
@@ -95,8 +96,8 @@ class LightningTrainer(pl.LightningModule):
                 self.clip_gradients(opt_fine_f, gradient_clip_val=5.0, gradient_clip_algorithm="norm") 
                 opt_fine_p.step()
                 opt_fine_f.step()
-                opts[1].step(self.current_epoch)
-                opts[2].step(self.current_epoch)
+                schs[1].step(self.current_epoch)
+                schs[2].step(self.current_epoch)
 
         # for sch in self.lr_schedulers():
         #     sch.step(self.current_epoch)
