@@ -273,8 +273,6 @@ class PlanningModel(TorchModuleWrapper):
         # point_position_feature[valid_mask] = point_position[:,:,0][valid_mask]
 
         point_position_feature, valid_mask = PlanningModel.split_lane_segment(point_position[:,:,0], valid_mask, split_threshold=self.lane_split_threshold)
-
-
         point_position_feature = rearrange(point_position_feature, 'b m p c -> b m (p c)')
 
         # pror_feature = torch.stack([polygon_type, polygon_on_route, polygon_tl_status], dim=-1)
@@ -385,7 +383,7 @@ class PlanningModel(TorchModuleWrapper):
             ids_masked = ids_shuffle[len_keep:]
 
             x_masked= x[i].clone()
-            x_masked[ids_masked, 5:] = 0 # NOTE: keep polygon_type, polygon_on_route, polygon_tl_status, and the coords of starting point
+            x_masked[ids_masked, 2:] = 0 # NOTE: keep polygon_type, polygon_on_route, polygon_tl_status, and the coords of starting point
 
             x_masked_list.append(x_masked)
             # new_key_padding_mask.append(torch.zeros(len_keep, device=x.device))
@@ -488,7 +486,7 @@ class PlanningModel(TorchModuleWrapper):
         x = self.norm(x)
   
         # lane pred loss
-        lane_pred_mask = ~polygon_mask
+        lane_pred_mask = polygon_mask # attention
         for i, idx in enumerate(lane_ids_keep_list):
             lane_pred_mask[i, idx] = False
 
