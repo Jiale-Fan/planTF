@@ -87,6 +87,7 @@ class LightningTrainer(pl.LightningModule):
                 opt_pre.zero_grad()
                 self.manual_backward(res["loss"]) 
                 self.clip_gradients(opt_pre, gradient_clip_val=5.0, gradient_clip_algorithm="norm")
+                opt_pre.step()
                 schs[0].step(self.current_epoch)
             elif self.model.get_stage(self.current_epoch) == Stage.FINE_TUNING: 
                 opt_fine_p.zero_grad()
@@ -364,7 +365,7 @@ class LightningTrainer(pl.LightningModule):
             lr=self.lr,
             min_lr=1e-6,
             starting_epoch=0,
-            epochs=self.epochs,
+            epochs=self.model.pretrain_epoch_stages[0],
             warmup_epochs=self.warmup_epochs,
         )
 
