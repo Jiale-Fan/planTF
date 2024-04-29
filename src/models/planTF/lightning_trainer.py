@@ -80,7 +80,7 @@ class LightningTrainer(pl.LightningModule):
 
         opts = self.optimizers()
         schs = self.lr_schedulers()
-        opt_pre, opt_fine_p, opt_fine_f = opts
+        opt_pre, opt_fine = opts
 
         if self.training:
             if self.model.get_stage(self.current_epoch) == Stage.PRETRAIN_SEP:
@@ -89,16 +89,27 @@ class LightningTrainer(pl.LightningModule):
                 self.clip_gradients(opt_pre, gradient_clip_val=5.0, gradient_clip_algorithm="norm")
                 opt_pre.step()
                 schs[0].step(self.current_epoch)
-            elif self.model.get_stage(self.current_epoch) == Stage.FINE_TUNING: 
-                opt_fine_p.zero_grad()
-                opt_fine_f.zero_grad()
-                self.manual_backward(res["loss"])
-                self.clip_gradients(opt_fine_p, gradient_clip_val=5.0, gradient_clip_algorithm="norm") 
-                self.clip_gradients(opt_fine_f, gradient_clip_val=5.0, gradient_clip_algorithm="norm") 
-                opt_fine_p.step()
-                opt_fine_f.step()
+
+            elif self.model.get_stage(self.current_epoch) == Stage.PRETRAIN_REPRESENTATION: 
+                opt_pre.zero_grad()
+                self.manual_backward(res["loss"]) 
+                self.clip_gradients(opt_pre, gradient_clip_val=5.0, gradient_clip_algorithm="norm")
+                opt_pre.step()
+                opt_fine.step()
+                schs[0].step(self.current_epoch)
                 schs[1].step(self.current_epoch)
-                schs[2].step(self.current_epoch)
+                self.model.EMA_update() # update the teacher model with EMA
+
+            elif self.model.get_stage(self.current_epoch) == Stage.FINE_TUNING: 
+                opt_fine.zero_grad()
+                opt_fine.zero_grad()
+                self.manual_backward(res["loss"])
+                self.clip_gradients(opt_fine, gradient_clip_val=5.0, gradient_clip_algorithm="norm") 
+                self.clip_gradients(opt_fine, gradient_clip_val=5.0, gradient_clip_algorithm="norm") 
+                opt_fine.step()
+                opt_fine.step()
+                schs[0].step(self.current_epoch)
+                schs[1].step(self.current_epoch)
 
         # for sch in self.lr_schedulers():
         #     sch.step(self.current_epoch)
@@ -364,27 +375,18 @@ class LightningTrainer(pl.LightningModule):
             optimizer=optimizer_pretrain,
             lr=self.lr,
             min_lr=1e-6,
-            starting_epoch=0,
-            epochs=self.model.pretrain_epoch_stages[0],
-            warmup_epochs=self.warmup_epochs,
-        )
-
-        scheduler_fine_p = WarmupCosLR(
-            optimizer=optimizer_finetune_p,
-            lr=self.lr,
-            min_lr=1e-6,
-            starting_epoch=self.model.pretrain_epoch_stages[0], # NOTE
+            starting_epoch=self.model.pretrain_epoch_stages,
             epochs=self.epochs,
-            warmup_epochs=10,
+            warmup_epochs=self.warmup_epochs,
         )
 
         scheduler_fine_f = WarmupCosLR(
             optimizer=optimizer_finetune_f,
             lr=self.lr,
             min_lr=1e-6,
-            starting_epoch=self.model.pretrain_epoch_stages[0],
+            starting_epoch=self.model.pretrain_epoch_stages[1:],
             epochs=self.epochs,
             warmup_epochs=0,
         )
 
-        return [optimizer_pretrain, optimizer_finetune_p, optimizer_finetune_f], [scheduler_pre, scheduler_fine_p, scheduler_fine_f]
+        return [optimizer_pretrain, optimizer_finetune_f], [scheduler_pre, scheduler_fine_f]

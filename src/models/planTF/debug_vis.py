@@ -2,7 +2,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-def plot_scene_points(tensor, filename, savepath='/home/jiale/planTF/debug_files/'):
+def plot_scene_points(tensor, filename, savepath='/home/jiale/planTF/debug_files/', color=None):
     """
     Plot 3D tensor data using scatter plot.
 
@@ -21,7 +21,10 @@ def plot_scene_points(tensor, filename, savepath='/home/jiale/planTF/debug_files
         x = segment_data[:, 0]
         y = segment_data[:, 1]
         
-        plt.scatter(x, y, c=[colors[m]], label=f'Segment {m + 1}', s=0.5)
+        if color == None:
+            plt.scatter(x, y, c=[colors[m]], label=f'Segment {m + 1}', s=0.5)
+        else:
+            plt.scatter(x, y, c=[color], label=f'Segment {m + 1}', s=0.5)
 
     plt.title('Scatter Plot of 3D Tensor')
     plt.xlabel('X')

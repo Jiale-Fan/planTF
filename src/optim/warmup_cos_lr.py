@@ -9,8 +9,8 @@ class WarmupCosLR(_LRScheduler):
     ) -> None:
         self.min_lr = min_lr
         self.lr = lr
-        self.epochs = epochs
         self.warmup_epochs = warmup_epochs
+        self.epochs = epochs
         self.starting_epoch = starting_epoch
         super(WarmupCosLR, self).__init__(optimizer, last_epoch, verbose)
 
@@ -38,19 +38,30 @@ class WarmupCosLR(_LRScheduler):
         return lr
 
     def get_lr(self):
-        if self.last_epoch < self.starting_epoch:
+        """
+            starting_epoch is a list containing the starting epoch of each stage. 
+        """
+        if self.last_epoch < self.starting_epoch[0]:
             lr = 0.0
-        elif self.last_epoch < self.warmup_epochs + self.starting_epoch:
-            lr = self.lr * (self.last_epoch - self.starting_epoch + 1) / self.warmup_epochs
-        else:
-            lr = self.min_lr + 0.5 * (self.lr - self.min_lr) * (
-                1
-                + math.cos(
-                    math.pi
-                    * (self.last_epoch - self.warmup_epochs - self.starting_epoch)
-                    / (self.epochs - self.warmup_epochs - self.starting_epoch)
+        else: 
+            i = 0
+            while self.last_epoch < self.starting_epoch[i]:
+                i += 1
+                if i == len(self.starting_epoch):
+                    break
+
+            if self.last_epoch < self.warmup_epochs + self.starting_epoch[i]:
+                lr = self.lr * (self.last_epoch - self.starting_epoch[i] + 1) / self.warmup_epochs
+            else:
+                lr = self.min_lr + 0.5 * (self.lr - self.min_lr) * (
+                    1
+                    + math.cos(
+                        math.pi
+                        * (self.last_epoch - self.warmup_epochs - self.starting_epoch[i])
+                        / ((self.starting_epoch[i+1] if i+1<len(self.starting_epoch) else self.epochs) - self.warmup_epochs - self.starting_epoch[i])
+                    )
                 )
-            )
+
         if "lr_scale" in self.optimizer.param_groups[0]:
             return [lr * group["lr_scale"] for group in self.optimizer.param_groups]
 

@@ -9,7 +9,7 @@ imitation_planner:
     _convert_: "all"
 
     dim: 128
-    state_channel: 6
+    state_channel: 7
     polygon_channel: 6
     history_channel: 9
     history_steps: 21

@@ -26,6 +26,7 @@ from enum import Enum
 import math
 
 from .debug_vis import plot_scene_points
+from .info_distortor import InfoDistortor
 
 
 # no meaning, required by nuplan
@@ -77,8 +78,12 @@ class PlanningModel(TorchModuleWrapper):
         total_epochs=30,
         lane_mask_ratio=0.5,
         trajectory_mask_ratio=0.7,
-        pretrain_epoch_stages = [10, 20, 25],
+        pretrain_epoch_stages = [0, 10, 20],
         lane_split_threshold=20,
+        alpha=0.999,
+        expanded_dim = 2048,
+        gamma = 1.0, # VICReg standard deviation target 
+        rep_seeds_num = 10,
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
     ) -> None:
         super().__init__(
@@ -100,6 +105,9 @@ class PlanningModel(TorchModuleWrapper):
 
         self.no_lane_segment_points = 20
         self.lane_split_threshold = lane_split_threshold
+        self.alpha = alpha
+        self.gamma = gamma
+        self.expanded_dim = expanded_dim
 
         # modules begin
         self.pe = PositionalEncoding(dim, dropout=0.1, max_len=1000)
@@ -114,9 +122,10 @@ class PlanningModel(TorchModuleWrapper):
         
 
         self.agent_seed = nn.Parameter(torch.randn(dim))
+        self.rep_seed = nn.Parameter(torch.randn(rep_seeds_num, dim))
 
         self.agent_projector = Projector(dim=dim, in_channels=8) # NOTE: make consistent to state_channel
-        self.map_projector = Projector(dim=dim, in_channels=self.no_lane_segment_points*2) # NOTE: make consistent to polygon_channel
+        self.map_projector = Projector(dim=dim, in_channels=self.no_lane_segment_points*2+5) # NOTE: make consistent to polygon_channel
         self.lane_pred = build_mlp(dim, [512, self.no_lane_segment_points*2])
         self.agent_frame_pred = build_mlp(dim, [512, 3])
 
@@ -133,6 +142,25 @@ class PlanningModel(TorchModuleWrapper):
             for i in range(encoder_depth)
         )
         self.norm = nn.LayerNorm(dim)
+        self.expander = nn.Linear(dim*rep_seeds_num, expanded_dim)
+
+        self.blocks_teacher = nn.ModuleList(
+            Block(
+                dim=dim,
+                num_heads=num_heads,
+                mlp_ratio=mlp_ratio,
+                qkv_bias=qkv_bias,
+                drop_path=dpr[i],
+            )
+            for i in range(encoder_depth)
+        )
+        self.norm_teacher = nn.LayerNorm(dim)
+        self.expander_teacher = nn.Linear(dim*rep_seeds_num, expanded_dim)
+
+        self.student_list = [self.blocks, self.norm, self.expander]
+        self.teacher_list = [self.blocks_teacher, self.norm_teacher, self.expander_teacher]
+
+        self.flag_teacher_init = False
 
         # self.pretrain_model = PretrainModel(
         #             embed_dim=dim,
@@ -153,7 +181,14 @@ class PlanningModel(TorchModuleWrapper):
         # self.decoder_norm = nn.LayerNorm(dim)
 
         # self.ego_decoding_token = nn.Parameter(torch.Tensor(1, 1, dim))
-
+        self.distortor = InfoDistortor(
+            dt=0.1,
+            hist_len=21,
+            low=[-1.0, -0.75, -0.35, -1, -0.5, -0.2, -0.1],
+            high=[1.0, 0.75, 0.35, 1, 0.5, 0.2, 0.1],
+            augment_prob=0.5,
+            normalize=True,
+        )
         
 
         self.trajectory_decoder = TrajectoryDecoder(
@@ -219,32 +254,41 @@ class PlanningModel(TorchModuleWrapper):
                 self.map_projector, self.lane_pred, self.agent_frame_pred, self.blocks, self.norm]
 
     def get_finetune_modules(self):
-        return [self.trajectory_decoder, self.agent_predictor]
+        return [self.expander, self.rep_seed, self.trajectory_decoder, self.agent_predictor]
 
 
     def get_stage(self, current_epoch):
-        if current_epoch < self.pretrain_epoch_stages[0]:
+        # return Stage.PRETRAIN_REPRESENTATION
+        if current_epoch < self.pretrain_epoch_stages[1]:
             return Stage.PRETRAIN_SEP
         # elif current_epoch < self.pretrain_epoch_stages[1]:
         #     return Stage.PRETRAIN_MIX
-        # elif current_epoch < self.pretrain_epoch_stages[2]:
-        #     return Stage.PRETRAIN_REPRESENTATION
+        elif current_epoch < self.pretrain_epoch_stages[2]:
+            return Stage.PRETRAIN_REPRESENTATION
         else:
             return Stage.FINE_TUNING
         
         # for debugging
-        return Stage.FINE_TUNING
+        if not self.flag_teacher_init:
+            self.initialize_teacher()
+            self.flag_teacher_init = True
+        return Stage.PRETRAIN_REPRESENTATION
 
-    def forward(self, data, current_epoch):
-        stage = self.get_stage(current_epoch)
-        if stage == Stage.PRETRAIN_SEP:
-            return self.forward_pretrain_separate(data)
-        elif stage == Stage.PRETRAIN_MIX:
-            return self.forward_pretrain_mix(data)
-        elif stage == Stage.PRETRAIN_REPRESENTATION:
-            return self.forward_pretrain_representation(data)
-        else:
+    def forward(self, data, current_epoch=None):
+        if current_epoch is None: # when inference
+            # return self.forward_pretrain_separate(data)
             return self.forward_fine_tuning(data)
+        else:
+            stage = self.get_stage(current_epoch)
+            if stage == Stage.PRETRAIN_SEP:
+                return self.forward_pretrain_separate(data)
+            elif stage == Stage.PRETRAIN_MIX:
+                return self.forward_pretrain_mix(data)
+            elif stage == Stage.PRETRAIN_REPRESENTATION:
+                self.EMA_update()
+                return self.forward_pretrain_representation(data)
+            else:
+                return self.forward_fine_tuning(data)
 
     def extract_map_feature(self, data):
         # TODO: put property to one-hot?
@@ -256,8 +300,10 @@ class PlanningModel(TorchModuleWrapper):
         polygon_type = data["map"]["polygon_type"].long()
         polygon_on_route = data["map"]["polygon_on_route"].long()
         polygon_tl_status = data["map"]["polygon_tl_status"].long()
-        # polygon_has_speed_limit = data["map"]["polygon_has_speed_limit"]
-        # polygon_speed_limit = data["map"]["polygon_speed_limit"]
+        polygon_has_speed_limit = data["map"]["polygon_has_speed_limit"]
+        polygon_speed_limit = data["map"]["polygon_speed_limit"]
+
+        polygon_property = torch.stack([polygon_type, polygon_on_route, polygon_tl_status, polygon_has_speed_limit, polygon_speed_limit], dim=-1)
 
         # # B M 3 20 2
         point_position = data["map"]["point_position"]
@@ -272,19 +318,22 @@ class PlanningModel(TorchModuleWrapper):
         # point_position_feature = torch.zeros(point_position[:,:,0].shape, device=point_position.device) # B M 20 2
         # point_position_feature[valid_mask] = point_position[:,:,0][valid_mask]
 
-        point_position_feature, valid_mask = PlanningModel.split_lane_segment(point_position[:,:,0], valid_mask, split_threshold=self.lane_split_threshold)
+        point_position_feature, valid_mask, new_poly_prop = PlanningModel.split_lane_segment(point_position[:,:,0], valid_mask, self.lane_split_threshold, polygon_property)
         point_position_feature = rearrange(point_position_feature, 'b m p c -> b m (p c)')
 
-        # pror_feature = torch.stack([polygon_type, polygon_on_route, polygon_tl_status], dim=-1)
-        # feature = torch.cat([pror_feature, point_position_feature], dim=-1)
+        feature = torch.cat([point_position_feature, new_poly_prop], dim=-1)
 
-        return point_position_feature, valid_mask
+        return feature, valid_mask
+
+
 
     @staticmethod
-    def split_lane_segment(point_position_feature, valid_mask, split_threshold=20):
+    def split_lane_segment(point_position_feature, valid_mask, split_threshold, polygon_properties):
         '''
             point_position_feature: (B, M, P=21, D=2)
             valid_mask: (B, M, P=21)
+            split_threshold: float
+            polygon_property: (B, M, 5)
         '''
         # examine whether the segment's distance between starting point and ending point exceeds 5 meters.
         # if so, we split it into two segments
@@ -292,12 +341,14 @@ class PlanningModel(TorchModuleWrapper):
 
         points_list = []
         valid_mask_list = []
+        poly_property_list = []
 
         for i in range(B):
 
             points = point_position_feature[i] # (M, P, D)
             # to prevent the code to be too complicated, if the segment contains less than P points, we assume it does not need to be splited
             valid_mask_scene = valid_mask[i] # (M, P)
+            poly_property = polygon_properties[i] # (M, 5)
             
             mask_valid = valid_mask_scene.any(-1) # (M,)
             mask_cal_length = valid_mask_scene.all(-1) # (M, )
@@ -310,12 +361,14 @@ class PlanningModel(TorchModuleWrapper):
 
                 seg_splited = rearrange(points[seg_to_split], 'n (s q) d -> (n s) d q', s=2) # this permutation is required by the interpolation function
                 seg_interpolated = torch.nn.functional.interpolate(seg_splited, size=P, mode='linear') # (n s) d P
+                seg_interpolated = rearrange(seg_interpolated, 'n d p -> n p d')
                 
                 to_keep_mask = mask_valid & (~seg_to_split)
-                points = torch.cat((points[to_keep_mask], rearrange(seg_interpolated, 'n d p -> n p d')), dim=0)
+                points = torch.cat((points[to_keep_mask], seg_interpolated), dim=0)
                 valid_mask_scene = torch.cat((valid_mask_scene[to_keep_mask],
-                                            torch.ones(seg_interpolated.shape[0], seg_interpolated.shape[2],
+                                            torch.ones(seg_interpolated.shape[0], seg_interpolated.shape[1],
                                             device=valid_mask.device, dtype=torch.bool)), dim=0)
+                poly_property = torch.cat((poly_property[to_keep_mask], poly_property[seg_to_split], poly_property[seg_to_split]), dim=0)
                 
                 mask_valid = valid_mask_scene.any(-1) # (M,)
                 mask_cal_length = valid_mask_scene.all(-1) # (M, )
@@ -326,16 +379,17 @@ class PlanningModel(TorchModuleWrapper):
 
             points_list.append(points)
             valid_mask_list.append(valid_mask_scene)
+            poly_property_list.append(poly_property)
 
             
         new_point_position_feature = pad_sequence(points_list, batch_first=True, padding_value=False)
         new_valid_mask = pad_sequence(valid_mask_list, batch_first=True, padding_value=False)
+        new_poly_property = pad_sequence(poly_property_list, batch_first=True, padding_value=0)
                     
-        return new_point_position_feature, new_valid_mask
-
-
+        return new_point_position_feature, new_valid_mask, new_poly_property
 
  
+
     def extract_agent_feature(self, data):
         # B A T 2
         position = data["agent"]["position"][:, :, :self.history_steps]
@@ -352,11 +406,10 @@ class PlanningModel(TorchModuleWrapper):
         frame_feature = torch.cat([position, heading.unsqueeze(-1), velocity, shape], dim=-1)
         # frame_feature = rearrange(frame_feature, 'b a t c -> b a (t c)')
         category_rep = repeat(category, 'b a -> b a t d', t=self.history_steps, d = 1)
-        feature = torch.cat([category_rep, frame_feature], dim=-1)
+        feature = torch.cat([frame_feature, category_rep], dim=-1)
 
         return feature, valid_mask
         
-
 
     @staticmethod
     def lane_random_masking(x, future_mask_ratio, key_padding_mask):
@@ -415,7 +468,7 @@ class PlanningModel(TorchModuleWrapper):
          # 1 indicated kept, 0 indicated masked
         kept_mask = noise < sorted[..., len_keep].unsqueeze(-1)
         noise_valid = noise * frame_valid_mask
-        kept_mask[noise_valid.max(-1)==noise] = True
+        kept_mask[noise_valid.max(-1)==noise] = True # ensure that at least one valid frame is kept
 
         pred_mask = frame_valid_mask*~kept_mask
 
@@ -425,43 +478,43 @@ class PlanningModel(TorchModuleWrapper):
         return x_masked, pred_mask
     
 
-    @staticmethod
-    def agent_random_masking(x, future_mask_ratio, key_padding_mask, seed):
-        '''
-        x: (B, N, D). In the dimension D, the first two elements indicate the start point of the lane segment
-        future_mask_ratio: float
-        seed: (D, )
+    # @staticmethod
+    # def agent_random_masking(x, future_mask_ratio, key_padding_mask, seed):
+    #     '''
+    #     x: (B, N, D). In the dimension D, the first two elements indicate the start point of the lane segment
+    #     future_mask_ratio: float
+    #     seed: (D, )
 
-        note that following the scheme of SEPT, all the attributes of the masked lane segments
-        are set to zero except the starting point
+    #     note that following the scheme of SEPT, all the attributes of the masked lane segments
+    #     are set to zero except the starting point
 
-        this modified version keeps the original order of the lane segments and thus can use the original key_padding_mask
-        '''
-        num_tokens = (~key_padding_mask).sum(1)  # (B, )
-        len_keeps = torch.ceil(num_tokens * (1 - future_mask_ratio)).int()
+    #     this modified version keeps the original order of the lane segments and thus can use the original key_padding_mask
+    #     '''
+    #     num_tokens = (~key_padding_mask).sum(1)  # (B, )
+    #     len_keeps = torch.ceil(num_tokens * (1 - future_mask_ratio)).int()
 
-        x_masked_list, new_key_padding_mask, ids_keep_list = [], [], []
-        for i, (num_token, len_keep) in enumerate(zip(num_tokens, len_keeps)):
-            noise = torch.rand(num_token, device=x.device)
-            ids_shuffle = torch.argsort(noise)
+    #     x_masked_list, new_key_padding_mask, ids_keep_list = [], [], []
+    #     for i, (num_token, len_keep) in enumerate(zip(num_tokens, len_keeps)):
+    #         noise = torch.rand(num_token, device=x.device)
+    #         ids_shuffle = torch.argsort(noise)
 
-            ids_keep = ids_shuffle[:len_keep]
-            ids_keep_list.append(ids_keep)
+    #         ids_keep = ids_shuffle[:len_keep]
+    #         ids_keep_list.append(ids_keep)
 
-            ids_masked = ids_shuffle[len_keep:]
+    #         ids_masked = ids_shuffle[len_keep:]
 
-            x_masked= x[i].clone()
-            x_masked[ids_masked] = seed.unsqueeze(0) # NOTE: keep polygon_type, polygon_on_route, polygon_tl_status, and the coords of starting point
+    #         x_masked= x[i].clone()
+    #         x_masked[ids_masked] = seed.unsqueeze(0) # NOTE: keep polygon_type, polygon_on_route, polygon_tl_status, and the coords of starting point
 
-            x_masked_list.append(x_masked)
-            # new_key_padding_mask.append(torch.zeros(len_keep, device=x.device))
+    #         x_masked_list.append(x_masked)
+    #         # new_key_padding_mask.append(torch.zeros(len_keep, device=x.device))
  
-        x_masked_list = pad_sequence(x_masked_list, batch_first=True)
-        # new_key_padding_mask = pad_sequence(
-        #     new_key_padding_mask, batch_first=True, padding_value=True
-        # )
+    #     x_masked_list = pad_sequence(x_masked_list, batch_first=True)
+    #     # new_key_padding_mask = pad_sequence(
+    #     #     new_key_padding_mask, batch_first=True, padding_value=True
+    #     # )
 
-        return x_masked_list, ids_keep_list
+    #     return x_masked_list, ids_keep_list
     
 
     def forward_pretrain_separate(self, data):
@@ -494,24 +547,22 @@ class PlanningModel(TorchModuleWrapper):
         # lane_reg_mask = ~polygon_mask
         # lane_reg_mask[~lane_pred_mask] = False
         lane_pred_loss = F.smooth_l1_loss(
-            lane_pred[lane_pred_mask], rearrange(map_features, 'b n (p c) -> b n p c', p=self.no_lane_segment_points, c=2)[lane_pred_mask], reduction='mean'
+            lane_pred[lane_pred_mask], rearrange(map_features[..., :self.no_lane_segment_points*2], 'b n (p c) -> b n p c', p=self.no_lane_segment_points, c=2)[lane_pred_mask], reduction='mean'
         )
 
         ## 2. MTM
 
         agent_features, agent_mask = self.extract_agent_feature(data)
         # agent_key_padding = ~(agent_mask.any(-1))
-        frame_padding_mask = ~agent_mask
 
         agent_embedding = self.agent_projector(agent_features) # B A D
         (agent_masked_tokens, frame_pred_mask) = self.trajectory_random_masking(agent_embedding, self.trajectory_mask_ratio, agent_mask, seed=self.agent_seed)
 
         agent_masked_tokens_ = rearrange(agent_masked_tokens, 'b a t d -> (b a) t d')
         agent_masked_tokens_pos_embeded = self.pe(agent_masked_tokens_)
+        # agent_tempo_key_padding = rearrange(~agent_mask, 'b a t -> (b a) t') 
 
-        y = self.tempo_net(agent_masked_tokens_pos_embeded)
-        y = self.norm(y)
-
+        y = self.tempo_net(agent_masked_tokens_pos_embeded) # if key_padding_mask should be used here? this causes nan values in loss and needs investigation
         # frame pred loss
         frame_pred = rearrange(self.agent_frame_pred(y), '(b a) t c -> b a t c', b=agent_features.shape[0], a=agent_features.shape[1])
         agent_pred_loss = F.smooth_l1_loss(
@@ -529,29 +580,8 @@ class PlanningModel(TorchModuleWrapper):
 
 
     def forward_fine_tuning(self, data):
-        
-        map_features, polygon_mask = self.extract_map_feature(data)
-        agent_features, agent_mask = self.extract_agent_feature(data)
-
-        # lane embedding (purely projection)
-        polygon_key_padding = ~(polygon_mask.any(-1))
-        lane_embedding = self.map_projector(map_features)
-
-        # key padding masks
-        agent_key_padding = ~(agent_mask.any(-1))
-        polygon_key_padding = ~(polygon_mask.any(-1))
-        key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding], dim=-1)
-        bs, A = agent_features.shape[0:2]
-
-        # agent embedding
-        
-        agent_embedding = rearrange(self.agent_projector(agent_features), 'b a t d -> (b a) t d') # B A D
-        agent_embedding_pos_embed = self.pe(agent_embedding)
-        x_agent = self.tempo_net(agent_embedding_pos_embed)
-        x_agent_ = rearrange(x_agent, '(b a) t c -> b a t c', b=agent_features.shape[0], a=agent_features.shape[1])
-        x_agent_ = reduce(x_agent_, 'b a t c -> b a c', 'max', t=self.history_steps)
-
-        x = torch.cat([x_agent_, lane_embedding], dim=1)
+        bs, A = data["agent"]["heading"].shape[0:2]
+        x, key_padding_mask = self.embed(data, self.rep_seed)
 
         for blk in self.blocks:
             x = blk(x, key_padding_mask=key_padding_mask)
@@ -575,10 +605,143 @@ class PlanningModel(TorchModuleWrapper):
             )
 
         return out
+    
+    def embed(self, data, seeds):
+        """
+            data: dict
+            seeds: tensor (D, )
+        """
+        
+        map_features, polygon_mask = self.extract_map_feature(data)
+        agent_features, agent_mask = self.extract_agent_feature(data)
+
+        bs, A = agent_features.shape[0:2]
+        if seeds.dim() == 1:
+            seeds = repeat(seeds, 'd -> bs 1 d', bs=bs)
+        else:
+            seeds = repeat(seeds, 'n d -> bs n d', bs=bs)    
+
+        # lane embedding (purely projection)
+        lane_embedding = self.map_projector(map_features)
+
+        # agent embedding
+        agent_embedding = rearrange(self.agent_projector(agent_features), 'b a t d -> (b a) t d')
+        agent_embedding_pos_embed = self.pe(agent_embedding)
+        # agent_tempo_key_padding = rearrange(~agent_mask, 'b a t -> (b a) t')
+        x_agent = self.tempo_net(agent_embedding_pos_embed) # NOTE
+        x_agent_ = rearrange(x_agent, '(b a) t c -> b a t c', b=agent_features.shape[0], a=agent_features.shape[1])
+        x_agent_ = reduce(x_agent_, 'b a t c -> b a c', 'max', t=self.history_steps)
+
+        x = torch.cat([seeds, x_agent_, lane_embedding], dim=1)
+
+        # key padding masks
+        agent_key_padding = ~(agent_mask.any(-1))
+        polygon_key_padding = ~(polygon_mask.any(-1))
+        key_padding_mask = torch.cat([torch.zeros(seeds.shape[0:2], device=agent_key_padding.device), agent_key_padding, polygon_key_padding], dim=-1)
+
+        return x, key_padding_mask
+
+    def mask_and_embed(self, data, seeds):
+        """
+            data: dict
+            seeds: tensor (D, )
+        """
+
+        agent_features, agent_mask = self.extract_agent_feature(data)
+        bs, A = agent_features.shape[0:2]
+        # agent_key_padding = ~(agent_mask.any(-1))
+        if seeds.dim() == 1:
+            seeds = repeat(seeds, 'd -> bs 1 d', bs=bs)
+        else:
+            seeds = repeat(seeds, 'n d -> bs n d', bs=bs) 
+
+        ## lane masking
+        map_features, polygon_mask = self.extract_map_feature(data)
+        polygon_key_padding = ~(polygon_mask.any(-1))
+
+        (
+            lane_masked_tokens,
+            lane_ids_keep_list,
+        ) = self.lane_random_masking(
+            map_features, self.lane_mask_ratio, polygon_key_padding
+        )
+
+        lane_embedding = self.map_projector(lane_masked_tokens)
+
+        agent_embedding = self.agent_projector(agent_features) # B A D
+        (agent_masked_tokens, frame_pred_mask) = self.trajectory_random_masking(agent_embedding, self.trajectory_mask_ratio, agent_mask, seed=self.agent_seed)
+
+        b, a = agent_masked_tokens.shape[0:2]
+        agent_masked_tokens_ = rearrange(agent_masked_tokens, 'b a t d -> (b a) t d')
+        agent_masked_tokens_pos_embeded = self.pe(agent_masked_tokens_)
+        # agent_tempo_key_padding = rearrange(~agent_mask, 'b a t -> (b a) t')
+
+        x_agent = self.tempo_net(agent_masked_tokens_pos_embeded)
+        x_agent_ = rearrange(x_agent, '(b a) t c -> b a t c', b=b, a=a)
+        x_agent_ = reduce(x_agent_, 'b a t c -> b a c', 'max', t=self.history_steps)
+
+        x = torch.cat([seeds, x_agent_, lane_embedding], dim=1)
+
+        # key padding masks
+        agent_key_padding = ~(agent_mask.any(-1))
+        polygon_key_padding = ~(polygon_mask.any(-1))
+        key_padding_mask = torch.cat([torch.zeros(seeds.shape[0:2], device=agent_key_padding.device), agent_key_padding, polygon_key_padding], dim=-1)
+
+        return x, key_padding_mask
 
     def forward_pretrain_representation(self, data):
-        raise NotImplementedError
+        data_distorted = self.distortor.augment(data)
+        x_stu, x_stu_key_padding_mask = self.mask_and_embed(data_distorted, self.rep_seed)
+
+        # forward through student model 
+        for blk in self.blocks:
+            x_stu = blk(x_stu, key_padding_mask=x_stu_key_padding_mask)
+        x_stu = self.norm(x_stu)
+
+        x, key_padding_mask = self.embed(data, self.rep_seed)
+        # rep_seed is concatenated to each beginning of the sequence
+        x = x.detach() # the teacher model is not updated by gradient descent
+        # forward through teacher model TODO: to modify 
+        for blk in self.blocks_teacher:
+            x = blk(x, key_padding_mask=key_padding_mask)
+        x_tch = self.norm_teacher(x)
+
+        # let's say, the first embedding is the representation we want to pretrain
+        z = self.expander(rearrange(x_stu[:, 0:self.rep_seed.shape[0]], 'b n d -> b (n d)')) # B expanded_dim
+        z_t = self.expander_teacher(rearrange(x_tch[:, 0:self.rep_seed.shape[0]], 'b n d -> b (n d)')) # B expanded_dim
+
+        # calculate the loss (VICReg)
+        # 1. variance
+        S = torch.sqrt(torch.var(z, dim=0)+1e-6)
+        v_loss = torch.mean(torch.clip(self.gamma-S, min=0))
+        # 2. covariance
+        delta_z = z - torch.mean(z, dim=0, keepdim=True) # B D
+        cov = torch.sum(torch.matmul(rearrange(delta_z, 'b d -> b d 1'), rearrange(delta_z, 'b d -> b 1 d'))/(delta_z.shape[0]-1), dim=0) # D D
+        cov_off_diag = cov - torch.diag(torch.diagonal(cov))
+        c_loss = torch.sum(torch.pow(cov_off_diag, 2))/self.expanded_dim
+        # 3. invariance
+        inv_loss = torch.mean(torch.norm(z - z_t, dim=-1))
+
+        out = {
+            "loss": 25*v_loss + c_loss + 25*inv_loss,
+            "v_loss": v_loss,
+            "c_loss": c_loss,
+            "inv_loss": inv_loss,
+        }
+
+        return out
     
+    def initialize_teacher(self): 
+        for module_teacher, module_student in zip(self.teacher_list, self.student_list):
+            for param_teacher, param_student in zip(module_teacher.parameters(), module_student.parameters()):
+                param_teacher.data = param_student.data.clone().detach()
+
+    def EMA_update(self):
+        for student, teacher in zip(self.student_list, self.teacher_list):
+            for param, param_t in zip(student.parameters(), teacher.parameters()):
+                param_t.data = self.alpha*param_t.data + (1-self.alpha)*param.data
+
+
     def forward_pretrain_mix(self, data):
         raise NotImplementedError
         # # data preparation
@@ -694,7 +857,7 @@ class PlanningModel(TorchModuleWrapper):
 
         # return out
     
-    
+
     
     # def initialize_finetune(self):
     #     for param_pre, param_plan in zip(self.pretrain_model.blocks.parameters(), self.blocks.parameters()):
