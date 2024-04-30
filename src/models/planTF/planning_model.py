@@ -507,7 +507,7 @@ class PlanningModel(TorchModuleWrapper):
         x = self.norm(x)
   
         # lane pred loss
-        lane_pred_mask = polygon_mask # attention
+        lane_pred_mask = polygon_mask.clone() # attention
         for i, idx in enumerate(lane_ids_keep_list):
             lane_pred_mask[i, idx] = False
 
