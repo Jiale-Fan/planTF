@@ -83,7 +83,7 @@ class PlanningModel(TorchModuleWrapper):
         alpha=0.999,
         expanded_dim = 2048,
         gamma = 1.0, # VICReg standard deviation target 
-        rep_seeds_num = 10,
+        rep_seeds_num = 1,
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
     ) -> None:
         super().__init__(
