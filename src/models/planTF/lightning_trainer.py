@@ -92,21 +92,24 @@ class LightningTrainer(pl.LightningModule):
 
             elif self.model.get_stage(self.current_epoch) == Stage.PRETRAIN_REPRESENTATION: 
                 opt_pre.zero_grad()
+                opt_fine.zero_grad()
                 self.manual_backward(res["loss"]) 
                 self.clip_gradients(opt_pre, gradient_clip_val=5.0, gradient_clip_algorithm="norm")
+                self.clip_gradients(opt_fine, gradient_clip_val=5.0, gradient_clip_algorithm="norm")
                 opt_pre.step()
                 opt_fine.step()
                 schs[0].step(self.current_epoch)
                 schs[1].step(self.current_epoch)
+                
                 self.model.EMA_update() # update the teacher model with EMA
 
             elif self.model.get_stage(self.current_epoch) == Stage.FINE_TUNING: 
-                opt_fine.zero_grad()
+                opt_pre.zero_grad()
                 opt_fine.zero_grad()
                 self.manual_backward(res["loss"])
+                self.clip_gradients(opt_pre, gradient_clip_val=5.0, gradient_clip_algorithm="norm") 
                 self.clip_gradients(opt_fine, gradient_clip_val=5.0, gradient_clip_algorithm="norm") 
-                self.clip_gradients(opt_fine, gradient_clip_val=5.0, gradient_clip_algorithm="norm") 
-                opt_fine.step()
+                opt_pre.step()
                 opt_fine.step()
                 schs[0].step(self.current_epoch)
                 schs[1].step(self.current_epoch)

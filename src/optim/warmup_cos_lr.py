@@ -45,11 +45,11 @@ class WarmupCosLR(_LRScheduler):
             lr = 0.0
         else: 
             i = 0
-            while self.last_epoch < self.starting_epoch[i]:
+            while self.last_epoch >= self.starting_epoch[i]:
                 i += 1
                 if i == len(self.starting_epoch):
                     break
-
+            i = i-1
             if self.last_epoch < self.warmup_epochs + self.starting_epoch[i]:
                 lr = self.lr * (self.last_epoch - self.starting_epoch[i] + 1) / self.warmup_epochs
             else:

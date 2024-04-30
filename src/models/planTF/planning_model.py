@@ -108,6 +108,7 @@ class PlanningModel(TorchModuleWrapper):
         self.alpha = alpha
         self.gamma = gamma
         self.expanded_dim = expanded_dim
+        self.rep_seeds_num = rep_seeds_num
 
         # modules begin
         self.pe = PositionalEncoding(dim, dropout=0.1, max_len=1000)
@@ -123,6 +124,7 @@ class PlanningModel(TorchModuleWrapper):
 
         self.agent_seed = nn.Parameter(torch.randn(dim))
         self.rep_seed = nn.Parameter(torch.randn(rep_seeds_num, dim))
+        self.plan_seed = nn.Parameter(torch.randn(1, dim))
 
         self.agent_projector = Projector(dim=dim, in_channels=8) # NOTE: make consistent to state_channel
         self.map_projector = Projector(dim=dim, in_channels=self.no_lane_segment_points*2+5) # NOTE: make consistent to polygon_channel
@@ -258,21 +260,21 @@ class PlanningModel(TorchModuleWrapper):
 
 
     def get_stage(self, current_epoch):
-        # return Stage.PRETRAIN_REPRESENTATION
+        # return Stage.FINE_TUNING
         if current_epoch < self.pretrain_epoch_stages[1]:
             return Stage.PRETRAIN_SEP
         # elif current_epoch < self.pretrain_epoch_stages[1]:
         #     return Stage.PRETRAIN_MIX
         elif current_epoch < self.pretrain_epoch_stages[2]:
+            if not self.flag_teacher_init:
+                self.initialize_teacher()
+                self.flag_teacher_init = True
             return Stage.PRETRAIN_REPRESENTATION
         else:
             return Stage.FINE_TUNING
         
         # for debugging
-        if not self.flag_teacher_init:
-            self.initialize_teacher()
-            self.flag_teacher_init = True
-        return Stage.PRETRAIN_REPRESENTATION
+        
 
     def forward(self, data, current_epoch=None):
         if current_epoch is None: # when inference
@@ -285,14 +287,15 @@ class PlanningModel(TorchModuleWrapper):
             elif stage == Stage.PRETRAIN_MIX:
                 return self.forward_pretrain_mix(data)
             elif stage == Stage.PRETRAIN_REPRESENTATION:
-                self.EMA_update()
+                # self.EMA_update() # currently this is done in lightning_trainer.py
                 return self.forward_pretrain_representation(data)
             else:
                 return self.forward_fine_tuning(data)
 
     def extract_map_feature(self, data):
-        # TODO: put property to one-hot?
-        # TODO: split them into finer segments?
+        # NOTE: put property to one-hot?
+        # the segments longer than 20m will be splited into finer segments
+
         # B M 3
         # polygon_center = data["map"]["polygon_center"]  
 
@@ -390,22 +393,25 @@ class PlanningModel(TorchModuleWrapper):
 
  
 
-    def extract_agent_feature(self, data):
+    def extract_agent_feature(self, data, include_future=False):
+
+        steps = self.history_steps if not include_future else self.history_steps + self.future_steps
+
         # B A T 2
-        position = data["agent"]["position"][:, :, :self.history_steps]
-        velocity = data["agent"]["velocity"][:, :, :self.history_steps]
-        shape = data["agent"]["shape"][:, :, :self.history_steps]
+        position = data["agent"]["position"][:, :, :steps]
+        velocity = data["agent"]["velocity"][:, :, :steps]
+        shape = data["agent"]["shape"][:, :, :steps]
 
         # B A T
-        heading = data["agent"]["heading"][:, :, :self.history_steps]
-        valid_mask = data["agent"]["valid_mask"][:, :, :self.history_steps]
+        heading = data["agent"]["heading"][:, :, :steps]
+        valid_mask = data["agent"]["valid_mask"][:, :, :steps]
 
         # B A
         category = data["agent"]["category"].long()
 
         frame_feature = torch.cat([position, heading.unsqueeze(-1), velocity, shape], dim=-1)
         # frame_feature = rearrange(frame_feature, 'b a t c -> b a (t c)')
-        category_rep = repeat(category, 'b a -> b a t d', t=self.history_steps, d = 1)
+        category_rep = repeat(category, 'b a -> b a t d', t=steps, d = 1)
         feature = torch.cat([frame_feature, category_rep], dim=-1)
 
         return feature, valid_mask
@@ -478,44 +484,6 @@ class PlanningModel(TorchModuleWrapper):
         return x_masked, pred_mask
     
 
-    # @staticmethod
-    # def agent_random_masking(x, future_mask_ratio, key_padding_mask, seed):
-    #     '''
-    #     x: (B, N, D). In the dimension D, the first two elements indicate the start point of the lane segment
-    #     future_mask_ratio: float
-    #     seed: (D, )
-
-    #     note that following the scheme of SEPT, all the attributes of the masked lane segments
-    #     are set to zero except the starting point
-
-    #     this modified version keeps the original order of the lane segments and thus can use the original key_padding_mask
-    #     '''
-    #     num_tokens = (~key_padding_mask).sum(1)  # (B, )
-    #     len_keeps = torch.ceil(num_tokens * (1 - future_mask_ratio)).int()
-
-    #     x_masked_list, new_key_padding_mask, ids_keep_list = [], [], []
-    #     for i, (num_token, len_keep) in enumerate(zip(num_tokens, len_keeps)):
-    #         noise = torch.rand(num_token, device=x.device)
-    #         ids_shuffle = torch.argsort(noise)
-
-    #         ids_keep = ids_shuffle[:len_keep]
-    #         ids_keep_list.append(ids_keep)
-
-    #         ids_masked = ids_shuffle[len_keep:]
-
-    #         x_masked= x[i].clone()
-    #         x_masked[ids_masked] = seed.unsqueeze(0) # NOTE: keep polygon_type, polygon_on_route, polygon_tl_status, and the coords of starting point
-
-    #         x_masked_list.append(x_masked)
-    #         # new_key_padding_mask.append(torch.zeros(len_keep, device=x.device))
- 
-    #     x_masked_list = pad_sequence(x_masked_list, batch_first=True)
-    #     # new_key_padding_mask = pad_sequence(
-    #     #     new_key_padding_mask, batch_first=True, padding_value=True
-    #     # )
-
-    #     return x_masked_list, ids_keep_list
-    
 
     def forward_pretrain_separate(self, data):
 
@@ -552,7 +520,7 @@ class PlanningModel(TorchModuleWrapper):
 
         ## 2. MTM
 
-        agent_features, agent_mask = self.extract_agent_feature(data)
+        agent_features, agent_mask = self.extract_agent_feature(data, include_future=True)
         # agent_key_padding = ~(agent_mask.any(-1))
 
         agent_embedding = self.agent_projector(agent_features) # B A D
@@ -581,14 +549,14 @@ class PlanningModel(TorchModuleWrapper):
 
     def forward_fine_tuning(self, data):
         bs, A = data["agent"]["heading"].shape[0:2]
-        x, key_padding_mask = self.embed(data, self.rep_seed)
+        x, key_padding_mask = self.embed(data, torch.cat((self.plan_seed, self.rep_seed)))
 
         for blk in self.blocks:
             x = blk(x, key_padding_mask=key_padding_mask)
         x = self.norm(x)
 
         trajectory, probability = self.trajectory_decoder(x[:, 0])
-        prediction = self.agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2)
+        prediction = self.agent_predictor(x[:, 1+(1+self.rep_seeds_num):A+(1+self.rep_seeds_num)]).view(bs, -1, self.future_steps, 2)
 
         out = {
             "trajectory": trajectory,
@@ -606,14 +574,15 @@ class PlanningModel(TorchModuleWrapper):
 
         return out
     
-    def embed(self, data, seeds):
+    
+    def embed(self, data, seeds, include_future=False):
         """
             data: dict
             seeds: tensor (D, )
         """
         
         map_features, polygon_mask = self.extract_map_feature(data)
-        agent_features, agent_mask = self.extract_agent_feature(data)
+        agent_features, agent_mask = self.extract_agent_feature(data, include_future)
 
         bs, A = agent_features.shape[0:2]
         if seeds.dim() == 1:
@@ -630,7 +599,7 @@ class PlanningModel(TorchModuleWrapper):
         # agent_tempo_key_padding = rearrange(~agent_mask, 'b a t -> (b a) t')
         x_agent = self.tempo_net(agent_embedding_pos_embed) # NOTE
         x_agent_ = rearrange(x_agent, '(b a) t c -> b a t c', b=agent_features.shape[0], a=agent_features.shape[1])
-        x_agent_ = reduce(x_agent_, 'b a t c -> b a c', 'max', t=self.history_steps)
+        x_agent_ = reduce(x_agent_, 'b a t c -> b a c', 'max')
 
         x = torch.cat([seeds, x_agent_, lane_embedding], dim=1)
 
@@ -678,7 +647,7 @@ class PlanningModel(TorchModuleWrapper):
 
         x_agent = self.tempo_net(agent_masked_tokens_pos_embeded)
         x_agent_ = rearrange(x_agent, '(b a) t c -> b a t c', b=b, a=a)
-        x_agent_ = reduce(x_agent_, 'b a t c -> b a c', 'max', t=self.history_steps)
+        x_agent_ = reduce(x_agent_, 'b a t c -> b a c', 'max')
 
         x = torch.cat([seeds, x_agent_, lane_embedding], dim=1)
 
@@ -698,7 +667,7 @@ class PlanningModel(TorchModuleWrapper):
             x_stu = blk(x_stu, key_padding_mask=x_stu_key_padding_mask)
         x_stu = self.norm(x_stu)
 
-        x, key_padding_mask = self.embed(data, self.rep_seed)
+        x, key_padding_mask = self.embed(data, self.rep_seed, include_future=True)
         # rep_seed is concatenated to each beginning of the sequence
         x = x.detach() # the teacher model is not updated by gradient descent
         # forward through teacher model TODO: to modify 
