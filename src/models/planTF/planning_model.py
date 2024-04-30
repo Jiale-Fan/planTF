@@ -256,7 +256,7 @@ class PlanningModel(TorchModuleWrapper):
                 self.map_projector, self.lane_pred, self.agent_frame_pred, self.blocks, self.norm]
 
     def get_finetune_modules(self):
-        return [self.expander, self.rep_seed, self.trajectory_decoder, self.agent_predictor]
+        return [self.expander, self.rep_seed, self.trajectory_decoder, self.agent_predictor, self.plan_seed]
 
 
     def get_stage(self, current_epoch):
