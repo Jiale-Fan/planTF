@@ -692,7 +692,7 @@ class PlanningModel(TorchModuleWrapper):
         inv_loss = torch.mean(torch.norm(z - z_t, dim=-1))
 
         out = {
-            "loss": 25*v_loss + c_loss + 25*inv_loss,
+            "loss": 2.5*v_loss + 0.1*c_loss + 2.5*inv_loss,
             "v_loss": v_loss,
             "c_loss": c_loss,
             "inv_loss": inv_loss,
