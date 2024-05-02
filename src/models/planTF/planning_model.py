@@ -606,7 +606,7 @@ class PlanningModel(TorchModuleWrapper):
         # key padding masks
         agent_key_padding = ~(agent_mask.any(-1))
         polygon_key_padding = ~(polygon_mask.any(-1))
-        key_padding_mask = torch.cat([torch.zeros(seeds.shape[0:2], device=agent_key_padding.device), agent_key_padding, polygon_key_padding], dim=-1)
+        key_padding_mask = torch.cat([torch.zeros(seeds.shape[0:2], device=agent_key_padding.device, dtype=torch.bool), agent_key_padding, polygon_key_padding], dim=-1)
 
         return x, key_padding_mask
 
@@ -654,7 +654,7 @@ class PlanningModel(TorchModuleWrapper):
         # key padding masks
         agent_key_padding = ~(agent_mask.any(-1))
         polygon_key_padding = ~(polygon_mask.any(-1))
-        key_padding_mask = torch.cat([torch.zeros(seeds.shape[0:2], device=agent_key_padding.device), agent_key_padding, polygon_key_padding], dim=-1)
+        key_padding_mask = torch.cat([torch.zeros(seeds.shape[0:2], device=agent_key_padding.device, dtype=torch.bool), agent_key_padding, polygon_key_padding], dim=-1)
 
         return x, key_padding_mask
 
