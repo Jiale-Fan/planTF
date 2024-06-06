@@ -60,7 +60,7 @@ class PositionalEncoding(nn.Module):
 class PlanningModel(TorchModuleWrapper):
     def __init__(
         self,
-        dim=128,
+        dim=256,
         state_channel=8,
         polygon_channel=3,
         history_channel=9,
@@ -81,9 +81,9 @@ class PlanningModel(TorchModuleWrapper):
         pretrain_epoch_stages = [0, 10, 20],
         lane_split_threshold=20,
         alpha=0.999,
-        expanded_dim = 2048,
+        expanded_dim = 256*8*4,
         gamma = 1.0, # VICReg standard deviation target 
-        rep_seeds_num = 1,
+        rep_seeds_num = 8,
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
     ) -> None:
         super().__init__(
@@ -253,10 +253,10 @@ class PlanningModel(TorchModuleWrapper):
         #         self.map_projector, self.lane_pred, self.agent_frame_pred, self.blocks, self.norm]
         # module_list = [[name, module] for name, module in self.named_modules() if module in targeted_list]
         return [self.pos_emb, self.tempo_net, self.agent_seed, self.agent_projector, 
-                self.map_projector, self.lane_pred, self.agent_frame_pred, self.blocks, self.norm]
+                self.map_projector, self.lane_pred, self.agent_frame_pred, self.blocks, self.norm, self.agent_predictor]
 
     def get_finetune_modules(self):
-        return [self.expander, self.rep_seed, self.trajectory_decoder, self.agent_predictor, self.plan_seed]
+        return [self.expander, self.rep_seed, self.trajectory_decoder, self.plan_seed]
 
 
     def get_stage(self, current_epoch):
@@ -520,13 +520,14 @@ class PlanningModel(TorchModuleWrapper):
 
         ## 2. MTM
 
-        agent_features, agent_mask = self.extract_agent_feature(data, include_future=True)
+        agent_features, frame_valid_mask = self.extract_agent_feature(data, include_future=True)
         # agent_key_padding = ~(agent_mask.any(-1))
 
         agent_embedding = self.agent_projector(agent_features) # B A D
-        (agent_masked_tokens, frame_pred_mask) = self.trajectory_random_masking(agent_embedding, self.trajectory_mask_ratio, agent_mask, seed=self.agent_seed)
+        (agent_masked_tokens, frame_pred_mask) = self.trajectory_random_masking(agent_embedding, self.trajectory_mask_ratio, frame_valid_mask, seed=self.agent_seed)
 
-        agent_masked_tokens_ = rearrange(agent_masked_tokens, 'b a t d -> (b a) t d')
+        agent_masked_tokens[frame_pred_mask] = self.agent_seed
+        agent_masked_tokens_ = rearrange(agent_masked_tokens, 'b a t d -> (b a) t d').clone()
         agent_masked_tokens_pos_embeded = self.pe(agent_masked_tokens_)
         # agent_tempo_key_padding = rearrange(~agent_mask, 'b a t -> (b a) t') 
 
@@ -536,12 +537,40 @@ class PlanningModel(TorchModuleWrapper):
         agent_pred_loss = F.smooth_l1_loss(
             frame_pred[frame_pred_mask], agent_features[frame_pred_mask][..., :3]
         )
- 
+
+        # 3. TP
+        bs, A = data["agent"]["heading"].shape[0:2]
+
+        agent_features, frame_valid_mask = self.extract_agent_feature(data, include_future=True)
+        # agent_key_padding = ~(agent_mask.any(-1))
+
+        agent_embedding = self.agent_projector(agent_features[:,:,:self.history_steps]) # B A T D -> B A D
+        agent_embedding_tempo = self.tempo_net(rearrange(agent_embedding, 'b a t d -> (b a) t d')) # if key_padding_mask should be used here? this causes nan values in loss and needs investigation
+        agent_embedding_tempo = rearrange(agent_embedding_tempo, '(b a) t c -> b a t c', b=bs, a=A)
+        agent_embedding_tempo = reduce(agent_embedding_tempo, 'b a t c -> b a c', 'max')
+        lane_embedding = self.map_projector(map_features)
+        concat = torch.cat([agent_embedding_tempo, lane_embedding], dim=1)
+
+        agent_key_padding = ~(frame_valid_mask.any(-1))
+        polygon_key_padding = ~(polygon_mask.any(-1))
+        mask_concat = torch.cat([agent_key_padding, polygon_key_padding], dim=1)
+        x = concat
+        for blk in self.blocks:
+            x = blk(x, key_padding_mask=mask_concat)
+        x = self.norm(x)
+        tail_prediction = self.agent_predictor(x[:, :A]).view(bs, -1, self.future_steps, 2)
+        tail_mask = torch.ones_like(frame_valid_mask, dtype=torch.bool)
+        tail_mask[:, :, :self.history_steps] = False
+        tail_pred_mask = tail_mask & frame_valid_mask
+        tail_pred_loss = F.smooth_l1_loss(
+            tail_prediction[tail_pred_mask[:, :, self.history_steps:]], agent_features[tail_pred_mask][..., :2]
+        )
 
         out = {
             "MRM_loss": lane_pred_loss,
             "MTM_loss": agent_pred_loss,
-            "loss": lane_pred_loss + agent_pred_loss,
+            "TP_loss": tail_pred_loss,
+            "loss": lane_pred_loss + agent_pred_loss + tail_pred_loss,
         }
 
         return out
@@ -594,7 +623,8 @@ class PlanningModel(TorchModuleWrapper):
         lane_embedding = self.map_projector(map_features)
 
         # agent embedding
-        agent_embedding = rearrange(self.agent_projector(agent_features), 'b a t d -> (b a) t d')
+        agent_embedding = rearrange(self.agent_projector(agent_features), 'b a t d -> (b a) t d').clone()
+        agent_embedding[~agent_mask] = self.agent_seed
         agent_embedding_pos_embed = self.pe(agent_embedding)
         # agent_tempo_key_padding = rearrange(~agent_mask, 'b a t -> (b a) t')
         x_agent = self.tempo_net(agent_embedding_pos_embed) # NOTE
@@ -641,7 +671,8 @@ class PlanningModel(TorchModuleWrapper):
         (agent_masked_tokens, frame_pred_mask) = self.trajectory_random_masking(agent_embedding, self.trajectory_mask_ratio, agent_mask, seed=self.agent_seed)
 
         b, a = agent_masked_tokens.shape[0:2]
-        agent_masked_tokens_ = rearrange(agent_masked_tokens, 'b a t d -> (b a) t d')
+        agent_masked_tokens_ = rearrange(agent_masked_tokens, 'b a t d -> (b a) t d').clone()
+        agent_masked_tokens_[~agent_mask] = self.agent_seed
         agent_masked_tokens_pos_embeded = self.pe(agent_masked_tokens_)
         # agent_tempo_key_padding = rearrange(~agent_mask, 'b a t -> (b a) t')
 
