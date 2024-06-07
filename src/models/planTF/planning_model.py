@@ -81,9 +81,9 @@ class PlanningModel(TorchModuleWrapper):
         pretrain_epoch_stages = [0, 10, 20],
         lane_split_threshold=20,
         alpha=0.999,
-        expanded_dim = 256*8*4,
+        expanded_dim = 256*8,
         gamma = 1.0, # VICReg standard deviation target 
-        rep_seeds_num = 8,
+        rep_seeds_num = 4,
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
     ) -> None:
         super().__init__(
@@ -164,25 +164,6 @@ class PlanningModel(TorchModuleWrapper):
 
         self.flag_teacher_init = False
 
-        # self.pretrain_model = PretrainModel(
-        #             embed_dim=dim,
-        #             encoder_depth=encoder_depth,
-        #             decoder_depth=4,
-        #             num_heads=num_heads,
-        #             mlp_ratio=mlp_ratio,
-        #             qkv_bias=qkv_bias,
-        #             drop_path=drop_path,
-        #             actor_mask_ratio=0.5,
-        #             lane_mask_ratio=0.5,
-        #             history_steps=history_steps,
-        #             future_steps=future_steps,
-        #             loss_weight=[1.0, 1.0, 0.35],
-        #         )
-        # self.pretrain_model.initialize_weights()
-
-        # self.decoder_norm = nn.LayerNorm(dim)
-
-        # self.ego_decoding_token = nn.Parameter(torch.Tensor(1, 1, dim))
         self.distortor = InfoDistortor(
             dt=0.1,
             hist_len=21,
@@ -204,35 +185,6 @@ class PlanningModel(TorchModuleWrapper):
 
         self.apply(self._init_weights)
 
-
-        # self.agent_encoder_hist = AgentEncoder(
-        #     state_channel=state_channel,
-        #     history_channel=history_channel,
-        #     dim=dim,
-        #     drop_path=drop_path,
-        #     use_ego_history=True,
-        #     state_attn_encoder=state_attn_encoder,
-        #     state_dropout=state_dropout,
-        #     starting_step=0,
-        #     ending_step=self.history_steps,
-        # )
-
-        # self.agent_encoder_fut = AgentEncoder(
-        #     state_channel=state_channel,
-        #     history_channel=history_channel,
-        #     dim=dim,
-        #     drop_path=drop_path,
-        #     use_ego_history=True,
-        #     state_attn_encoder=state_attn_encoder,
-        #     state_dropout=state_dropout,
-        #     starting_step=self.history_steps,
-        #     ending_step=-1,
-        # )
-
-        # self.map_encoder = MapEncoder(
-        #     dim=dim,
-        #     polygon_channel=polygon_channel,
-        # )
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
@@ -263,8 +215,6 @@ class PlanningModel(TorchModuleWrapper):
         # return Stage.FINE_TUNING
         if current_epoch < self.pretrain_epoch_stages[1]:
             return Stage.PRETRAIN_SEP
-        # elif current_epoch < self.pretrain_epoch_stages[1]:
-        #     return Stage.PRETRAIN_MIX
         elif current_epoch < self.pretrain_epoch_stages[2]:
             if not self.flag_teacher_init:
                 self.initialize_teacher()
@@ -325,8 +275,9 @@ class PlanningModel(TorchModuleWrapper):
         point_position_feature = rearrange(point_position_feature, 'b m p c -> b m (p c)')
 
         feature = torch.cat([point_position_feature, new_poly_prop], dim=-1)
+        polygon_key_padding = ~(valid_mask.any(-1))
 
-        return feature, valid_mask
+        return feature, valid_mask, polygon_key_padding
 
 
 
@@ -413,8 +364,9 @@ class PlanningModel(TorchModuleWrapper):
         # frame_feature = rearrange(frame_feature, 'b a t c -> b a (t c)')
         category_rep = repeat(category, 'b a -> b a t d', t=steps, d = 1)
         feature = torch.cat([frame_feature, category_rep], dim=-1)
+        agent_key_padding = ~(valid_mask.any(-1))
 
-        return feature, valid_mask
+        return feature, valid_mask, agent_key_padding
         
 
     @staticmethod
@@ -488,9 +440,8 @@ class PlanningModel(TorchModuleWrapper):
     def forward_pretrain_separate(self, data):
 
         ## 1. MRM
-        map_features, polygon_mask = self.extract_map_feature(data)
-        polygon_key_padding = ~(polygon_mask.any(-1))
-
+        map_features, polygon_mask, polygon_key_padding = self.extract_map_feature(data)
+        
         (
             lane_masked_tokens,
             lane_ids_keep_list,
@@ -520,13 +471,11 @@ class PlanningModel(TorchModuleWrapper):
 
         ## 2. MTM
 
-        agent_features, frame_valid_mask = self.extract_agent_feature(data, include_future=True)
-        # agent_key_padding = ~(agent_mask.any(-1))
+        agent_features, frame_valid_mask, agent_key_padding = self.extract_agent_feature(data, include_future=True)
 
         agent_embedding = self.agent_projector(agent_features) # B A D
         (agent_masked_tokens, frame_pred_mask) = self.trajectory_random_masking(agent_embedding, self.trajectory_mask_ratio, frame_valid_mask, seed=self.agent_seed)
 
-        agent_masked_tokens[frame_pred_mask] = self.agent_seed
         agent_masked_tokens_ = rearrange(agent_masked_tokens, 'b a t d -> (b a) t d').clone()
         agent_masked_tokens_pos_embeded = self.pe(agent_masked_tokens_)
         # agent_tempo_key_padding = rearrange(~agent_mask, 'b a t -> (b a) t') 
@@ -540,9 +489,6 @@ class PlanningModel(TorchModuleWrapper):
 
         # 3. TP
         bs, A = data["agent"]["heading"].shape[0:2]
-
-        agent_features, frame_valid_mask = self.extract_agent_feature(data, include_future=True)
-        # agent_key_padding = ~(agent_mask.any(-1))
 
         agent_embedding = self.agent_projector(agent_features[:,:,:self.history_steps]) # B A T D -> B A D
         agent_embedding_tempo = self.tempo_net(rearrange(agent_embedding, 'b a t d -> (b a) t d')) # if key_padding_mask should be used here? this causes nan values in loss and needs investigation
@@ -610,8 +556,8 @@ class PlanningModel(TorchModuleWrapper):
             seeds: tensor (D, )
         """
         
-        map_features, polygon_mask = self.extract_map_feature(data)
-        agent_features, agent_mask = self.extract_agent_feature(data, include_future)
+        map_features, polygon_mask, polygon_key_padding = self.extract_map_feature(data)
+        agent_features, agent_mask, agent_key_padding = self.extract_agent_feature(data, include_future)
 
         bs, A = agent_features.shape[0:2]
         if seeds.dim() == 1:
@@ -624,7 +570,7 @@ class PlanningModel(TorchModuleWrapper):
 
         # agent embedding
         agent_embedding = rearrange(self.agent_projector(agent_features), 'b a t d -> (b a) t d').clone()
-        agent_embedding[~agent_mask] = self.agent_seed
+        agent_embedding[~rearrange(agent_mask,'b a t -> (b a) t')] = self.agent_seed
         agent_embedding_pos_embed = self.pe(agent_embedding)
         # agent_tempo_key_padding = rearrange(~agent_mask, 'b a t -> (b a) t')
         x_agent = self.tempo_net(agent_embedding_pos_embed) # NOTE
@@ -634,8 +580,6 @@ class PlanningModel(TorchModuleWrapper):
         x = torch.cat([seeds, x_agent_, lane_embedding], dim=1)
 
         # key padding masks
-        agent_key_padding = ~(agent_mask.any(-1))
-        polygon_key_padding = ~(polygon_mask.any(-1))
         key_padding_mask = torch.cat([torch.zeros(seeds.shape[0:2], device=agent_key_padding.device, dtype=torch.bool), agent_key_padding, polygon_key_padding], dim=-1)
 
         return x, key_padding_mask
@@ -646,7 +590,7 @@ class PlanningModel(TorchModuleWrapper):
             seeds: tensor (D, )
         """
 
-        agent_features, agent_mask = self.extract_agent_feature(data)
+        agent_features, agent_mask, agent_key_padding = self.extract_agent_feature(data)
         bs, A = agent_features.shape[0:2]
         # agent_key_padding = ~(agent_mask.any(-1))
         if seeds.dim() == 1:
@@ -655,8 +599,7 @@ class PlanningModel(TorchModuleWrapper):
             seeds = repeat(seeds, 'n d -> bs n d', bs=bs) 
 
         ## lane masking
-        map_features, polygon_mask = self.extract_map_feature(data)
-        polygon_key_padding = ~(polygon_mask.any(-1))
+        map_features, polygon_mask, polygon_key_padding = self.extract_map_feature(data)
 
         (
             lane_masked_tokens,
@@ -672,7 +615,6 @@ class PlanningModel(TorchModuleWrapper):
 
         b, a = agent_masked_tokens.shape[0:2]
         agent_masked_tokens_ = rearrange(agent_masked_tokens, 'b a t d -> (b a) t d').clone()
-        agent_masked_tokens_[~agent_mask] = self.agent_seed
         agent_masked_tokens_pos_embeded = self.pe(agent_masked_tokens_)
         # agent_tempo_key_padding = rearrange(~agent_mask, 'b a t -> (b a) t')
 
@@ -741,130 +683,3 @@ class PlanningModel(TorchModuleWrapper):
             for param, param_t in zip(student.parameters(), teacher.parameters()):
                 param_t.data = self.alpha*param_t.data + (1-self.alpha)*param.data
 
-
-    def forward_pretrain_mix(self, data):
-        raise NotImplementedError
-        # # data preparation
-        # agent_pos = data["agent"]["position"][:, :, self.history_steps - 1]
-        # agent_heading = data["agent"]["heading"][:, :, self.history_steps - 1]
-        # hist_mask = data["agent"]["valid_mask"][:, :, : self.history_steps]
-        # fut_mask = data["agent"]["valid_mask"][:, :, self.history_steps:]
-        # polygon_center = data["map"]["polygon_center"]
-        # point_position = data["map"]["point_position"]
-        # polygon_mask = data["map"]["valid_mask"]
-
-        # bs, A = agent_pos.shape[0:2]
-
-        # # positional embedding
-        # position = torch.cat([agent_pos, agent_pos, polygon_center[..., :2]], dim=1)
-        # angle = torch.cat([agent_heading, agent_heading, polygon_center[..., 2]], dim=1)
-        # pos_feat = torch.cat(
-        #     [position, torch.stack([angle.cos(), angle.sin()], dim=-1)], dim=-1
-        # )
-        # pos_embed = self.pos_emb(pos_feat)
-
-        # # type information embedding
-        # agent_category = data["agent"]["category"] # 4 possible types
-        # polygon_type = data["map"]["polygon_type"]+4 # 3 possible types
-
-        # '''
-        # self.interested_objects_types = [
-        #     TrackedObjectType.EGO,
-        #     TrackedObjectType.VEHICLE,
-        #     TrackedObjectType.PEDESTRIAN,
-        #     TrackedObjectType.BICYCLE,
-        # ]
-        # self.polygon_types = [
-        #     SemanticMapLayer.LANE,
-        #     SemanticMapLayer.LANE_CONNECTOR,
-        #     SemanticMapLayer.CROSSWALK,
-        # ]
-        # '''
-
-        # # create pose embedding for each element
-        # types = torch.cat([agent_category, agent_category, polygon_type], dim=1).to(torch.long)
-        # type_emb_input=torch.nn.functional.one_hot(types, num_classes=7)
-        # types_embedding = self.element_type_embedding(type_emb_input.to(torch.float32))
-
-        # hist_feat = self.agent_encoder_hist(data) + pos_embed[:, :A]
-        # lane_feat = self.map_encoder(data) + pos_embed[:, 2*A:]
-
-        # # add types embedding to the input
-        # hist_feat += types_embedding[:, :A]
-        # lane_feat += types_embedding[:, 2*A:]
-
-        # agent_key_padding = ~(hist_mask.any(-1))
-        # polygon_key_padding = ~(polygon_mask.any(-1))
-        # key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding], dim=-1)
-
-        # x_ego = self.ego_encoder(data["current_state"][:, : self.state_channel])
-        # x = torch.cat([x_ego.unsqueeze(1), hist_feat[:, 1:], lane_feat], dim=1)
-        # # x = torch.cat([hist_feat, lane_feat], dim=1)
-        
-        # for blk in self.blocks:
-        #     x = blk(x, key_padding_mask=key_padding_mask)
-        # x = self.norm(x)
-
-        # x_decoder = torch.cat([self.ego_decoding_token.expand(bs, -1, -1), x], dim=1)
-        # decoder_key_padding_mask = torch.cat([torch.zeros(bs, 1, dtype=torch.bool, device=x.device), key_padding_mask], dim=-1)
-        # for blk in self.decoder_blocks:
-        #     x_decoder = blk(x_decoder, key_padding_mask=decoder_key_padding_mask)
-
-        # trajectory, probability = self.trajectory_decoder(x_decoder[:, 0])
-        # prediction = self.agent_predictor(x_decoder[:, 2:A+1]).view(bs, -1, self.future_steps, 2)
-
-        # out = {
-        #     "trajectory": trajectory,
-        #     "probability": probability,
-        #     "prediction": prediction,
-        # }
-
-        # if self.training:
-
-        #     future_feat = self.agent_encoder_fut(data) + pos_embed[:, A:2*A]
-        #     future_feat += types_embedding[:, A:2*A]
-
-        #     lane_normalized = point_position[:, :, 0] - polygon_center[..., None, :2]
-
-        #     hist_target = data["agent"]["position"][:, :, :self.history_steps] - agent_pos[:, :, None, :]
-        #     fut_target = data["agent"]["position"][:, :, self.history_steps:] - agent_pos[:, :, None, :]
-
-        #     pretrained_out = self.pretrain_model(hist_feat, lane_feat, future_feat, hist_mask, fut_mask, polygon_key_padding, pos_feat,
-        #             lane_normalized, hist_target, fut_target, types_embedding, pretrain_progress)
-            
-        #     pretrained_out["pretrain_loss"] = pretrained_out.pop("loss")
-        #     out.update(pretrained_out)
-
-        # else:
-        #     best_mode = probability.argmax(dim=-1)
-        #     output_trajectory = trajectory[torch.arange(bs), best_mode]
-        #     angle = torch.atan2(output_trajectory[..., 3], output_trajectory[..., 2])
-        #     out["output_trajectory"] = torch.cat(
-        #         [output_trajectory[..., :2], angle.unsqueeze(-1)], dim=-1
-        #     )
-
-        #     pretrained_out={
-        #         "pretrain_loss": torch.tensor(0.0),
-        #         "hist_loss": torch.tensor(0.0),
-        #         "future_loss": torch.tensor(0.0),
-        #         "lane_pred_loss": torch.tensor(0.0),
-        #         "hist_rec_pred_loss": torch.tensor(0.0),
-        #         "fut_rec_pred_loss": torch.tensor(0.0),
-        #         "lane_rec_pred_loss": torch.tensor(0.0),
-        #         "hard_ratio": torch.tensor(0.0),
-        #     }
-        #     out.update(pretrained_out)
-
-        # return out
-    
-
-    
-    # def initialize_finetune(self):
-    #     for param_pre, param_plan in zip(self.pretrain_model.blocks.parameters(), self.blocks.parameters()):
-    #         param_plan.data = param_pre.data.clone().detach()
-    #     for param_pre, param_plan in zip(self.pretrain_model.decoder_blocks.parameters(), self.decoder_blocks.parameters()):
-    #         param_plan.data = param_pre.data.clone().detach()
-    #     for param_pre, param_plan in zip(self.pretrain_model.norm.parameters(), self.norm.parameters()):
-    #         param_plan.data = param_pre.data.clone().detach()
-    #     for param_pre, param_plan in zip(self.pretrain_model.decoder_norm.parameters(), self.decoder_norm.parameters()):
-    #         param_plan.data = param_pre.data.clone().detach()
