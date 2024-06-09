@@ -71,6 +71,7 @@ class Block(nn.Module):
             drop=drop,
         )
         self.drop_path2 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+        self.attn_mat = None
 
     def forward_pre(
         self,
@@ -79,13 +80,15 @@ class Block(nn.Module):
         key_padding_mask: Optional[Tensor] = None,
     ):
         src2 = self.norm1(src)
-        src2 = self.attn(
+        src2, attn_mat = self.attn(
             query=src2,
             key=src2,
             value=src2,
             attn_mask=mask,
             key_padding_mask=key_padding_mask,
-        )[0]
+            need_weights=True,
+        )
+        self.attn_mat = attn_mat
         src = src + self.drop_path1(src2)
         src = src + self.drop_path2(self.mlp(self.norm2(src)))
         return src

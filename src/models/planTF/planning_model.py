@@ -25,7 +25,7 @@ from .layers.embedding import Projector
 from enum import Enum
 import math
 
-from .debug_vis import plot_scene_points
+from .debug_vis import plot_lane_segments, plot_scene_attention
 from .info_distortor import InfoDistortor
 
 
@@ -91,6 +91,8 @@ class PlanningModel(TorchModuleWrapper):
             target_builders=[EgoTrajectoryTargetBuilder(trajectory_sampling)],
             future_trajectory_sampling=trajectory_sampling,
         )
+
+        self.inference_counter = 0
 
         self.dim = dim
         self.history_steps = history_steps
@@ -521,6 +523,17 @@ class PlanningModel(TorchModuleWrapper):
 
         return out
 
+    def plot_scene_attention(self, data, attn_weights, output_trajectory):
+        i = 0
+        map_features, polygon_mask, polygon_key_padding = self.extract_map_feature(data)
+        agent_features, agent_mask, agent_key_padding = self.extract_agent_feature(data, include_future=False)
+        assert agent_features.shape[1]+map_features.shape[1] == attn_weights.shape[1]-(1+self.rep_seeds_num)
+        map_points = map_features[i][..., :40]
+        map_points_reshape = map_points.reshape(map_points.shape[0], -1, 2)
+        plot_scene_attention(agent_features[i], agent_mask[i], map_points_reshape, attn_weights[i, (1+self.rep_seeds_num):],
+                              output_trajectory[i], filename=self.inference_counter)
+        self.inference_counter += 1
+
 
     def forward_fine_tuning(self, data):
         bs, A = data["agent"]["heading"].shape[0:2]
@@ -530,6 +543,8 @@ class PlanningModel(TorchModuleWrapper):
             x = blk(x, key_padding_mask=key_padding_mask)
         x = self.norm(x)
 
+        
+            
         trajectory, probability = self.trajectory_decoder(x[:, 0])
         prediction = self.agent_predictor(x[:, 1+(1+self.rep_seeds_num):A+(1+self.rep_seeds_num)]).view(bs, -1, self.future_steps, 2)
 
@@ -546,6 +561,12 @@ class PlanningModel(TorchModuleWrapper):
             out["output_trajectory"] = torch.cat(
                 [output_trajectory[..., :2], angle.unsqueeze(-1)], dim=-1
             )
+
+        # attention visualization
+        if False:
+            attn_weights = self.blocks[-1].attn_mat[:, 0].detach()
+            # visualize the scene using the attention weights
+            self.plot_scene_attention(data, attn_weights, output_trajectory)
 
         return out
     
