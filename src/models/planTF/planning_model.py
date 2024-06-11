@@ -632,10 +632,11 @@ class PlanningModel(TorchModuleWrapper):
             )
 
         # attention visualization
-        if True:
+        if False:
             attn_weights = self.blocks[-1].attn_mat[:, 0].detach()
             # visualize the scene using the attention weights
             self.plot_scene_attention(data, attn_weights, output_trajectory, key_padding_mask, 0)
+            self.inference_counter += 1
 
         return out
 
@@ -686,7 +687,7 @@ class PlanningModel(TorchModuleWrapper):
                 [output_trajectory[..., :2], angle.unsqueeze(-1)], dim=-1
             )
 
-        self.inference_counter += 1
+        # self.inference_counter += 1
 
         return out
     
