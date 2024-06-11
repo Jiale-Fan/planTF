@@ -79,8 +79,8 @@ class PlanningModel(TorchModuleWrapper):
         total_epochs=30,
         lane_mask_ratio=0.5,
         trajectory_mask_ratio=0.7,
-        # pretrain_epoch_stages = [0, 10, 20],
         pretrain_epoch_stages = [0, 10, 20],
+        # pretrain_epoch_stages = [0, 0, 0],
         lane_split_threshold=20,
         alpha=0.999,
         expanded_dim = 256*8,
@@ -632,10 +632,10 @@ class PlanningModel(TorchModuleWrapper):
             )
 
         # attention visualization
-        if False:
+        if True:
             attn_weights = self.blocks[-1].attn_mat[:, 0].detach()
             # visualize the scene using the attention weights
-            self.plot_scene_attention(data, attn_weights, output_trajectory, new_key_padding_mask, k)
+            self.plot_scene_attention(data, attn_weights, output_trajectory, key_padding_mask, 0)
 
         return out
 

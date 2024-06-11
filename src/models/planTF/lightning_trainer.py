@@ -103,7 +103,7 @@ class LightningTrainer(pl.LightningModule):
                 
                 self.model.EMA_update() # update the teacher model with EMA
 
-            elif self.model.get_stage(self.current_epoch) == Stage.FINETUNE: 
+            elif self.model.get_stage(self.current_epoch) == Stage.FINETUNE or self.model.get_stage(self.current_epoch) == Stage.ANT_MASK_FINETUNE: 
                 opt_pre.zero_grad()
                 opt_fine.zero_grad()
                 self.manual_backward(res["loss"])
@@ -113,6 +113,7 @@ class LightningTrainer(pl.LightningModule):
                 opt_fine.step()
                 schs[0].step(self.current_epoch)
                 schs[1].step(self.current_epoch)
+
 
         # for sch in self.lr_schedulers():
         #     sch.step(self.current_epoch)
