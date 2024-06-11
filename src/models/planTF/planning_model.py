@@ -36,7 +36,8 @@ class Stage(Enum):
     PRETRAIN_SEP = 0
     PRETRAIN_MIX = 1
     PRETRAIN_REPRESENTATION = 2
-    FINE_TUNING = 3
+    FINETUNE = 3
+    ANT_MASK_FINETUNE = 4
 
 class PositionalEncoding(nn.Module):
 
@@ -78,12 +79,14 @@ class PlanningModel(TorchModuleWrapper):
         total_epochs=30,
         lane_mask_ratio=0.5,
         trajectory_mask_ratio=0.7,
+        # pretrain_epoch_stages = [0, 10, 20],
         pretrain_epoch_stages = [0, 10, 20],
         lane_split_threshold=20,
         alpha=0.999,
         expanded_dim = 256*8,
         gamma = 1.0, # VICReg standard deviation target 
         rep_seeds_num = 4,
+        N_mask = 2,
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
     ) -> None:
         super().__init__(
@@ -111,6 +114,7 @@ class PlanningModel(TorchModuleWrapper):
         self.gamma = gamma
         self.expanded_dim = expanded_dim
         self.rep_seeds_num = rep_seeds_num
+        self.N_mask = N_mask
 
         # modules begin
         self.pe = PositionalEncoding(dim, dropout=0.1, max_len=1000)
@@ -183,6 +187,8 @@ class PlanningModel(TorchModuleWrapper):
             out_channels=4,
         )
 
+        self.randint = torch.randint(0, self.N_mask, [256, 1024])
+
         self.agent_predictor = build_mlp(dim, [dim * 2, future_steps * 2], norm="ln")
 
         self.apply(self._init_weights)
@@ -217,13 +223,15 @@ class PlanningModel(TorchModuleWrapper):
         # return Stage.FINE_TUNING
         if current_epoch < self.pretrain_epoch_stages[1]:
             return Stage.PRETRAIN_SEP
+        # elif current_epoch < self.pretrain_epoch_stages[2]:
+        #     if not self.flag_teacher_init:
+        #         self.initialize_teacher()
+        #         self.flag_teacher_init = True
+        #     return Stage.PRETRAIN_REPRESENTATION
         elif current_epoch < self.pretrain_epoch_stages[2]:
-            if not self.flag_teacher_init:
-                self.initialize_teacher()
-                self.flag_teacher_init = True
-            return Stage.PRETRAIN_REPRESENTATION
+            return Stage.FINETUNE
         else:
-            return Stage.FINE_TUNING
+            return Stage.ANT_MASK_FINETUNE
         
         # for debugging
         
@@ -231,7 +239,7 @@ class PlanningModel(TorchModuleWrapper):
     def forward(self, data, current_epoch=None):
         if current_epoch is None: # when inference
             # return self.forward_pretrain_separate(data)
-            return self.forward_fine_tuning(data)
+            return self.forward_finetune(data)
         else:
             stage = self.get_stage(current_epoch)
             if stage == Stage.PRETRAIN_SEP:
@@ -241,8 +249,12 @@ class PlanningModel(TorchModuleWrapper):
             elif stage == Stage.PRETRAIN_REPRESENTATION:
                 # self.EMA_update() # currently this is done in lightning_trainer.py
                 return self.forward_pretrain_representation(data)
+            elif stage == Stage.FINETUNE:
+                return self.forward_finetune(data)
+            elif stage == Stage.ANT_MASK_FINETUNE:
+                return self.forward_antagonistic_mask_finetune(data)
             else:
-                return self.forward_fine_tuning(data)
+                raise NotImplementedError(f"Stage {stage} is not implemented.")
 
     def extract_map_feature(self, data):
         # NOTE: put property to one-hot?
@@ -523,7 +535,7 @@ class PlanningModel(TorchModuleWrapper):
 
         return out
 
-    def plot_scene_attention(self, data, attn_weights, output_trajectory):
+    def plot_scene_attention(self, data, attn_weights, output_trajectory, key_padding_mask, k=0):
         i = 0
         map_features, polygon_mask, polygon_key_padding = self.extract_map_feature(data)
         agent_features, agent_mask, agent_key_padding = self.extract_agent_feature(data, include_future=False)
@@ -531,27 +543,84 @@ class PlanningModel(TorchModuleWrapper):
         map_points = map_features[i][..., :40]
         map_points_reshape = map_points.reshape(map_points.shape[0], -1, 2)
         plot_scene_attention(agent_features[i], agent_mask[i], map_points_reshape, attn_weights[i, (1+self.rep_seeds_num):],
-                              output_trajectory[i], filename=self.inference_counter)
-        self.inference_counter += 1
+                             key_padding_mask[i, (1+self.rep_seeds_num):], 
+                              output_trajectory[i], filename=self.inference_counter, prefix=k)
+        
 
+    # def attention_guided_mask_generation(self, attn_weights, key_padding_mask):
+    #     '''
+    #     This function generates N_mask antagonistic masks. 
+    #     All the masks are generated based on the attention weights of the last layer of the transformer encoder.
+    #     All the masks belong to one set should sum up to the key_padding_mask corresponding to that scene. 
+    #     All the masks should contain roughly the same number of preserved values.
 
-    def forward_fine_tuning(self, data):
+    #     attn_weights: (B, 1+num_seed+M)
+    #     key_padding_mask: (B, M)
+    #     '''
+    #     attn_weights = attn_weights[:, (1+self.rep_seeds_num):] # (B, M)
+    #     key_padding_mask = key_padding_mask[:, (1+self.rep_seeds_num):]
+    #     # firstly, sort the attention weights
+    #     sorted_idx = torch.argsort(attn_weights, dim=-1) # (B, M)
+    #     # randint = torch.randint(0, self.N_mask, key_padding_mask.shape, device=key_padding_mask.device)
+    #     randint = self.randint[:key_padding_mask.shape[0], :key_padding_mask.shape[1]]
+    #     # now generate the masks shaped (B, N_mask, M)
+    #     masks = torch.zeros((self.N_mask, *key_padding_mask.shape), device=key_padding_mask.device, dtype=torch.bool)
+    #     for i in range(self.N_mask):
+    #         mask = torch.zeros_like(key_padding_mask)
+    #         for j in range(key_padding_mask.shape[0]):
+    #             mask[j, sorted_idx[j, randint[j]==i]] = True
+    #         # element being 1 in mask should be kept
+    #         masks[i] = key_padding_mask | (~mask)
+
+    #     assert ((~masks).sum(0) == ~key_padding_mask).all()
+        
+    #     return masks
+
+    def generate_antagonistic_masks(self, key_padding_mask):
+        '''
+        This function generates N_mask antagonistic masks. 
+        All the masks belong to one set should sum up to the key_padding_mask corresponding to that scene. 
+        All the masks should contain roughly the similar number of preserved values.
+
+        key_padding_mask: (B, N, M)
+        '''
+
+        key_padding_mask_sliced = key_padding_mask[:, (1+self.rep_seeds_num):].clone()
+        randint = torch.randint(0, self.N_mask, key_padding_mask_sliced.shape, device=key_padding_mask_sliced.device)
+        masks = torch.zeros((self.N_mask, key_padding_mask_sliced.shape[0], key_padding_mask_sliced.shape[1]),
+                             device=key_padding_mask_sliced.device, dtype=torch.bool)
+        for i in range(self.N_mask):
+            # element being 1 in mask should be kept
+            masks[i] = key_padding_mask_sliced | (~(randint==i))
+
+        assert ((~masks).sum(0) == ~key_padding_mask_sliced).all() # all sum up to 1
+
+        # the following part will cause CUDA assert error and is not necessary in principle
+        # if not (~masks).sum(-1).all():
+        #     print('There exists a mask that does not contain any preserved value')
+        #     problem_pos = torch.nonzero((~masks).sum(-1)==0)
+        #     for i in problem_pos.shape[0]:
+        #         masks[problem_pos[i]] = key_padding_mask_sliced[problem_pos[i,-1]] # keep the original key_padding_mask
+        #     print('Successfully dealt')
+        
+        return masks.permute(1, 0, 2)
+
+    def forward_finetune(self, data):
         bs, A = data["agent"]["heading"].shape[0:2]
-        x, key_padding_mask = self.embed(data, torch.cat((self.plan_seed, self.rep_seed)))
+        x_orig, key_padding_mask = self.embed(data, torch.cat((self.plan_seed, self.rep_seed)))
 
+        x = x_orig 
         for blk in self.blocks:
             x = blk(x, key_padding_mask=key_padding_mask)
         x = self.norm(x)
 
-        
-            
         trajectory, probability = self.trajectory_decoder(x[:, 0])
         prediction = self.agent_predictor(x[:, 1+(1+self.rep_seeds_num):A+(1+self.rep_seeds_num)]).view(bs, -1, self.future_steps, 2)
 
         out = {
             "trajectory": trajectory,
             "probability": probability,
-            "prediction": prediction,
+            "prediction": prediction.unsqueeze(1),
         }
 
         if not self.training:
@@ -566,7 +635,58 @@ class PlanningModel(TorchModuleWrapper):
         if False:
             attn_weights = self.blocks[-1].attn_mat[:, 0].detach()
             # visualize the scene using the attention weights
-            self.plot_scene_attention(data, attn_weights, output_trajectory)
+            self.plot_scene_attention(data, attn_weights, output_trajectory, new_key_padding_mask, k)
+
+        return out
+
+
+    def forward_antagonistic_mask_finetune(self, data):
+        bs, A = data["agent"]["heading"].shape[0:2]
+        x_orig, key_padding_mask = self.embed(data, torch.cat((self.plan_seed, self.rep_seed)))
+
+        masks = self.generate_antagonistic_masks(key_padding_mask) # B, N_mask, M
+
+        masks = rearrange(masks, 'b n m -> (b n) m')
+        masks = torch.cat([torch.zeros([masks.shape[0], 1+self.rep_seeds_num], dtype=torch.bool, device=masks.device), masks], dim=1)
+        x = repeat(x_orig, 'b m d -> (b n) m d', n=self.N_mask)
+
+        # x = x_orig # comment this if not debugging!
+        # masks = masks[0]
+        # masks = torch.cat([torch.zeros([masks.shape[0], 1+self.rep_seeds_num], dtype=torch.bool, device=masks.device), masks], dim=1)
+        for blk in self.blocks:
+            x = blk(x, key_padding_mask=masks)
+        x = self.norm(x)
+        # attn_weights = self.blocks[-1].attn_mat[:, 0].detach()
+
+        trajectory, probability = self.trajectory_decoder(x[:, 0])
+        prediction = self.agent_predictor(x[:, 1+(1+self.rep_seeds_num):A+(1+self.rep_seeds_num)]).view(bs, -1,  A-1, self.future_steps, 2)
+
+        trajectory = rearrange(trajectory, '(b n) m t c -> b (n m) t c', n=self.N_mask)
+        probability = rearrange(probability, '(b n) m -> b (n m)', n=self.N_mask)
+
+        out = {
+                "trajectory": trajectory,
+                "probability": probability,
+                "prediction": prediction,
+            }
+        
+        if not self.training:
+                
+            x = x_orig.detach().clone()
+            for blk in self.blocks:
+                x = blk(x, key_padding_mask=key_padding_mask)
+            x = self.norm(x)
+
+            trajectory, probability = self.trajectory_decoder(x[:, 0])
+
+            best_mode = probability.argmax(dim=-1)
+            output_trajectory = trajectory[torch.arange(bs), best_mode]
+            angle = torch.atan2(output_trajectory[..., 3], output_trajectory[..., 2])
+            out["output_trajectory"] = torch.cat(
+                [output_trajectory[..., :2], angle.unsqueeze(-1)], dim=-1
+            )
+
+        self.inference_counter += 1
 
         return out
     

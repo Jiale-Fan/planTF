@@ -5,7 +5,8 @@ import matplotlib.cm as cm
 from src.utils.conversion import to_device, to_numpy, to_tensor
 import os
 
-def plot_scene_attention(hist_trajs, trajectory_valid_mask, map_segments, attention_weights, planned_trajs, filename='1', savepath='./debug_files/'):
+def plot_scene_attention(hist_trajs, trajectory_valid_mask, map_segments, attention_weights, key_padding_mask,
+                         planned_trajs, filename='1', savepath='./debug_files/', prefix=None):
     """
     Plot the scene with color-coded attention weights.
 
@@ -27,11 +28,15 @@ def plot_scene_attention(hist_trajs, trajectory_valid_mask, map_segments, attent
     if filename[-4:] != '.png':
         filename += '.png'
 
+    if prefix is not None:
+        filename = str(prefix) +'_'+ filename
+
     hist_trajs = to_numpy(hist_trajs)
     map_segments = to_numpy(map_segments)
     attention_weights = to_numpy(attention_weights)
     trajectory_valid_mask = to_numpy(trajectory_valid_mask)
     planned_trajs = to_numpy(planned_trajs)
+    key_padding_mask = to_numpy(key_padding_mask)
 
     plt.clf()
     fig, ax = plt.subplots()
@@ -48,7 +53,9 @@ def plot_scene_attention(hist_trajs, trajectory_valid_mask, map_segments, attent
     # plot map segments
     for m in range(M):
         idx_m = sorted_idx[m]
-        segment_data = map_segments[sorted_idx[m]]
+        if key_padding_mask[A+idx_m]:
+            continue
+        segment_data = map_segments[idx_m]
         x = segment_data[:, 0]
         y = segment_data[:, 1]
         plt.scatter(x, y, c=[colors[A+idx_m]], label=f'Segment {idx_m + 1}', s=0.5, marker='o')

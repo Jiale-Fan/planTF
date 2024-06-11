@@ -103,7 +103,7 @@ class LightningTrainer(pl.LightningModule):
                 
                 self.model.EMA_update() # update the teacher model with EMA
 
-            elif self.model.get_stage(self.current_epoch) == Stage.FINE_TUNING: 
+            elif self.model.get_stage(self.current_epoch) == Stage.FINETUNE: 
                 opt_pre.zero_grad()
                 opt_fine.zero_grad()
                 self.manual_backward(res["loss"])
@@ -124,10 +124,14 @@ class LightningTrainer(pl.LightningModule):
 
     def _compute_objectives(self, res, data) -> Dict[str, torch.Tensor]:
         trajectory, probability, prediction= (
-            res["trajectory"],
-            res["probability"],
-            res["prediction"],
+            res["trajectory"], # [bs, N_mask*n_mode, n_steps, 4]
+            res["probability"], # [bs, N_mask*n_mode]
+            res["prediction"], # [bs, N_mask, n_agents, n_steps, 2]
         )
+
+        N_mask = prediction.shape[1]
+        n_mode = trajectory.shape[1] // N_mask
+
         targets = data["agent"]["target"]
         valid_mask = data["agent"]["valid_mask"][:, :, -trajectory.shape[-2] :]
 
@@ -144,17 +148,24 @@ class LightningTrainer(pl.LightningModule):
         # agent_target, agent_mask = targets[:, 1:], valid_mask[:, 1:]
 
         ade = torch.norm(trajectory[..., :2] - ego_target[:, None, :, :2], dim=-1) # [bs, n_modes, n_steps]
-        best_mode = torch.argmin(ade.sum(-1), dim=-1)
+        best_mode = torch.argmin(ade.sum(-1), dim=-1) # [bs]
         best_traj = trajectory[torch.arange(trajectory.shape[0]), best_mode]
+        # best_traj_belongs_to_mask_0 = best_mode < n_mode # [bs]
+        # ego_reg_loss = F.smooth_l1_loss(best_traj[best_traj_belongs_to_mask_0], ego_target[best_traj_belongs_to_mask_0], reduction='none').mean((1, 2))
         ego_reg_loss = F.smooth_l1_loss(best_traj, ego_target, reduction='none').mean((1, 2))
         ego_reg_loss_mean = ego_reg_loss.mean()
         ego_cls_loss = F.cross_entropy(probability, best_mode.detach())
 
+        best_mask_set = best_mode//n_mode
+        assert best_mask_set.max() < prediction.shape[1]
+        corres_pred = prediction[torch.arange(prediction.shape[0]), best_mask_set]
+
         agent_target, agent_mask = targets[:, 1:], valid_mask[:, 1:]
         agent_reg_loss = F.smooth_l1_loss(
-            prediction[agent_mask], agent_target[agent_mask][:, :2]
+            corres_pred[agent_mask], agent_target[agent_mask][:, :2]
         )
 
+        # loss = ego_reg_loss_mean + ego_cls_loss + agent_reg_loss
         loss = ego_reg_loss_mean + ego_cls_loss + agent_reg_loss
         
         # if self.current_epoch < self.pretrain_epochs:
@@ -171,8 +182,8 @@ class LightningTrainer(pl.LightningModule):
         return {
             "loss": loss,
             "reg_loss": ego_reg_loss_mean,
-            "cls_loss": ego_cls_loss,
-            "agent_reg_loss": agent_reg_loss,
+            # "cls_loss": ego_cls_loss,
+            # "agent_reg_loss": agent_reg_loss,
             # "pretrain_loss": res["pretrain_loss"],
             # "hist_loss": res["hist_loss"],
             # "future_loss": res["future_loss"],
