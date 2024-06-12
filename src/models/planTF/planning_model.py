@@ -79,7 +79,7 @@ class PlanningModel(TorchModuleWrapper):
         total_epochs=30,
         lane_mask_ratio=0.5,
         trajectory_mask_ratio=0.7,
-        pretrain_epoch_stages = [0, 10, 20],
+        pretrain_epoch_stages = [0, 10, 20, 25, 30, 35], # SEPT, ft, ant, ft, ant, ft
         # pretrain_epoch_stages = [0, 0, 0],
         lane_split_threshold=20,
         alpha=0.999,
@@ -230,8 +230,14 @@ class PlanningModel(TorchModuleWrapper):
         #     return Stage.PRETRAIN_REPRESENTATION
         elif current_epoch < self.pretrain_epoch_stages[2]:
             return Stage.FINETUNE
-        else:
+        elif current_epoch < self.pretrain_epoch_stages[3]:
             return Stage.ANT_MASK_FINETUNE
+        elif current_epoch < self.pretrain_epoch_stages[4]:
+            return Stage.FINETUNE
+        elif current_epoch < self.pretrain_epoch_stages[5]:
+            return Stage.ANT_MASK_FINETUNE
+        else:
+            return Stage.FINETUNE
         
         # for debugging
         
@@ -632,7 +638,7 @@ class PlanningModel(TorchModuleWrapper):
             )
 
         # attention visualization
-        if False:
+        if True:
             attn_weights = self.blocks[-1].attn_mat[:, 0].detach()
             # visualize the scene using the attention weights
             self.plot_scene_attention(data, attn_weights, output_trajectory, key_padding_mask, 0)

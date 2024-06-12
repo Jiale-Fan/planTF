@@ -7,7 +7,7 @@ def create_gif_from_images(directory, output_filename):
     files = sorted([f for f in os.listdir(directory) if f.endswith('.png')])
     
     # Filter files to ensure they follow the naming convention "0001.png", "0002.png", etc.
-    files = [f for f in files if f[:-4].isdigit()]
+    # files = [f for f in files if f[:-4].isdigit()]
     
     # Sort the files by their numerical order
     files.sort(key=lambda x: int(x[:-4]))
@@ -36,7 +36,7 @@ def create_gif_from_images(directory, output_filename):
         print("No images found to create a GIF.")
 
 # Usage
-directory = '/data1/nuplan/jiale/exp/exp/simulation_FINETUNE/open_loop_boxes/test14-hard/planTF/debug_files/'  # Replace with the path to your directory
-# directory = '/data1/nuplan/jiale/exp/exp/simulation/closed_loop_nonreactive_agents/test14-hard/planTF/debug_files/'  # Replace with the path to your directory
+# directory = '/home/jiale/Documents/exp/exp/simulation/open_loop_boxes/test14-hard/planTF/debug_files/'  # Replace with the path to your directory
+directory = '/home/jiale/Documents/exp/exp/simulation/closed_loop_nonreactive_agents/test14-hard/planTF/debug_files/'  # Replace with the path to your directory
 output_filename = 'output.gif'  # Replace with the desired output filename
 create_gif_from_images(directory, output_filename)
