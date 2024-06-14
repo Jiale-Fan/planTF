@@ -67,7 +67,7 @@ class PlanningModel(TorchModuleWrapper):
         history_channel=9,
         history_steps=21,
         future_steps=80,
-        encoder_depth=4,
+        encoder_depth=2,
         drop_path=0.2,
         num_heads=8,
         num_modes=6,
