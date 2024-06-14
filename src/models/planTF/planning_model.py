@@ -233,7 +233,7 @@ class PlanningModel(TorchModuleWrapper):
 
 
     def get_stage(self, current_epoch):
-        return Stage.FINETUNE
+        # return Stage.FINETUNE
         if current_epoch < self.pretrain_epoch_stages[1]:
             return Stage.PRETRAIN_SEP
         # elif current_epoch < self.pretrain_epoch_stages[2]:
