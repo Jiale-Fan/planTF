@@ -101,6 +101,7 @@ class PlanningModel(TorchModuleWrapper):
         self.history_steps = history_steps
         self.future_steps = future_steps
         self.state_channel = state_channel
+        self.num_modes = num_modes
         
         self.polygon_channel = polygon_channel # the number of features for each lane segment besides points coords which we will use
 
@@ -232,7 +233,7 @@ class PlanningModel(TorchModuleWrapper):
 
 
     def get_stage(self, current_epoch):
-        # return Stage.FINETUNE
+        return Stage.FINETUNE
         if current_epoch < self.pretrain_epoch_stages[1]:
             return Stage.PRETRAIN_SEP
         # elif current_epoch < self.pretrain_epoch_stages[2]:
@@ -603,15 +604,14 @@ class PlanningModel(TorchModuleWrapper):
         key_padding_mask: (B, N, M)
         '''
 
-        key_padding_mask_sliced = key_padding_mask[:, (1+self.out_channels):].clone()
-        randint = torch.randint(0, self.N_mask, key_padding_mask_sliced.shape, device=key_padding_mask_sliced.device)
-        masks = torch.zeros((self.N_mask, key_padding_mask_sliced.shape[0], key_padding_mask_sliced.shape[1]),
-                             device=key_padding_mask_sliced.device, dtype=torch.bool)
+        randint = torch.randint(0, self.N_mask, key_padding_mask.shape, device=key_padding_mask.device)
+        masks = torch.zeros((key_padding_mask.shape[0], self.N_mask, key_padding_mask.shape[1]),
+                             device=key_padding_mask.device, dtype=torch.bool)
         for i in range(self.N_mask):
             # element being 1 in mask should be kept
-            masks[i] = key_padding_mask_sliced | (~(randint==i))
+            masks[:, i] = key_padding_mask | (~(randint==i))
 
-        assert ((~masks).sum(0) == ~key_padding_mask_sliced).all() # all sum up to 1
+        assert ((~masks).sum(1) == ~key_padding_mask).all() # all sum up to 1
 
         # the following part will cause CUDA assert error and is not necessary in principle
         # if not (~masks).sum(-1).all():
@@ -621,7 +621,7 @@ class PlanningModel(TorchModuleWrapper):
         #         masks[problem_pos[i]] = key_padding_mask_sliced[problem_pos[i,-1]] # keep the original key_padding_mask
         #     print('Successfully dealt')
         
-        return masks.permute(1, 0, 2)
+        return masks
 
     def forward_finetune(self, data):
         bs, A = data["agent"]["heading"].shape[0:2]
@@ -644,7 +644,7 @@ class PlanningModel(TorchModuleWrapper):
         out = {
             "trajectory": trajectory,
             "probability": probability,
-            "prediction": prediction.unsqueeze(1),
+            "prediction": prediction,
         }
 
         if not self.training:
@@ -670,25 +670,22 @@ class PlanningModel(TorchModuleWrapper):
         # x_orig, key_padding_mask = self.embed(data, torch.cat((self.plan_seed, self.rep_seed)))
         x_orig, key_padding_mask = self.embed(data)
 
-        masks = self.generate_antagonistic_masks(key_padding_mask) # B, N_mask, M
-
-        masks = rearrange(masks, 'b n m -> (b n) m')
-        masks = torch.cat([torch.zeros([masks.shape[0], 1+self.out_channels], dtype=torch.bool, device=masks.device), masks], dim=1)
-        x = repeat(x_orig, 'b m d -> (b n) m d', n=self.N_mask)
-
-        # x = x_orig # comment this if not debugging!
-        # masks = masks[0]
-        # masks = torch.cat([torch.zeros([masks.shape[0], 1+self.rep_seeds_num], dtype=torch.bool, device=masks.device), masks], dim=1)
+        x=x_orig
         for blk in self.SpaNet:
-            x = blk(x, key_padding_mask=masks)
+            x = blk(x, key_padding_mask=key_padding_mask)
         x = self.norm(x)
-        # attn_weights = self.blocks[-1].attn_mat[:, 0].detach()
 
-        trajectory, probability = self.trajectory_decoder(x[:, 0])
-        prediction = self.agent_predictor(x[:, 1+(1+self.out_channels):A+(1+self.out_channels)]).view(bs, -1,  A-1, self.future_steps, 2)
+        masks = self.generate_antagonistic_masks(key_padding_mask) # B, N_mask, M
+        masks = rearrange(masks, 'b n m -> (b n) m')
+        
+        x_m = repeat(x, 'b m d -> (b n) m d', n=self.N_mask)
+        q = repeat(self.multimodal_seed, 'n d -> b n d', b=bs*self.N_mask)
+        for blk in self.cross_attender:
+            q, attn_weights = blk(query=q, key=x_m, value=x_m, key_padding_mask=masks, need_weights=True)
+        trajectory = rearrange(self.trajectory_mlp(q), '(b n) m (t c) -> b (n m) t c', n=self.N_mask, t=self.future_steps, c=self.out_channels)
+        probability = rearrange(self.score_mlp(q).squeeze(-1), '(b n) m -> b (n m)', n=self.N_mask)
 
-        trajectory = rearrange(trajectory, '(b n) m t c -> b (n m) t c', n=self.N_mask)
-        probability = rearrange(probability, '(b n) m -> b (n m)', n=self.N_mask)
+        prediction = self.agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2)
 
         out = {
                 "trajectory": trajectory,
@@ -703,10 +700,14 @@ class PlanningModel(TorchModuleWrapper):
                 x = blk(x, key_padding_mask=key_padding_mask)
             x = self.norm(x)
 
-            trajectory, probability = self.trajectory_decoder(x[:, 0])
+            q = repeat(self.multimodal_seed, 'n d -> bs n d', bs=bs)
+            for blk in self.cross_attender:
+                q, attn_weights = blk(query=q, key=x, value=x, key_padding_mask=key_padding_mask, need_weights=True)
+            trajectory_full = self.trajectory_mlp(q).view(bs, -1, self.future_steps, self.out_channels)
+            probability_full = self.score_mlp(q).squeeze(-1)
 
-            best_mode = probability.argmax(dim=-1)
-            output_trajectory = trajectory[torch.arange(bs), best_mode]
+            best_mode = probability_full.argmax(dim=-1)
+            output_trajectory = trajectory_full[torch.arange(bs), best_mode]
             angle = torch.atan2(output_trajectory[..., 3], output_trajectory[..., 2])
             out["output_trajectory"] = torch.cat(
                 [output_trajectory[..., :2], angle.unsqueeze(-1)], dim=-1

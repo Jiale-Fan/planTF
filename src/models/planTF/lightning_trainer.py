@@ -156,14 +156,9 @@ class LightningTrainer(pl.LightningModule):
         ego_reg_loss = F.smooth_l1_loss(best_traj, ego_target, reduction='none').mean((1, 2))
         ego_reg_loss_mean = ego_reg_loss.mean()
         ego_cls_loss = F.cross_entropy(probability, best_mode.detach())
-
-        best_mask_set = best_mode//n_mode
-        assert best_mask_set.max() < prediction.shape[1]
-        corres_pred = prediction[torch.arange(prediction.shape[0]), best_mask_set]
-
         agent_target, agent_mask = targets[:, 1:], valid_mask[:, 1:]
         agent_reg_loss = F.smooth_l1_loss(
-            corres_pred[agent_mask], agent_target[agent_mask][:, :2]
+            prediction[agent_mask], agent_target[agent_mask][:, :2]
         )
 
         # loss = ego_reg_loss_mean + ego_cls_loss + agent_reg_loss
@@ -183,8 +178,8 @@ class LightningTrainer(pl.LightningModule):
         return {
             "loss": loss,
             "reg_loss": ego_reg_loss_mean,
-            # "cls_loss": ego_cls_loss,
-            # "agent_reg_loss": agent_reg_loss,
+            "cls_loss": ego_cls_loss,
+            "agent_reg_loss": agent_reg_loss,
             # "pretrain_loss": res["pretrain_loss"],
             # "hist_loss": res["hist_loss"],
             # "future_loss": res["future_loss"],
