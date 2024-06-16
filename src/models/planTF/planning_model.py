@@ -79,8 +79,8 @@ class PlanningModel(TorchModuleWrapper):
         total_epochs=30,
         lane_mask_ratio=0.5,
         trajectory_mask_ratio=0.7,
-        # pretrain_epoch_stages = [0, 10, 20, 25, 30, 35], # SEPT, ft, ant, ft, ant, ft
-        pretrain_epoch_stages = [0, 10],
+        pretrain_epoch_stages = [0, 10, 20, 25, 30, 35], # SEPT, ft, ant, ft, ant, ft
+        # pretrain_epoch_stages = [0, 10],
         lane_split_threshold=20,
         alpha=0.999,
         expanded_dim = 256*8,
@@ -233,7 +233,7 @@ class PlanningModel(TorchModuleWrapper):
 
 
     def get_stage(self, current_epoch):
-        # return Stage.FINETUNE
+        # return Stage.ANT_MASK_FINETUNE
         if current_epoch < self.pretrain_epoch_stages[1]:
             return Stage.PRETRAIN_SEP
         # elif current_epoch < self.pretrain_epoch_stages[2]:
@@ -241,14 +241,14 @@ class PlanningModel(TorchModuleWrapper):
         #         self.initialize_teacher()
         #         self.flag_teacher_init = True
         #     return Stage.PRETRAIN_REPRESENTATION
-        # elif current_epoch < self.pretrain_epoch_stages[2]:
-        #     return Stage.FINETUNE
-        # elif current_epoch < self.pretrain_epoch_stages[3]:
-        #     return Stage.ANT_MASK_FINETUNE
-        # elif current_epoch < self.pretrain_epoch_stages[4]:
-        #     return Stage.FINETUNE
-        # elif current_epoch < self.pretrain_epoch_stages[5]:
-        #     return Stage.ANT_MASK_FINETUNE
+        elif current_epoch < self.pretrain_epoch_stages[2]:
+            return Stage.FINETUNE
+        elif current_epoch < self.pretrain_epoch_stages[3]:
+            return Stage.ANT_MASK_FINETUNE
+        elif current_epoch < self.pretrain_epoch_stages[4]:
+            return Stage.FINETUNE
+        elif current_epoch < self.pretrain_epoch_stages[5]:
+            return Stage.ANT_MASK_FINETUNE
         else:
             return Stage.FINETUNE
         
@@ -705,7 +705,14 @@ class PlanningModel(TorchModuleWrapper):
                 q, attn_weights = blk(query=q, key=x, value=x, key_padding_mask=key_padding_mask, need_weights=True)
             trajectory_full = self.trajectory_mlp(q).view(bs, -1, self.future_steps, self.out_channels)
             probability_full = self.score_mlp(q).squeeze(-1)
+            prediction_full = self.agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2)
 
+            out = {
+                "trajectory": trajectory_full,
+                "probability": probability_full,
+                "prediction": prediction_full,
+            }
+            
             best_mode = probability_full.argmax(dim=-1)
             output_trajectory = trajectory_full[torch.arange(bs), best_mode]
             angle = torch.atan2(output_trajectory[..., 3], output_trajectory[..., 2])
