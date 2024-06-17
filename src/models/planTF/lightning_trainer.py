@@ -127,11 +127,8 @@ class LightningTrainer(pl.LightningModule):
         trajectory, probability, prediction= (
             res["trajectory"], # [bs, N_mask*n_mode, n_steps, 4]
             res["probability"], # [bs, N_mask*n_mode]
-            res["prediction"], # [bs, N_mask, n_agents, n_steps, 2]
+            res["prediction"], # [bs, n_agents, n_steps, 2]
         )
-
-        N_mask = prediction.shape[1]
-        n_mode = trajectory.shape[1] // N_mask
 
         targets = data["agent"]["target"]
         valid_mask = data["agent"]["valid_mask"][:, :, -trajectory.shape[-2] :]
@@ -148,14 +145,33 @@ class LightningTrainer(pl.LightningModule):
         )
         # agent_target, agent_mask = targets[:, 1:], valid_mask[:, 1:]
 
-        ade = torch.norm(trajectory[..., :2] - ego_target[:, None, :, :2], dim=-1) # [bs, n_modes, n_steps]
-        best_mode = torch.argmin(ade.sum(-1), dim=-1) # [bs]
+        # 1. ego regression loss
+        ade = torch.norm(trajectory[..., :2] - ego_target[:, None, :, :2], dim=-1).sum(-1) # [bs, n_modes, n_steps]
+        ade = torch.where(ade.isnan(), torch.inf, ade) 
+
+        # !!! this is to prevent nan trajectories triggered by the antagonistic masks.
+        # we can do this because if one antagonistic mask is all zeros, the other would be full of ones
+        # but this may interfere with identifying nan problems at other stages
+
+        best_mode = torch.argmin(ade, dim=-1) # [bs]
         best_traj = trajectory[torch.arange(trajectory.shape[0]), best_mode]
         # best_traj_belongs_to_mask_0 = best_mode < n_mode # [bs]
         # ego_reg_loss = F.smooth_l1_loss(best_traj[best_traj_belongs_to_mask_0], ego_target[best_traj_belongs_to_mask_0], reduction='none').mean((1, 2))
         ego_reg_loss = F.smooth_l1_loss(best_traj, ego_target, reduction='none').mean((1, 2))
         ego_reg_loss_mean = ego_reg_loss.mean()
+
+        # 2. ego classification loss
+        # if trajectory.shape[1] > self.model.num_modes: # means that the training is at antagonistic mask finetune stage
+        #     probability = probability.view(probability.shape[0], self.model.N_mask, self.model.num_modes)
+        #     best_mask = torch.div(best_mode.detach(), self.model.num_modes, rounding_mode='floor')
+        #     best_mode_reduced = best_mode % self.model.num_modes
+        #     ego_cls_loss = F.cross_entropy(probability[torch.arange(probability.shape[0]), best_mask.to(torch.long).detach().clone()], best_mode_reduced.detach())
+        # else:
+        #     ego_cls_loss = F.cross_entropy(probability, best_mode.detach())
+
         ego_cls_loss = F.cross_entropy(probability, best_mode.detach())
+
+        # 3. agent regression loss
         agent_target, agent_mask = targets[:, 1:], valid_mask[:, 1:]
         agent_reg_loss = F.smooth_l1_loss(
             prediction[agent_mask], agent_target[agent_mask][:, :2]

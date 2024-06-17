@@ -233,7 +233,7 @@ class PlanningModel(TorchModuleWrapper):
 
 
     def get_stage(self, current_epoch):
-        # return Stage.ANT_MASK_FINETUNE
+        return Stage.ANT_MASK_FINETUNE
         if current_epoch < self.pretrain_epoch_stages[1]:
             return Stage.PRETRAIN_SEP
         # elif current_epoch < self.pretrain_epoch_stages[2]:
@@ -613,6 +613,9 @@ class PlanningModel(TorchModuleWrapper):
 
         assert ((~masks).sum(1) == ~key_padding_mask).all() # all sum up to 1
 
+        empty_mask_idx = (key_padding_mask[:, None, :] == masks).all(-1).any(-1)
+        masks[empty_mask_idx] = key_padding_mask[empty_mask_idx][:, None, :]
+
         # the following part will cause CUDA assert error and is not necessary in principle
         # if not (~masks).sum(-1).all():
         #     print('There exists a mask that does not contain any preserved value')
@@ -687,6 +690,10 @@ class PlanningModel(TorchModuleWrapper):
 
         prediction = self.agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2)
 
+        assert trajectory.isnan().any() == False
+        assert probability.isnan().any() == False
+        assert prediction.isnan().any() == False
+
         out = {
                 "trajectory": trajectory,
                 "probability": probability,
@@ -736,7 +743,6 @@ class PlanningModel(TorchModuleWrapper):
 
         bs, A = agent_features.shape[0:2]
           
-
         # lane embedding (purely projection)
         lane_embedding = self.map_projector(map_features)
 
