@@ -68,6 +68,7 @@ class PlanningModel(TorchModuleWrapper):
         history_steps=21,
         future_steps=80,
         encoder_depth=2,
+        decoder_depth=3, 
         drop_path=0.2,
         num_heads=8,
         num_modes=6,
@@ -87,6 +88,7 @@ class PlanningModel(TorchModuleWrapper):
         gamma = 1.0, # VICReg standard deviation target 
         out_channels = 4,
         N_mask = 2,
+        waypoints_interval = 10,
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
     ) -> None:
         super().__init__(
@@ -102,6 +104,7 @@ class PlanningModel(TorchModuleWrapper):
         self.future_steps = future_steps
         self.state_channel = state_channel
         self.num_modes = num_modes
+        self.waypoints_interval = waypoints_interval
         
         self.polygon_channel = polygon_channel # the number of features for each lane segment besides points coords which we will use
 
@@ -188,19 +191,33 @@ class PlanningModel(TorchModuleWrapper):
         #     out_channels=4,
         # )
 
-        self.cross_attender = nn.ModuleList(
-            torch.nn.MultiheadAttention(
-            dim,
-            num_heads=num_heads,
-            add_bias_kv=qkv_bias,
-            dropout=0.1,
-            batch_first=True,
-            )
-            for i in range(3)
+        # self.cross_attender = nn.ModuleList(
+        #     torch.nn.MultiheadAttention(
+        #     dim,
+        #     num_heads=num_heads,
+        #     add_bias_kv=qkv_bias,
+        #     dropout=0.1,
+        #     batch_first=True,
+        #     )
+        #     for i in range(decoder_depth)
+        # )
+
+        self.coarse_to_fine_decoder = nn.ModuleList(
+            torch.nn.TransformerDecoderLayer(dim, 
+                                             num_heads, 
+                                             dim_feedforward=int(mlp_ratio*dim), 
+                                             dropout=0.1, 
+                                             activation="gelu", 
+                                             batch_first=True)
+            for i in range(decoder_depth)
         )
 
         self.trajectory_mlp = build_mlp(dim, [512, future_steps * out_channels], norm=None)
         self.score_mlp = build_mlp(dim, [512, 1], norm=None)
+
+        # coarse to fine planning
+        self.goal_mlp = build_mlp(dim, [512, out_channels], norm=None)
+        self.waypoints_mlp = build_mlp(dim, [512, future_steps//waypoints_interval*out_channels], norm=None)
 
         self.agent_predictor = build_mlp(dim, [dim * 2, future_steps * 2], norm="ln")
 
@@ -640,15 +657,20 @@ class PlanningModel(TorchModuleWrapper):
             x = blk(x, key_padding_mask=key_padding_mask)
         x = self.norm(x)
 
-        q = repeat(self.multimodal_seed, 'n d -> bs n d', bs=bs)
-        for blk in self.cross_attender:
+        mts = repeat(self.multimodal_seed, 'n d -> bs n d', bs=bs)
+        q = torch.cat([mts, x], dim=1)
+        tgt_key_padding_mask = torch.cat([torch.zeros((bs, self.num_modes), device=x.device, dtype=torch.bool), key_padding_mask], dim=1)
+        
+        q = self.coarse_to_fine_decoder[0](tgt=q, memory=x, tgt_key_padding_mask=tgt_key_padding_mask, memory_key_padding_mask=key_padding_mask)
+        goal = self.goal_mlp(q[:, :self.num_modes]).squeeze(1)
+        q = self.coarse_to_fine_decoder[0](tgt=q, memory=x, tgt_key_padding_mask=tgt_key_padding_mask, memory_key_padding_mask=key_padding_mask)
+        waypoints = self.waypoints_mlp(q[:, :self.num_modes]).view(bs, self.num_modes, self.future_steps//self.waypoints_interval, self.out_channels)
+        # restrict the attention to the route only in the cross attender
+        # q, attn_weights = blk(query=q, key=x, value=x, key_padding_mask=route_kpmask, need_weights=True) 
+        q_emb = q[:, :self.num_modes]
 
-            # restrict the attention to the route only in the cross attender
-            q, attn_weights = blk(query=q, key=x, value=x, key_padding_mask=route_kpmask, need_weights=True) 
-            
-            # q, attn_weights = blk(query=q, key=x, value=x, key_padding_mask=key_padding_mask, need_weights=True)
-        trajectory = self.trajectory_mlp(q).view(bs, -1, self.future_steps, self.out_channels)
-        probability = self.score_mlp(q).squeeze(-1)
+        trajectory = self.trajectory_mlp(q_emb).view(bs, -1, self.future_steps, self.out_channels)
+        probability = self.score_mlp(q_emb).squeeze(-1)
 
         prediction = self.agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2)
 
@@ -656,6 +678,8 @@ class PlanningModel(TorchModuleWrapper):
             "trajectory": trajectory,
             "probability": probability,
             "prediction": prediction,
+            "goal": goal,
+            "waypoints": waypoints,
         }
 
         if not self.training:
