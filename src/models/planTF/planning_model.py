@@ -79,8 +79,8 @@ class PlanningModel(TorchModuleWrapper):
         total_epochs=30,
         lane_mask_ratio=0.5,
         trajectory_mask_ratio=0.7,
-        pretrain_epoch_stages = [0, 10, 20, 25, 30, 35], # SEPT, ft, ant, ft, ant, ft
-        # pretrain_epoch_stages = [0, 10],
+        # pretrain_epoch_stages = [0, 10, 20, 25, 30, 35], # SEPT, ft, ant, ft, ant, ft
+        pretrain_epoch_stages = [0, 10],
         lane_split_threshold=20,
         alpha=0.999,
         expanded_dim = 256*8,
@@ -233,7 +233,7 @@ class PlanningModel(TorchModuleWrapper):
 
 
     def get_stage(self, current_epoch):
-        # return Stage.ANT_MASK_FINETUNE
+        # return Stage.FINETUNE
         if current_epoch < self.pretrain_epoch_stages[1]:
             return Stage.PRETRAIN_SEP
         # elif current_epoch < self.pretrain_epoch_stages[2]:
@@ -241,14 +241,14 @@ class PlanningModel(TorchModuleWrapper):
         #         self.initialize_teacher()
         #         self.flag_teacher_init = True
         #     return Stage.PRETRAIN_REPRESENTATION
-        elif current_epoch < self.pretrain_epoch_stages[2]:
-            return Stage.FINETUNE
-        elif current_epoch < self.pretrain_epoch_stages[3]:
-            return Stage.ANT_MASK_FINETUNE
-        elif current_epoch < self.pretrain_epoch_stages[4]:
-            return Stage.FINETUNE
-        elif current_epoch < self.pretrain_epoch_stages[5]:
-            return Stage.ANT_MASK_FINETUNE
+        # elif current_epoch < self.pretrain_epoch_stages[2]:
+        #     return Stage.FINETUNE
+        # elif current_epoch < self.pretrain_epoch_stages[3]:
+        #     return Stage.ANT_MASK_FINETUNE
+        # elif current_epoch < self.pretrain_epoch_stages[4]:
+        #     return Stage.FINETUNE
+        # elif current_epoch < self.pretrain_epoch_stages[5]:
+        #     return Stage.ANT_MASK_FINETUNE
         else:
             return Stage.FINETUNE
         
@@ -275,7 +275,7 @@ class PlanningModel(TorchModuleWrapper):
             else:
                 raise NotImplementedError(f"Stage {stage} is not implemented.")
 
-    def extract_map_feature(self, data):
+    def extract_map_feature(self, data, need_route_kpmask=False):
         # NOTE: put property to one-hot?
         # the segments longer than 20m will be splited into finer segments
 
@@ -310,7 +310,11 @@ class PlanningModel(TorchModuleWrapper):
         feature = torch.cat([point_position_feature, new_poly_prop], dim=-1)
         polygon_key_padding = ~(valid_mask.any(-1))
 
-        return feature, valid_mask, polygon_key_padding
+        if not need_route_kpmask:
+            return feature, valid_mask, polygon_key_padding
+        else: 
+            need_route_kpmask = ~((polygon_key_padding==0)&(new_poly_prop[..., 1]==1)) # valid and on route, then take the opposite
+            return feature, valid_mask, polygon_key_padding, need_route_kpmask # [B, M_new]
 
 
 
@@ -629,7 +633,7 @@ class PlanningModel(TorchModuleWrapper):
     def forward_finetune(self, data):
         bs, A = data["agent"]["heading"].shape[0:2]
         # x_orig, key_padding_mask = self.embed(data, torch.cat((self.plan_seed, self.rep_seed)))
-        x_orig, key_padding_mask = self.embed(data)
+        x_orig, key_padding_mask, route_kpmask = self.embed(data, need_route_kpmask=True)
 
         x = x_orig 
         for blk in self.SpaNet:
@@ -638,7 +642,11 @@ class PlanningModel(TorchModuleWrapper):
 
         q = repeat(self.multimodal_seed, 'n d -> bs n d', bs=bs)
         for blk in self.cross_attender:
-            q, attn_weights = blk(query=q, key=x, value=x, key_padding_mask=key_padding_mask, need_weights=True)
+
+            # restrict the attention to the route only in the cross attender
+            q, attn_weights = blk(query=q, key=x, value=x, key_padding_mask=route_kpmask, need_weights=True) 
+            
+            # q, attn_weights = blk(query=q, key=x, value=x, key_padding_mask=key_padding_mask, need_weights=True)
         trajectory = self.trajectory_mlp(q).view(bs, -1, self.future_steps, self.out_channels)
         probability = self.score_mlp(q).squeeze(-1)
 
@@ -732,13 +740,17 @@ class PlanningModel(TorchModuleWrapper):
         return out
     
     
-    def embed(self, data, seeds=None, include_future=False):
+    def embed(self, data, seeds=None, include_future=False, need_route_kpmask=False):
         """
             data: dict
             seeds: tensor (D, )
         """
         
-        map_features, polygon_mask, polygon_key_padding = self.extract_map_feature(data)
+        if need_route_kpmask:
+            map_features, polygon_mask, polygon_key_padding, route_kp_mask = self.extract_map_feature(data, need_route_kpmask=True)
+        else:
+            map_features, polygon_mask, polygon_key_padding = self.extract_map_feature(data)
+        
         agent_features, agent_mask, agent_key_padding = self.extract_agent_feature(data, include_future)
 
         bs, A = agent_features.shape[0:2]
@@ -758,7 +770,7 @@ class PlanningModel(TorchModuleWrapper):
         if seeds is None:
             x = torch.cat([x_agent_, lane_embedding], dim=1)
             key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding], dim=-1)
-            return x, key_padding_mask
+            res = [ x, key_padding_mask ]
         else:
             if seeds.dim() == 1:
                 seeds = repeat(seeds, 'd -> bs 1 d', bs=bs)
@@ -767,7 +779,13 @@ class PlanningModel(TorchModuleWrapper):
             x = torch.cat([seeds, x_agent_, lane_embedding], dim=1)
             # key padding masks
             key_padding_mask = torch.cat([torch.zeros(seeds.shape[0:2], device=agent_key_padding.device, dtype=torch.bool), agent_key_padding, polygon_key_padding], dim=-1)
-            return x, key_padding_mask
+            res = [ x, key_padding_mask ]
+
+        if need_route_kpmask:
+            assert seeds == None
+            res.append(torch.cat([agent_key_padding, route_kp_mask], dim=-1))
+        
+        return res
 
 
     def mask_and_embed(self, data, seeds):
