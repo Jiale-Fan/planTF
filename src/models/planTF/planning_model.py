@@ -644,9 +644,9 @@ class PlanningModel(TorchModuleWrapper):
         for blk in self.cross_attender:
 
             # restrict the attention to the route only in the cross attender
-            q, attn_weights = blk(query=q, key=x, value=x, key_padding_mask=route_kpmask, need_weights=True) 
+            # q, attn_weights = blk(query=q, key=x, value=x, key_padding_mask=route_kpmask, need_weights=True) 
             
-            # q, attn_weights = blk(query=q, key=x, value=x, key_padding_mask=key_padding_mask, need_weights=True)
+            q, attn_weights = blk(query=q, key=x, value=x, key_padding_mask=key_padding_mask, need_weights=True)
         trajectory = self.trajectory_mlp(q).view(bs, -1, self.future_steps, self.out_channels)
         probability = self.score_mlp(q).squeeze(-1)
 
