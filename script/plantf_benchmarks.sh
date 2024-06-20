@@ -16,7 +16,7 @@ for challenge in $CHALLENGES; do
         worker.threads_per_node=16 \
         experiment_uid=$SPLIT/$planner \
         verbose=true \
-        planner.imitation_planner.planner_ckpt="/home/jiale/Documents/checkpoints/SEPT+finetune+route-0.8.ckpt"
+        planner.imitation_planner.planner_ckpt="/home/jiale/Documents/checkpoints/SEPT+finetune-SpaNet4-ptb.ckpt"
 done
 
 
