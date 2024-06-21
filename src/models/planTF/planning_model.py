@@ -221,6 +221,7 @@ class PlanningModel(TorchModuleWrapper):
         # self.waypoints_mlp = build_mlp(dim, [512, future_steps//waypoints_interval*out_channels], norm=None)
 
         self.agent_predictor = build_mlp(dim, [dim * 2, future_steps * 2], norm="ln")
+        self.feature_scorer = build_mlp(dim, [dim, 1], norm="ln")
 
         self.apply(self._init_weights)
 
@@ -668,6 +669,8 @@ class PlanningModel(TorchModuleWrapper):
             masks[i, 0, randidx[i, :valid_num[i]//2]] = False
             masks[i, 1, randidx[i, valid_num[i]//2:valid_num[i]]] = False
 
+        # ensure the ego decoding query is never masked out 
+        masks[:, :, 0] = False
         assert ((~masks).sum(1) == ~key_padding_mask).all() # all sum up to 1
 
 
@@ -779,7 +782,9 @@ class PlanningModel(TorchModuleWrapper):
 
         trajectory, probability = self.trajectory_decoder(x[:, 0])
         prediction = self.agent_predictor(x[:, 1:A]).view(bs, -1,  A-1, self.future_steps, 2)
+        feature_score = self.feature_scorer(x).squeeze(-1)
 
+        feature_score = rearrange(feature_score, '(b n) m -> b n m', n=self.N_mask)
         trajectory = rearrange(trajectory, '(b n) m t c -> b (n m) t c', n=self.N_mask)
         probability = rearrange(probability, '(b n) m -> b (n m)', n=self.N_mask)
 

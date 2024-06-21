@@ -12,8 +12,9 @@ class Projector(nn.Module):
         self.in_channels = in_channels
 
         self.projector = nn.Sequential(
-            nn.Linear(in_channels, dim),
+            nn.Linear(in_channels, in_channels*4),
             nn.ReLU(),
+            nn.Linear(in_channels*4, dim),
         )
 
     def forward(self, feature):
