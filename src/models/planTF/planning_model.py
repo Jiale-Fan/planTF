@@ -668,6 +668,7 @@ class PlanningModel(TorchModuleWrapper):
             masks[i, 0, randidx[i, :valid_num[i]//2]] = False
             masks[i, 1, randidx[i, valid_num[i]//2:valid_num[i]]] = False
 
+        masks[:,:,0] = False # keep the ego query always
         assert ((~masks).sum(1) == ~key_padding_mask).all() # all sum up to 1
 
 
