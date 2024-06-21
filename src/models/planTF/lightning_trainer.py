@@ -130,8 +130,8 @@ class LightningTrainer(pl.LightningModule):
             res["prediction"], # [bs, n_agents, n_steps, 2]
         )
 
-        goal = res["goal"] # [bs, 1, 4]
-        waypoints = res["waypoints"] # [bs, 8, 4]
+        # goal = res["goal"] # [bs, 1, 4]
+        # waypoints = res["waypoints"] # [bs, 8, 4]
 
         targets = data["agent"]["target"]
         valid_mask = data["agent"]["valid_mask"][:, :, -trajectory.shape[-2] :]
@@ -148,23 +148,14 @@ class LightningTrainer(pl.LightningModule):
         )
         # agent_target, agent_mask = targets[:, 1:], valid_mask[:, 1:]
 
-        ego_goal_target = ego_target[:, -1:, :] # [bs, 4]
-        ego_waypoints_target = ego_target[:, self.model.waypoints_interval-1::self.model.waypoints_interval, :] # [bs, 8, 4]
+        # ego_goal_target = ego_target[:, -1:, :] # [bs, 4]
+        # ego_waypoints_target = ego_target[:, self.model.waypoints_interval-1::self.model.waypoints_interval, :] # [bs, 8, 4]
 
         # 1. ego regression coarse to fine loss
-        ade = torch.norm(trajectory[..., :2] - ego_target[:, None, :, :2], dim=-1).sum(-1)
-        ade = torch.where(ade.isnan(), torch.inf, ade) 
-        # !!! this is to prevent nan trajectories triggered by the antagonistic masks.
-        # we can do this because if one antagonistic mask is all zeros, the other would be full of ones
-        # but this may interfere with identifying nan problems at other stages
+        ego_reg_loss, ego_reg_loss_mean, best_mode = self.winner_take_all_loss_cal(trajectory, ego_target)
 
-        best_mode = torch.argmin(ade, dim=-1) # [bs]
-        best_traj = trajectory[torch.arange(trajectory.shape[0]), best_mode]
-        ego_reg_loss = F.smooth_l1_loss(best_traj, ego_target, reduction='none').mean((1, 2))
-        ego_reg_loss_mean = ego_reg_loss.mean()
-
-        ego_goal_loss = F.smooth_l1_loss(goal[torch.arange(trajectory.shape[0]), best_mode], ego_goal_target, reduction='none').mean()
-        ego_waypoints_loss = F.smooth_l1_loss(waypoints[torch.arange(trajectory.shape[0]), best_mode], ego_waypoints_target, reduction='none').mean()
+        # ego_goal_loss = F.smooth_l1_loss(goal[torch.arange(trajectory.shape[0]), best_mode], ego_goal_target, reduction='none').mean()
+        # ego_waypoints_loss = F.smooth_l1_loss(waypoints[torch.arange(trajectory.shape[0]), best_mode], ego_waypoints_target, reduction='none').mean()
         
         # 2. ego classification loss
         # if trajectory.shape[1] > self.model.num_modes: # means that the training is at antagonistic mask finetune stage
@@ -183,8 +174,33 @@ class LightningTrainer(pl.LightningModule):
             prediction[agent_mask], agent_target[agent_mask][:, :2]
         )
 
-        # loss = ego_reg_loss_mean + ego_cls_loss + agent_reg_loss
-        loss = ego_reg_loss_mean + ego_cls_loss + agent_reg_loss + ego_goal_loss + ego_waypoints_loss
+        loss = ego_reg_loss_mean + ego_cls_loss + agent_reg_loss
+
+        loss_dict = {
+            "loss": loss,
+            "reg_loss": ego_reg_loss_mean,
+            "cls_loss": ego_cls_loss,
+            "agent_reg_loss": agent_reg_loss,
+            # "ego_goal_loss": ego_goal_loss,
+            # "ego_waypoints_loss": ego_waypoints_loss,
+            
+            # "pretrain_loss": res["pretrain_loss"],
+            # "hist_loss": res["hist_loss"],
+            # "future_loss": res["future_loss"],
+            # "lane_pred_loss": res["lane_pred_loss"],
+            # "hist_rec_pred_loss": res["hist_rec_pred_loss"],
+            # "fut_rec_pred_loss": res["fut_rec_pred_loss"],
+            # "lane_rec_pred_loss": res["lane_rec_pred_loss"],
+            # "hard_ratio": res["hard_ratio"],
+        }
+
+        if "masked_trajectory" in res:
+            ego_reg_loss_masked, _, _ = self.winner_take_all_loss_cal(res["masked_trajectory"], ego_target)
+            masked_better_rate = (ego_reg_loss_masked < ego_reg_loss).float().mean()
+            average_advantage = (ego_reg_loss-ego_reg_loss_masked)[ego_reg_loss_masked < ego_reg_loss].mean()
+            loss_dict["masked_better_rate"] = masked_better_rate
+            loss_dict["average_advantage"] = average_advantage
+        # loss = ego_reg_loss_mean + ego_cls_loss + agent_reg_loss + ego_goal_loss + ego_waypoints_loss
         
         # if self.current_epoch < self.pretrain_epochs:
         #     loss = res["pretrain_loss"]
@@ -197,24 +213,18 @@ class LightningTrainer(pl.LightningModule):
         #     else: 
         #         loss = ego_reg_loss_mean + ego_cls_loss + agent_reg_loss
 
-        return {
-            "loss": loss,
-            "reg_loss": ego_reg_loss_mean,
-            "cls_loss": ego_cls_loss,
-            "agent_reg_loss": agent_reg_loss,
-            "ego_goal_loss": ego_goal_loss,
-            "ego_waypoints_loss": ego_waypoints_loss,
-            # "pretrain_loss": res["pretrain_loss"],
-            # "hist_loss": res["hist_loss"],
-            # "future_loss": res["future_loss"],
-            # "lane_pred_loss": res["lane_pred_loss"],
-            # "hist_rec_pred_loss": res["hist_rec_pred_loss"],
-            # "fut_rec_pred_loss": res["fut_rec_pred_loss"],
-            # "lane_rec_pred_loss": res["lane_rec_pred_loss"],
-            # "hard_ratio": res["hard_ratio"],
-        }
+        
+
+        return loss_dict
     
-    # def winner_take_all_loss_cal(self, trajectory, targets):
+    def winner_take_all_loss_cal(self, trajectory, ego_target):
+        # 1. ego regression coarse to fine loss
+        ade = torch.norm(trajectory[..., :2] - ego_target[:, None, :, :2], dim=-1).sum(-1)
+        best_mode = torch.argmin(ade, dim=-1) # [bs]
+        best_traj = trajectory[torch.arange(trajectory.shape[0]), best_mode]
+        ego_reg_loss = F.smooth_l1_loss(best_traj, ego_target, reduction='none').mean((1, 2))
+        ego_reg_loss_mean = ego_reg_loss.mean()
+        return ego_reg_loss, ego_reg_loss_mean, best_mode
         
 
     def _compute_metrics(self, output, data, prefix) -> Dict[str, torch.Tensor]:
