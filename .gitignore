@@ -161,3 +161,4 @@ wandb/
 outputs/
 *.ckpt
 checkpoints/
+debug_files/
