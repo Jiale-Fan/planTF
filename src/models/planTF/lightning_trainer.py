@@ -148,7 +148,7 @@ class LightningTrainer(pl.LightningModule):
         )
         # agent_target, agent_mask = targets[:, 1:], valid_mask[:, 1:]
 
-        ego_goal_target = ego_target[:, -1:, :] # [bs, 4]
+        ego_goal_target = ego_target[:, -1, :] # [bs, 4]
         ego_waypoints_target = ego_target[:, self.model.waypoints_interval-1::self.model.waypoints_interval, :] # [bs, 8, 4]
 
         # 1. ego regression coarse to fine loss
@@ -163,8 +163,8 @@ class LightningTrainer(pl.LightningModule):
         ego_reg_loss = F.smooth_l1_loss(best_traj, ego_target, reduction='none').mean((1, 2))
         ego_reg_loss_mean = ego_reg_loss.mean()
 
-        ego_goal_loss = F.smooth_l1_loss(goal[torch.arange(trajectory.shape[0]), best_mode], ego_goal_target, reduction='none').mean()
-        ego_waypoints_loss = F.smooth_l1_loss(waypoints[torch.arange(trajectory.shape[0]), best_mode], ego_waypoints_target, reduction='none').mean()
+        ego_goal_loss = F.smooth_l1_loss(goal, ego_goal_target, reduction='none').mean()
+        ego_waypoints_loss = F.smooth_l1_loss(waypoints, ego_waypoints_target, reduction='none').mean()
         
         # 2. ego classification loss
         # if trajectory.shape[1] > self.model.num_modes: # means that the training is at antagonistic mask finetune stage
@@ -178,7 +178,8 @@ class LightningTrainer(pl.LightningModule):
         ego_cls_loss = F.cross_entropy(probability, best_mode.detach())
 
         # 3. agent regression loss
-        agent_target, agent_mask = targets[:, 1:], valid_mask[:, 1:]
+        # agent_target, agent_mask = targets[:, 1:], valid_mask[:, 1:]
+        agent_target, agent_mask = targets, valid_mask
         agent_reg_loss = F.smooth_l1_loss(
             prediction[agent_mask], agent_target[agent_mask][:, :2]
         )

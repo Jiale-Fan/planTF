@@ -134,7 +134,8 @@ class PlanningModel(TorchModuleWrapper):
 
         self.TempoNet_frame_seed = nn.Parameter(torch.randn(dim))
         # self.rep_seed = nn.Parameter(torch.randn(out_channels, dim))
-        self.multimodal_seed = nn.Parameter(torch.randn(num_modes, dim))
+        # self.multimodal_seed = nn.Parameter(torch.randn(num_modes, dim))
+        self.ego_seed = nn.Parameter(torch.randn(dim))
 
         self.agent_projector = Projector(dim=dim, in_channels=8) # NOTE: make consistent to state_channel
         self.map_projector = Projector(dim=dim, in_channels=self.no_lane_segment_points*2+5) # NOTE: make consistent to polygon_channel
@@ -184,36 +185,36 @@ class PlanningModel(TorchModuleWrapper):
         # )
         
 
-        # self.trajectory_decoder = TrajectoryDecoder(
-        #     embed_dim=dim,
-        #     num_modes=num_modes,
-        #     future_steps=future_steps,
-        #     out_channels=4,
-        # )
+        self.trajectory_decoder = TrajectoryDecoder(
+            embed_dim=dim,
+            num_modes=num_modes,
+            future_steps=future_steps,
+            out_channels=4,
+        )
 
-        # self.cross_attender = nn.ModuleList(
-        #     torch.nn.MultiheadAttention(
-        #     dim,
-        #     num_heads=num_heads,
-        #     add_bias_kv=qkv_bias,
-        #     dropout=0.1,
-        #     batch_first=True,
-        #     )
-        #     for i in range(decoder_depth)
-        # )
-
-        self.coarse_to_fine_decoder = nn.ModuleList(
-            torch.nn.TransformerDecoderLayer(dim, 
-                                             num_heads, 
-                                             dim_feedforward=int(mlp_ratio*dim), 
-                                             dropout=0.1, 
-                                             activation="gelu", 
-                                             batch_first=True)
+        self.cross_attender = nn.ModuleList(
+            torch.nn.MultiheadAttention(
+            dim,
+            num_heads=num_heads,
+            add_bias_kv=qkv_bias,
+            dropout=0.1,
+            batch_first=True,
+            )
             for i in range(decoder_depth)
         )
 
-        self.trajectory_mlp = build_mlp(dim, [512, future_steps * out_channels], norm=None)
-        self.score_mlp = build_mlp(dim, [512, 1], norm=None)
+        # self.coarse_to_fine_decoder = nn.ModuleList(
+        #     torch.nn.TransformerDecoderLayer(dim, 
+        #                                      num_heads, 
+        #                                      dim_feedforward=int(mlp_ratio*dim), 
+        #                                      dropout=0.1, 
+        #                                      activation="gelu", 
+        #                                      batch_first=True)
+        #     for i in range(decoder_depth)
+        # )
+
+        # self.trajectory_mlp = build_mlp(dim, [512, future_steps * out_channels], norm=None)
+        # self.score_mlp = build_mlp(dim, [512, 1], norm=None)
 
         # coarse to fine planning
         self.goal_mlp = build_mlp(dim, [512, out_channels], norm=None)
@@ -246,7 +247,7 @@ class PlanningModel(TorchModuleWrapper):
                 self.map_projector, self.lane_pred, self.agent_frame_pred, self.SpaNet, self.norm, self.agent_predictor]
 
     def get_finetune_modules(self):
-        return [self.multimodal_seed, self.trajectory_mlp, self.score_mlp] # expander
+        return [self.ego_seed, self.trajectory_decoder, self.cross_attender, self.goal_mlp, self.waypoints_mlp] # expander
 
 
     def get_stage(self, current_epoch):
@@ -650,29 +651,25 @@ class PlanningModel(TorchModuleWrapper):
     def forward_finetune(self, data):
         bs, A = data["agent"]["heading"].shape[0:2]
         # x_orig, key_padding_mask = self.embed(data, torch.cat((self.plan_seed, self.rep_seed)))
-        x_orig, key_padding_mask, route_kpmask = self.embed(data, need_route_kpmask=True)
+        x_orig, key_padding_mask = self.embed(data, seeds=self.ego_seed, need_route_kpmask=False)
 
         x = x_orig 
         for blk in self.SpaNet:
             x = blk(x, key_padding_mask=key_padding_mask)
         x = self.norm(x)
 
-        mts = repeat(self.multimodal_seed, 'n d -> bs n d', bs=bs)
-        q = torch.cat([mts, x], dim=1)
-        tgt_key_padding_mask = torch.cat([torch.zeros((bs, self.num_modes), device=x.device, dtype=torch.bool), key_padding_mask], dim=1)
-        
-        q = self.coarse_to_fine_decoder[0](tgt=q, memory=x, tgt_key_padding_mask=tgt_key_padding_mask, memory_key_padding_mask=key_padding_mask)
-        goal = self.goal_mlp(q[:, :self.num_modes]).squeeze(1)
-        q = self.coarse_to_fine_decoder[0](tgt=q, memory=x, tgt_key_padding_mask=tgt_key_padding_mask, memory_key_padding_mask=key_padding_mask)
-        waypoints = self.waypoints_mlp(q[:, :self.num_modes]).view(bs, self.num_modes, self.future_steps//self.waypoints_interval, self.out_channels)
+        q = x[:, 0:1]
+
+        q, attn_weights = self.cross_attender[0](query=q, key=x[:, 1:], value=x[:, 1:], key_padding_mask=key_padding_mask[:, 1:], need_weights=True)
+        goal = self.goal_mlp(q).squeeze(1)
+        q, attn_weights = self.cross_attender[1](query=q, key=x[:, 1:], value=x[:, 1:], key_padding_mask=key_padding_mask[:, 1:], need_weights=True)
+        waypoints= self.waypoints_mlp(q).view(bs, self.future_steps//self.waypoints_interval, self.out_channels)
+        q, attn_weights = self.cross_attender[2](query=q, key=x[:, 1:], value=x[:, 1:], key_padding_mask=key_padding_mask[:, 1:], need_weights=True)
         # restrict the attention to the route only in the cross attender
         # q, attn_weights = blk(query=q, key=x, value=x, key_padding_mask=route_kpmask, need_weights=True) 
-        q_emb = q[:, :self.num_modes]
 
-        trajectory = self.trajectory_mlp(q_emb).view(bs, -1, self.future_steps, self.out_channels)
-        probability = self.score_mlp(q_emb).squeeze(-1)
-
-        prediction = self.agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2)
+        trajectory, probability = self.trajectory_decoder(q)
+        prediction = self.agent_predictor(x[:, 1:A+1]).view(bs, -1, self.future_steps, 2)
 
         out = {
             "trajectory": trajectory,
