@@ -73,6 +73,8 @@ class LightningTrainer(pl.LightningModule):
 
         if 'trajectory' in res and 'probability' in res:
             planning_loss = self._compute_objectives(res, features["feature"].data)
+            if res["trajectory"].dim() == 5:
+                res = {key: res[key][:, 0] for key in res.keys()}
             metrics = self._compute_metrics(res, features["feature"].data, prefix)
             res.update(planning_loss) 
 
@@ -122,32 +124,9 @@ class LightningTrainer(pl.LightningModule):
         logged_loss = {k: v for k, v in res.items() if v.dim() == 0}
         self._log_step(res["loss"], logged_loss, metrics, prefix)
         return res["loss"]
+    
 
-    def _compute_objectives(self, res, data) -> Dict[str, torch.Tensor]:
-        trajectory, probability, prediction= (
-            res["trajectory"], # [bs, N_mask*n_mode, n_steps, 4]
-            res["probability"], # [bs, N_mask*n_mode]
-            res["prediction"], # [bs, n_agents, n_steps, 2]
-        )
-
-        goal = res["goal"] # [bs, 1, 4]
-        waypoints = res["waypoints"] # [bs, 8, 4]
-
-        targets = data["agent"]["target"]
-        valid_mask = data["agent"]["valid_mask"][:, :, -trajectory.shape[-2] :]
-
-        ego_target_pos, ego_target_heading = targets[:, 0, :, :2], targets[:, 0, :, 2]
-        ego_target = torch.cat(
-            [
-                ego_target_pos,
-                torch.stack(
-                    [ego_target_heading.cos(), ego_target_heading.sin()], dim=-1
-                ),
-            ],
-            dim=-1,
-        )
-        # agent_target, agent_mask = targets[:, 1:], valid_mask[:, 1:]
-
+    def _cal_ego_loss_term(self, trajectory, probability, goal, waypoints, ego_target):
         ego_goal_target = ego_target[:, -1, :] # [bs, 4]
         ego_waypoints_target = ego_target[:, self.model.waypoints_interval-1::self.model.waypoints_interval, :] # [bs, 8, 4]
 
@@ -163,48 +142,96 @@ class LightningTrainer(pl.LightningModule):
         ego_reg_loss = F.smooth_l1_loss(best_traj, ego_target, reduction='none').mean((1, 2))
         ego_reg_loss_mean = ego_reg_loss.mean()
 
-        ego_goal_loss = F.smooth_l1_loss(goal, ego_goal_target, reduction='none').mean()
-        ego_waypoints_loss = F.smooth_l1_loss(waypoints, ego_waypoints_target, reduction='none').mean()
-        
-        # 2. ego classification loss
-        # if trajectory.shape[1] > self.model.num_modes: # means that the training is at antagonistic mask finetune stage
-        #     probability = probability.view(probability.shape[0], self.model.N_mask, self.model.num_modes)
-        #     best_mask = torch.div(best_mode.detach(), self.model.num_modes, rounding_mode='floor')
-        #     best_mode_reduced = best_mode % self.model.num_modes
-        #     ego_cls_loss = F.cross_entropy(probability[torch.arange(probability.shape[0]), best_mask.to(torch.long).detach().clone()], best_mode_reduced.detach())
-        # else:
-        #     ego_cls_loss = F.cross_entropy(probability, best_mode.detach())
+        ego_goal_loss = F.smooth_l1_loss(goal, ego_goal_target, reduction='none').mean(-1)
+        ego_waypoints_loss = F.smooth_l1_loss(waypoints, ego_waypoints_target, reduction='none').mean((1, 2))
+        ego_cls_loss = F.cross_entropy(probability, best_mode.detach(), reduction='none')
 
-        ego_cls_loss = F.cross_entropy(probability, best_mode.detach())
+        # loss = ego_reg_loss_mean + ego_cls_loss + agent_reg_loss
+        # ego_loss = ego_reg_loss_mean + ego_cls_loss + ego_goal_loss + ego_waypoints_loss
 
-        # 3. agent regression loss
+        return {
+            "reg_loss": ego_reg_loss, # [bs]
+            "cls_loss": ego_cls_loss, # [bs]
+            "ego_goal_loss": ego_goal_loss, # [bs]
+            "ego_waypoints_loss": ego_waypoints_loss, # [bs]
+        }
+
+
+    def _compute_objectives(self, res, data) -> Dict[str, torch.Tensor]:
+        trajectory, probability, prediction= (
+            res["trajectory"], # [bs, N_mask*n_mode, n_steps, 4]
+            res["probability"], # [bs, N_mask*n_mode]
+            res["prediction"], # [bs, n_agents, n_steps, 2]
+        )
+
+        goal = res["goal"] # [bs, 4]
+        waypoints = res["waypoints"] # [bs, 8, 4]
+
+
+        targets = data["agent"]["target"]
+        valid_mask = data["agent"]["valid_mask"][:, :, -trajectory.shape[-2] :]
+
+        ego_target_pos, ego_target_heading = targets[:, 0, :, :2], targets[:, 0, :, 2]
+        ego_target = torch.cat(
+            [
+                ego_target_pos,
+                torch.stack(
+                    [ego_target_heading.cos(), ego_target_heading.sin()], dim=-1
+                ),
+            ],
+            dim=-1,
+        )
         # agent_target, agent_mask = targets[:, 1:], valid_mask[:, 1:]
         agent_target, agent_mask = targets, valid_mask
         agent_reg_loss = F.smooth_l1_loss(
             prediction[agent_mask], agent_target[agent_mask][:, :2]
         )
 
-        # loss = ego_reg_loss_mean + ego_cls_loss + agent_reg_loss
-        loss = ego_reg_loss_mean + ego_cls_loss + agent_reg_loss + ego_goal_loss + ego_waypoints_loss
-        
-        # if self.current_epoch < self.pretrain_epochs:
-        #     loss = res["pretrain_loss"]
-        # else:
-        #     if not self.initial_finetune_flag:
-        #         self.model.initialize_finetune()
-        #         print("Initial finetune done")
-        #         loss = res["pretrain_loss"]
-        #         self.initial_finetune_flag = True
-        #     else: 
-        #         loss = ego_reg_loss_mean + ego_cls_loss + agent_reg_loss
-
-        return {
-            "loss": loss,
-            "reg_loss": ego_reg_loss_mean,
-            "cls_loss": ego_cls_loss,
+        if trajectory.dim() == 4:
+            ego_loss_dict = self._cal_ego_loss_term(trajectory, probability, goal, waypoints, ego_target)
+            ret_dict = {
+            "reg_loss": ego_loss_dict["reg_loss"].mean(), 
+            "cls_loss": ego_loss_dict["cls_loss"].mean(),
             "agent_reg_loss": agent_reg_loss,
-            "ego_goal_loss": ego_goal_loss,
-            "ego_waypoints_loss": ego_waypoints_loss,
+            "ego_goal_loss": ego_loss_dict["ego_goal_loss"].mean(),
+            "ego_waypoints_loss": ego_loss_dict["ego_waypoints_loss"].mean(),
+            }
+            loss = torch.mean(torch.stack([ret_dict[key] for key in ret_dict.keys()]))
+            ret_dict.update({"loss": loss})
+            return ret_dict
+
+        elif trajectory.dim() == 5:
+            score = res["score"] # [bs, n_element], score ranging from 0 to 1
+            masks = res["masks"] # [bs, N_mask, n_element], binary masks with False for valid elements
+
+            comparison_key = "reg_loss" # the key can be changed
+            ego_loss_dict_list = [self._cal_ego_loss_term(trajectory[:, i], probability[:, i], goal[:, i], waypoints[:, i], ego_target) for i in range(trajectory.shape[1])]
+            stacked_tensor_list = {key: torch.stack([ego_loss_dict[key] for ego_loss_dict in ego_loss_dict_list], dim=1) for key in ego_loss_dict_list[0].keys()}
+            better_mask = torch.argmin(stacked_tensor_list[comparison_key], dim=1) # [bs]
+            selected_losses = {key: torch.gather(stacked_tensor_list[key], 1, better_mask[:, None]) for key in stacked_tensor_list.keys()}
+            mean_loss_dict = {key: selected_losses[key].mean() for key in selected_losses.keys()}
+            mean_loss_dict.update({"agent_reg_loss": agent_reg_loss})
+
+            score_loss_1 = F.mse_loss(score, torch.where(better_mask == 0, 1.0, -1.0).unsqueeze(-1).repeat(1, score.shape[-1]), reduction='none')
+            score_loss_2 = F.mse_loss(score, torch.where(better_mask == 1, 1.0, -1.0).unsqueeze(-1).repeat(1, score.shape[-1]), reduction='none')
+            score_loss = score_loss_1[~masks[:, 0]].mean() + score_loss_2[~masks[:, 1]].mean()
+            mean_loss_dict.update({"score_loss": score_loss, "0_better_ratio": (better_mask == 0).float().mean()})
+
+            mean_loss_dict.update({"loss": torch.mean(torch.stack([mean_loss_dict[key] for key in mean_loss_dict.keys()]))})
+            mean_loss_dict.update({"0_better_ratio": (better_mask == 0).float().sum()})
+            return mean_loss_dict
+        else: 
+            raise ValueError("trajectory dim should be 4 or 5")
+
+        
+
+        # return {
+        #     "loss": loss,
+        #     "reg_loss": ego_reg_loss_mean,
+        #     "cls_loss": ego_cls_loss,
+        #     "agent_reg_loss": agent_reg_loss,
+        #     "ego_goal_loss": ego_goal_loss,
+        #     "ego_waypoints_loss": ego_waypoints_loss,
             # "pretrain_loss": res["pretrain_loss"],
             # "hist_loss": res["hist_loss"],
             # "future_loss": res["future_loss"],
@@ -213,7 +240,7 @@ class LightningTrainer(pl.LightningModule):
             # "fut_rec_pred_loss": res["fut_rec_pred_loss"],
             # "lane_rec_pred_loss": res["lane_rec_pred_loss"],
             # "hard_ratio": res["hard_ratio"],
-        }
+        # }
     
     # def winner_take_all_loss_cal(self, trajectory, targets):
         
