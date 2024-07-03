@@ -81,7 +81,7 @@ class PlanningModel(TorchModuleWrapper):
         lane_mask_ratio=0.5,
         trajectory_mask_ratio=0.7,
         # pretrain_epoch_stages = [0, 10, 20, 25, 30, 35], # SEPT, ft, ant, ft, ant, ft
-        pretrain_epoch_stages = [0, 10],
+        pretrain_epoch_stages = [0, 0],
         lane_split_threshold=20,
         alpha=0.999,
         expanded_dim = 256*8,
@@ -565,7 +565,7 @@ class PlanningModel(TorchModuleWrapper):
         tail_pred_mask = tail_mask & frame_valid_mask
         tail_pred_loss = F.smooth_l1_loss(
             tail_prediction[tail_pred_mask[:, :, self.history_steps:]], agent_features[tail_pred_mask][..., :2]
-        )
+        ) # !!! for several runs, reports "illegal memory access" after several epochs of training
 
         out = {
             "MRM_loss": lane_pred_loss,
