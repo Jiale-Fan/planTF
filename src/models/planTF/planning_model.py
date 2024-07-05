@@ -77,11 +77,11 @@ class PlanningModel(TorchModuleWrapper):
         state_dropout=0.75,
         mlp_ratio=4.0,
         qkv_bias=False,
-        total_epochs=30,
+        total_epochs=35,
         lane_mask_ratio=0.5,
         trajectory_mask_ratio=0.7,
         # pretrain_epoch_stages = [0, 10, 20, 25, 30, 35], # SEPT, ft, ant, ft, ant, ft
-        pretrain_epoch_stages = [0, 0, 10],
+        pretrain_epoch_stages = [0, 0, 10, 20],
         lane_split_threshold=20,
         alpha=0.999,
         expanded_dim = 256*8,
@@ -283,7 +283,7 @@ class PlanningModel(TorchModuleWrapper):
         if current_epoch is None: # when inference
             # return self.forward_pretrain_separate(data)
             # return self.forward_finetune(data)
-            return self.forward_antagonistic_mask_finetune(data)
+            return self.forward_antagonistic_mask_finetune(data, current_epoch)
         else:
             stage = self.get_stage(current_epoch)
             if stage == Stage.PRETRAIN_SEP:
@@ -296,7 +296,7 @@ class PlanningModel(TorchModuleWrapper):
             elif stage == Stage.FINETUNE:
                 return self.forward_finetune(data)
             elif stage == Stage.ANT_MASK_FINETUNE:
-                return self.forward_antagonistic_mask_finetune(data)
+                return self.forward_antagonistic_mask_finetune(data, current_epoch)
             else:
                 raise NotImplementedError(f"Stage {stage} is not implemented.")
 
@@ -623,7 +623,7 @@ class PlanningModel(TorchModuleWrapper):
     #     assert ((~masks).sum(0) == ~key_padding_mask).all()
         
     #     return masks
-    def generate_antagonistic_masks(self, key_padding_mask, score=None):
+    def generate_antagonistic_masks(self, key_padding_mask, random_ratio, score=None):
         '''
         This function generates 2 antagonistic masks. 
         All the masks belong to one set should sum up to the key_padding_mask corresponding to that scene. 
@@ -632,30 +632,44 @@ class PlanningModel(TorchModuleWrapper):
         key_padding_mask: (B, N, M)
         '''
 
-        if score == None:
-            score = torch.rand(key_padding_mask.shape, device=key_padding_mask.device) # range: [0, 1)
-            score[key_padding_mask] = -2 # later when sorting, the masked values will be put at the end
-        else:
-            assert score.shape == key_padding_mask.shape
-            score[key_padding_mask] = -2 # score's range is (-1, 1). later when sorting, the masked values will be put at the end
+        # if random_ratio == 1.0:
+        #     rand_score = torch.rand(key_padding_mask.shape, device=key_padding_mask.device) # range: [0, 1)
+        #     rand_score[key_padding_mask] = -2 # later when sorting, the masked values will be put at the end
+        # else:
+        #     assert score.shape == key_padding_mask.shape
+        #     score[key_padding_mask] = -2 # score's range is (-1, 1). later when sorting, the masked values will be put at the end
+
+        # firstly, generate a mask with random_ratio preserved values randomly
+
+        rand_score = torch.rand(key_padding_mask.shape, device=key_padding_mask.device) # range: [0, 1)
+        rand_score[key_padding_mask] = -2 # later when sorting, the masked values will be put at the end
 
         valid_num = (~key_padding_mask).sum(-1)
+        random_elem_num = torch.floor(valid_num * random_ratio * 0.5).to(torch.int)
+        score_based_elem_num = torch.floor(valid_num * 0.5).to(torch.int) - random_elem_num
         
-        randidx = torch.argsort(score, dim=-1, descending=True) # from high score to low score
+        randidx = torch.argsort(rand_score, dim=-1, descending=True) # from high score to low score
 
-        masks = torch.ones((key_padding_mask.shape[0], self.N_mask, key_padding_mask.shape[1]), device=key_padding_mask.device, dtype=torch.bool)
+        random_mask = torch.ones((key_padding_mask.shape[0], key_padding_mask.shape[1]), device=key_padding_mask.device, dtype=torch.bool)
 
         for i in range(key_padding_mask.shape[0]):
-            if valid_num[i]>=2:
-                masks[i, 0, randidx[i, :valid_num[i]//2]] = False
-                masks[i, 1, randidx[i, valid_num[i]//2:valid_num[i]]] = False
-            else:
-                print('There exists a scene that contains less than 2 valid values')
-                masks[i, 0, randidx[i, 0]] = False
-                masks[i, 1, randidx[i, 0]] = False
+            random_mask[i, randidx[i, :random_elem_num[i]]] = False
 
+        remaining_valid_padding_mask = ~((~key_padding_mask) & random_mask)
+        score[remaining_valid_padding_mask] = -2 # score's range is (-1, 1). later when sorting, the masked values will be put at the end
+        score_ranked_idx = torch.argsort(score, dim=-1, descending=True) # from high score to low score
+
+        score_mask = torch.ones((key_padding_mask.shape[0], key_padding_mask.shape[1]), device=key_padding_mask.device, dtype=torch.bool)
+        for i in range(key_padding_mask.shape[0]):
+            score_mask[i, score_ranked_idx[i, :score_based_elem_num[i]]] = False
+
+        mask_0 = random_mask & score_mask
+        mask_1 = ~((~key_padding_mask) & mask_0)
+
+        mask_pair = torch.stack([mask_0, mask_1], dim=1)
+            
         # masks[:,:,0] = False # keep the ego query always
-        assert ((~masks).sum(1) == ~key_padding_mask).all() # all sum up to 1
+        assert ((~mask_pair).sum(1) == ~key_padding_mask).all() # all sum up to 1
 
         # the following part will cause CUDA assert error and is not necessary in principle
         # if not (~masks).sum(-1).all():
@@ -665,7 +679,7 @@ class PlanningModel(TorchModuleWrapper):
         #         masks[problem_pos[i]] = key_padding_mask_sliced[problem_pos[i,-1]] # keep the original key_padding_mask
         #     print('Successfully dealt')
         
-        return masks
+        return mask_pair
 
     def forward_finetune(self, data):
         bs, A = data["agent"]["heading"].shape[0:2]
@@ -716,7 +730,13 @@ class PlanningModel(TorchModuleWrapper):
         return out
 
 
-    def forward_antagonistic_mask_finetune(self, data):
+    def forward_antagonistic_mask_finetune(self, data, current_epoch=None):
+
+        if current_epoch is None: 
+            random_ratio = 0.0
+        else:
+            random_ratio = 1-(current_epoch-self.pretrain_epoch_stages[2])/(self.pretrain_epoch_stages[3]-self.pretrain_epoch_stages[2])
+            random_ratio = max(random_ratio, 0.0)
         
 
         bs, A = data["agent"]["heading"].shape[0:2]
@@ -730,7 +750,7 @@ class PlanningModel(TorchModuleWrapper):
         prediction = self.agent_predictor(x[:, 1:A+1]).view(bs, -1, self.future_steps, 2)
         score = self.score_mlp(x[:, 1:]).squeeze(-1)
 
-        masks_3d = self.generate_antagonistic_masks(key_padding_mask[:, 1:], score.detach().clone()) # B, N_mask, M
+        masks_3d = self.generate_antagonistic_masks(key_padding_mask[:, 1:], random_ratio, score.detach().clone()) # B, N_mask, M
         masks = rearrange(masks_3d, 'b n m -> (b n) m')
         
         x_m = repeat(x[:, 1:], 'b m d -> (b n) m d', n=self.N_mask)
