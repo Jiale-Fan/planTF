@@ -81,7 +81,7 @@ class PlanningModel(TorchModuleWrapper):
         lane_mask_ratio=0.5,
         trajectory_mask_ratio=0.7,
         # pretrain_epoch_stages = [0, 10, 20, 25, 30, 35], # SEPT, ft, ant, ft, ant, ft
-        pretrain_epoch_stages = [0, 10],
+        pretrain_epoch_stages = [0, 0, 10],
         lane_split_threshold=20,
         alpha=0.999,
         expanded_dim = 256*8,
@@ -258,7 +258,7 @@ class PlanningModel(TorchModuleWrapper):
 
     def get_stage(self, current_epoch):
         # return Stage.ANT_MASK_FINETUNE
-        if current_epoch < self.pretrain_epoch_stages[1]:
+        if current_epoch < self.pretrain_epoch_stages[2]:
             return Stage.FINETUNE
         # elif current_epoch < self.pretrain_epoch_stages[2]:
         #     if not self.flag_teacher_init:
