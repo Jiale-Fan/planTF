@@ -219,6 +219,7 @@ class LightningTrainer(pl.LightningModule):
 
             mean_loss_dict.update({"loss": torch.mean(torch.stack([mean_loss_dict[key] for key in mean_loss_dict.keys()]))})
             mean_loss_dict.update({"0_better_ratio": (better_mask == 0).float().sum()})
+            mean_loss_dict.update({"sup_better_ratio": (better_mask == 0).float().mean()})
             return mean_loss_dict
         else: 
             raise ValueError("trajectory dim should be 4 or 5")
