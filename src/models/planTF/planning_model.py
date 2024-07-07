@@ -736,7 +736,7 @@ class PlanningModel(TorchModuleWrapper):
             random_ratio = 0.0
         else:
             random_ratio = 1-(current_epoch-self.pretrain_epoch_stages[2])/10
-            random_ratio = max(random_ratio, 0.0)
+            random_ratio = max(random_ratio, 0.2)
         
 
         bs, A = data["agent"]["heading"].shape[0:2]
