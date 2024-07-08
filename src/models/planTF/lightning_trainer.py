@@ -196,7 +196,8 @@ class LightningTrainer(pl.LightningModule):
             "ego_goal_loss": ego_loss_dict["ego_goal_loss"].mean(),
             "ego_waypoints_loss": ego_loss_dict["ego_waypoints_loss"].mean(),
             }
-            loss = torch.mean(torch.stack([ret_dict[key] for key in ret_dict.keys()]))
+            # loss = torch.mean(torch.stack([ret_dict[key] for key in ret_dict.keys()]))
+            loss = torch.mean(torch.stack([ret_dict[key] for key in ["reg_loss", "cls_loss", "agent_reg_loss"]]))
             ret_dict.update({"loss": loss})
             return ret_dict
 

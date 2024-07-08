@@ -257,7 +257,7 @@ class PlanningModel(TorchModuleWrapper):
 
 
     def get_stage(self, current_epoch):
-        # return Stage.ANT_MASK_FINETUNE
+        return Stage.FINETUNE
         if current_epoch < self.pretrain_epoch_stages[2]:
             return Stage.FINETUNE
         # elif current_epoch < self.pretrain_epoch_stages[2]:
@@ -587,11 +587,11 @@ class PlanningModel(TorchModuleWrapper):
         i = 0
         map_features, polygon_mask, polygon_key_padding = self.extract_map_feature(data)
         agent_features, agent_mask, agent_key_padding = self.extract_agent_feature(data, include_future=False)
-        assert agent_features.shape[1]+map_features.shape[1] == attn_weights.shape[1]-(1+self.out_channels)
+        assert agent_features.shape[1]+map_features.shape[1] == attn_weights.shape[1]
         map_points = map_features[i][..., :40]
         map_points_reshape = map_points.reshape(map_points.shape[0], -1, 2)
-        plot_scene_attention(agent_features[i], agent_mask[i], map_points_reshape, attn_weights[i, (1+self.out_channels):],
-                             key_padding_mask[i, (1+self.out_channels):], 
+        plot_scene_attention(agent_features[i], agent_mask[i], map_points_reshape, attn_weights[i],
+                             key_padding_mask[i, 1:], 
                               output_trajectory[i], filename=self.inference_counter, prefix=k)
         
 
@@ -803,11 +803,14 @@ class PlanningModel(TorchModuleWrapper):
 
 
 
-        # attention visualization
-        if False:
-            attn_weights = self.SpaNet[-1].attn_mat[:, 0].detach()
+        # score visualization
+        if True:
+            # attn_weights = self.SpaNet[-1].attn_mat[:, 0].detach()
             # visualize the scene using the attention weights
-            self.plot_scene_attention(data, attn_weights, output_trajectory, key_padding_mask, 0)
+            assert bs == 1
+            sorted_score, sorted_idx = torch.sort(score[0], descending=True)
+            score[0, sorted_idx[sorted_idx.shape[0]//2:]] = 0
+            self.plot_scene_attention(data, score, output_trajectory, key_padding_mask, 0)
             self.inference_counter += 1
 
         return out
