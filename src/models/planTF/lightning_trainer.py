@@ -32,6 +32,7 @@ class LightningTrainer(pl.LightningModule):
         epochs,
         warmup_epochs,
         pretrain_epochs = 10,
+        temperature = 0.7,
     ) -> None:
         super().__init__()
         self.save_hyperparameters(ignore=["model"])
@@ -42,6 +43,7 @@ class LightningTrainer(pl.LightningModule):
         self.epochs = epochs
         self.warmup_epochs = warmup_epochs
         self.pretrain_epochs = pretrain_epochs
+        self.temperature = temperature
 
         self.automatic_optimization=False
 
@@ -190,14 +192,17 @@ class LightningTrainer(pl.LightningModule):
         if trajectory.dim() == 4:
             ego_loss_dict = self._cal_ego_loss_term(trajectory, probability, goal, waypoints, ego_target)
             ret_dict = {
-            "reg_loss": ego_loss_dict["reg_loss"].mean(), 
-            "cls_loss": ego_loss_dict["cls_loss"].mean(),
+            "reg_loss": ego_loss_dict["reg_loss"], 
+            "cls_loss": ego_loss_dict["cls_loss"],
             "agent_reg_loss": agent_reg_loss,
-            "ego_goal_loss": ego_loss_dict["ego_goal_loss"].mean(),
-            "ego_waypoints_loss": ego_loss_dict["ego_waypoints_loss"].mean(),
+            "ego_goal_loss": ego_loss_dict["ego_goal_loss"],
+            "ego_waypoints_loss": ego_loss_dict["ego_waypoints_loss"],
             }
             # loss = torch.mean(torch.stack([ret_dict[key] for key in ret_dict.keys()]))
-            loss = torch.mean(torch.stack([ret_dict[key] for key in ["reg_loss", "cls_loss", "agent_reg_loss"]]))
+            loss_mat = torch.stack([ret_dict[key] for key in ["reg_loss", "cls_loss", "ego_goal_loss", "ego_waypoints_loss"]], dim=1) # [bs, 4]
+            reg_loss_normed = (ret_dict["reg_loss"] - ret_dict["reg_loss"].min()) / (ret_dict["reg_loss"].max() - ret_dict["reg_loss"].min() + 1e-6) # [bs]
+            scale = torch.exp(reg_loss_normed/self.temperature) # [bs]
+            loss = (loss_mat.mean(-1) * scale).mean() + agent_reg_loss
             ret_dict.update({"loss": loss})
             return ret_dict
 
