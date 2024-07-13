@@ -201,7 +201,7 @@ class LightningTrainer(pl.LightningModule):
             # loss = torch.mean(torch.stack([ret_dict[key] for key in ret_dict.keys()]))
             loss_mat = torch.stack([ret_dict[key] for key in ["reg_loss", "cls_loss", "ego_goal_loss", "ego_waypoints_loss"]], dim=1) # [bs, 4]
             reg_loss_normed = (ret_dict["reg_loss"] - ret_dict["reg_loss"].min()) / (ret_dict["reg_loss"].max() - ret_dict["reg_loss"].min() + 1e-6) # [bs]
-            scale = torch.exp(reg_loss_normed/self.temperature) # [bs]
+            scale = torch.exp(reg_loss_normed/self.temperature).detach().clone() # [bs]
             loss = (loss_mat.mean(-1) * scale).mean() + agent_reg_loss
             ret_dict.update({"loss": loss})
             return ret_dict
