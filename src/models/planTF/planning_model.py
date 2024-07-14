@@ -36,8 +36,9 @@ class Stage(Enum):
     PRETRAIN_SEP = 0
     PRETRAIN_MIX = 1
     PRETRAIN_REPRESENTATION = 2
-    FINETUNE = 3
-    ANT_MASK_FINETUNE = 4
+    FULL_ENCODER = 3
+    CROSS_ATTENDER = 4
+    ANT_MASK_FINETUNE = 5
 
 class PositionalEncoding(nn.Module):
 
@@ -81,7 +82,7 @@ class PlanningModel(TorchModuleWrapper):
         lane_mask_ratio=0.5,
         trajectory_mask_ratio=0.7,
         # pretrain_epoch_stages = [0, 10, 20, 25, 30, 35], # SEPT, ft, ant, ft, ant, ft
-        pretrain_epoch_stages = [0, 0, ],
+        pretrain_epoch_stages = [0, 0, 10],
         lane_split_threshold=20,
         alpha=0.999,
         expanded_dim = 256*8,
@@ -217,8 +218,8 @@ class PlanningModel(TorchModuleWrapper):
         # self.score_mlp = build_mlp(dim, [512, 1], norm=None)
 
         # coarse to fine planning
-        self.goal_mlp = build_mlp(dim, [512, out_channels], norm=None)
-        self.waypoints_mlp = build_mlp(dim, [512, future_steps//waypoints_interval*out_channels], norm=None)
+        # self.goal_mlp = build_mlp(dim, [512, out_channels], norm=None)
+        # self.waypoints_mlp = build_mlp(dim, [512, future_steps//waypoints_interval*out_channels], norm=None)
         self.score_mlp = nn.Sequential(
             nn.Linear(dim, 512),
             nn.ReLU(),
@@ -253,13 +254,13 @@ class PlanningModel(TorchModuleWrapper):
                 self.map_projector, self.lane_pred, self.agent_frame_pred, self.SpaNet, self.norm, self.agent_predictor]
 
     def get_finetune_modules(self):
-        return [self.ego_seed, self.trajectory_decoder, self.cross_attender, self.goal_mlp, self.waypoints_mlp] # expander
+        return [self.ego_seed, self.trajectory_decoder, self.cross_attender] # expander
 
 
     def get_stage(self, current_epoch):
-        return Stage.FINETUNE
+        # return Stage.FINETUNE
         if current_epoch < self.pretrain_epoch_stages[2]:
-            return Stage.FINETUNE
+            return Stage.FULL_ENCODER
         # elif current_epoch < self.pretrain_epoch_stages[2]:
         #     if not self.flag_teacher_init:
         #         self.initialize_teacher()
@@ -274,7 +275,8 @@ class PlanningModel(TorchModuleWrapper):
         # elif current_epoch < self.pretrain_epoch_stages[5]:
         #     return Stage.ANT_MASK_FINETUNE
         else:
-            return Stage.ANT_MASK_FINETUNE
+            # return Stage.ANT_MASK_FINETUNE
+            return Stage.CROSS_ATTENDER
         
         # for debugging
         
@@ -293,7 +295,7 @@ class PlanningModel(TorchModuleWrapper):
             elif stage == Stage.PRETRAIN_REPRESENTATION:
                 # self.EMA_update() # currently this is done in lightning_trainer.py
                 return self.forward_pretrain_representation(data)
-            elif stage == Stage.FINETUNE:
+            elif stage == Stage.FULL_ENCODER or stage==Stage.CROSS_ATTENDER:
                 return self.forward_finetune(data)
             elif stage == Stage.ANT_MASK_FINETUNE:
                 return self.forward_antagonistic_mask_finetune(data, current_epoch)
@@ -691,25 +693,30 @@ class PlanningModel(TorchModuleWrapper):
             x = blk(x, key_padding_mask=key_padding_mask)
         x = self.norm(x)
 
-        q = x[:, 0:1]
+        prediction = self.agent_predictor(x[:, 1:A+1]).view(bs, -1, self.future_steps, 2)
 
+        q = x[:, 0:1]
+        x = x_orig
+        trajectory_0, probability_0 = self.trajectory_decoder(q)
         q, attn_weights = self.cross_attender[0](query=q, key=x[:, 1:], value=x[:, 1:], key_padding_mask=key_padding_mask[:, 1:], need_weights=True)
-        goal = self.goal_mlp(q).squeeze(1)
+        trajectory_1, probability_1 = self.trajectory_decoder(q)
         q, attn_weights = self.cross_attender[1](query=q, key=x[:, 1:], value=x[:, 1:], key_padding_mask=key_padding_mask[:, 1:], need_weights=True)
-        waypoints= self.waypoints_mlp(q).view(bs, self.future_steps//self.waypoints_interval, self.out_channels)
+        trajectory_2, probability_2 = self.trajectory_decoder(q)
         q, attn_weights = self.cross_attender[2](query=q, key=x[:, 1:], value=x[:, 1:], key_padding_mask=key_padding_mask[:, 1:], need_weights=True)
         # restrict the attention to the route only in the cross attender
         # q, attn_weights = blk(query=q, key=x, value=x, key_padding_mask=route_kpmask, need_weights=True) 
 
         trajectory, probability = self.trajectory_decoder(q)
-        prediction = self.agent_predictor(x[:, 1:A+1]).view(bs, -1, self.future_steps, 2)
 
+        trajectory_all = torch.stack([trajectory_0, trajectory_1, trajectory_2, trajectory], dim=1)
+        probability_all = torch.stack([probability_0, probability_1, probability_2, probability], dim=1)
+        
         out = {
             "trajectory": trajectory,
             "probability": probability,
             "prediction": prediction,
-            "goal": goal,
-            "waypoints": waypoints,
+            "trajectory_all": trajectory_all,
+            "probability_all": probability_all,
         }
 
         if not self.training:

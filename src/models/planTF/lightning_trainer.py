@@ -33,6 +33,7 @@ class LightningTrainer(pl.LightningModule):
         warmup_epochs,
         pretrain_epochs = 10,
         temperature = 0.7,
+        scaling = False,
     ) -> None:
         super().__init__()
         self.save_hyperparameters(ignore=["model"])
@@ -44,10 +45,12 @@ class LightningTrainer(pl.LightningModule):
         self.warmup_epochs = warmup_epochs
         self.pretrain_epochs = pretrain_epochs
         self.temperature = temperature
+        self.scaling = scaling
 
         self.automatic_optimization=False
 
         self.initial_finetune_flag = False
+
 
     def on_fit_start(self) -> None:
         metrics_collection = MetricCollection(
@@ -107,7 +110,7 @@ class LightningTrainer(pl.LightningModule):
                 
                 self.model.EMA_update() # update the teacher model with EMA
 
-            elif self.model.get_stage(self.current_epoch) == Stage.FINETUNE or self.model.get_stage(self.current_epoch) == Stage.ANT_MASK_FINETUNE: 
+            elif self.model.get_stage(self.current_epoch) == Stage.FULL_ENCODER or self.model.get_stage(self.current_epoch) == Stage.ANT_MASK_FINETUNE: 
                 opt_pre.zero_grad()
                 opt_fine.zero_grad()
                 self.manual_backward(res["loss"])
@@ -128,7 +131,7 @@ class LightningTrainer(pl.LightningModule):
         return res["loss"]
     
 
-    def _cal_ego_loss_term(self, trajectory, probability, goal, waypoints, ego_target):
+    def _cal_ego_loss_term_goal_wp(self, trajectory, probability, goal, waypoints, ego_target):
         ego_goal_target = ego_target[:, -1, :] # [bs, 4]
         ego_waypoints_target = ego_target[:, self.model.waypoints_interval-1::self.model.waypoints_interval, :] # [bs, 8, 4]
 
@@ -157,6 +160,30 @@ class LightningTrainer(pl.LightningModule):
             "ego_goal_loss": ego_goal_loss, # [bs]
             "ego_waypoints_loss": ego_waypoints_loss, # [bs]
         }
+    
+    def _cal_ego_loss_term(self, trajectory, probability, ego_target):
+        # 1. ego regression coarse to fine loss
+        ade = torch.norm(trajectory[..., :2] - ego_target[:, None, :, :2], dim=-1).sum(-1)
+        ade = torch.where(ade.isnan(), torch.inf, ade) 
+        # !!! this is to prevent nan trajectories triggered by the antagonistic masks.
+        # we can do this because if one antagonistic mask is all zeros, the other would be full of ones
+        # but this may interfere with identifying nan problems at other stages
+
+        best_mode = torch.argmin(ade, dim=-1) # [bs]
+        best_traj = trajectory[torch.arange(trajectory.shape[0]), best_mode]
+        ego_reg_loss = F.smooth_l1_loss(best_traj, ego_target, reduction='none').mean((1, 2))
+        # ego_reg_loss_mean = ego_reg_loss.mean()
+
+        ego_cls_loss = F.cross_entropy(probability, best_mode.detach(), reduction='none')
+
+        # loss = ego_reg_loss_mean + ego_cls_loss + agent_reg_loss
+        # ego_loss = ego_reg_loss_mean + ego_cls_loss + ego_goal_loss + ego_waypoints_loss
+
+        return {
+            "reg_loss": ego_reg_loss, # [bs]
+            "cls_loss": ego_cls_loss, # [bs]
+        }
+
 
 
     def _compute_objectives(self, res, data) -> Dict[str, torch.Tensor]:
@@ -189,8 +216,27 @@ class LightningTrainer(pl.LightningModule):
             prediction[agent_mask], agent_target[agent_mask][:, :2]
         )
 
+        # if trajectory.dim() == 4:
+        #     ego_loss_dict = self._cal_ego_loss_term_goal_wp(trajectory, probability, goal, waypoints, ego_target)
+        #     ret_dict = {
+        #     "reg_loss": ego_loss_dict["reg_loss"], 
+        #     "cls_loss": ego_loss_dict["cls_loss"],
+        #     "agent_reg_loss": agent_reg_loss,
+        #     "ego_goal_loss": ego_loss_dict["ego_goal_loss"],
+        #     "ego_waypoints_loss": ego_loss_dict["ego_waypoints_loss"],
+        #     }
+        #     # loss = torch.mean(torch.stack([ret_dict[key] for key in ret_dict.keys()]))
+        #     loss_mat = torch.stack([ret_dict[key] for key in ["reg_loss", "cls_loss", "ego_goal_loss", "ego_waypoints_loss"]], dim=1) # [bs, 4]
+        #     if self.scaling == True:
+        #         reg_loss_normed = (ret_dict["reg_loss"] - ret_dict["reg_loss"].min()) / (ret_dict["reg_loss"].max() - ret_dict["reg_loss"].min() + 1e-6) # [bs]
+        #         scale = torch.exp(reg_loss_normed/self.temperature).detach().clone() # [bs]
+        #         loss = (loss_mat.mean(-1) * scale).mean() + agent_reg_loss
+        #     else:
+        #         loss = loss_mat.mean() + agent_reg_loss
+        #     ret_dict.update({"loss": loss})
+        #     return ret_dict
         if trajectory.dim() == 4:
-            ego_loss_dict = self._cal_ego_loss_term(trajectory, probability, goal, waypoints, ego_target)
+            ego_loss_dict = self._cal_ego_loss_term(trajectory, probability, ego_target)
             ret_dict = {
             "reg_loss": ego_loss_dict["reg_loss"], 
             "cls_loss": ego_loss_dict["cls_loss"],
@@ -200,18 +246,22 @@ class LightningTrainer(pl.LightningModule):
             }
             # loss = torch.mean(torch.stack([ret_dict[key] for key in ret_dict.keys()]))
             loss_mat = torch.stack([ret_dict[key] for key in ["reg_loss", "cls_loss", "ego_goal_loss", "ego_waypoints_loss"]], dim=1) # [bs, 4]
-            reg_loss_normed = (ret_dict["reg_loss"] - ret_dict["reg_loss"].min()) / (ret_dict["reg_loss"].max() - ret_dict["reg_loss"].min() + 1e-6) # [bs]
-            scale = torch.exp(reg_loss_normed/self.temperature).detach().clone() # [bs]
-            loss = (loss_mat.mean(-1) * scale).mean() + agent_reg_loss
+            if self.scaling == True:
+                reg_loss_normed = (ret_dict["reg_loss"] - ret_dict["reg_loss"].min()) / (ret_dict["reg_loss"].max() - ret_dict["reg_loss"].min() + 1e-6) # [bs]
+                scale = torch.exp(reg_loss_normed/self.temperature).detach().clone() # [bs]
+                loss = (loss_mat.mean(-1) * scale).mean() + agent_reg_loss
+            else:
+                loss = loss_mat.mean() + agent_reg_loss
             ret_dict.update({"loss": loss})
             return ret_dict
+
 
         elif trajectory.dim() == 5:
             score = res["score"] # [bs, n_element], score ranging from 0 to 1
             masks = res["masks"] # [bs, N_mask, n_element], binary masks with False for valid elements
 
             comparison_key = "reg_loss" # the key can be changed
-            ego_loss_dict_list = [self._cal_ego_loss_term(trajectory[:, i], probability[:, i], goal[:, i], waypoints[:, i], ego_target) for i in range(trajectory.shape[1])]
+            ego_loss_dict_list = [self._cal_ego_loss_term_goal_wp(trajectory[:, i], probability[:, i], goal[:, i], waypoints[:, i], ego_target) for i in range(trajectory.shape[1])]
             stacked_tensor_list = {key: torch.stack([ego_loss_dict[key] for ego_loss_dict in ego_loss_dict_list], dim=1) for key in ego_loss_dict_list[0].keys()}
             better_mask = torch.argmin(stacked_tensor_list[comparison_key], dim=1) # [bs]
             selected_losses = {key: torch.gather(stacked_tensor_list[key], 1, better_mask[:, None]) for key in stacked_tensor_list.keys()}
