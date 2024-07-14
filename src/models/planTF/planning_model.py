@@ -36,7 +36,7 @@ class Stage(Enum):
     PRETRAIN_SEP = 0
     PRETRAIN_MIX = 1
     PRETRAIN_REPRESENTATION = 2
-    FULL_ENCODER = 3
+    FINETUNE = 3
     CROSS_ATTENDER = 4
     ANT_MASK_FINETUNE = 5
 
@@ -82,7 +82,7 @@ class PlanningModel(TorchModuleWrapper):
         lane_mask_ratio=0.5,
         trajectory_mask_ratio=0.7,
         # pretrain_epoch_stages = [0, 10, 20, 25, 30, 35], # SEPT, ft, ant, ft, ant, ft
-        pretrain_epoch_stages = [0, 0, 10],
+        pretrain_epoch_stages = [0, 0, ],
         lane_split_threshold=20,
         alpha=0.999,
         expanded_dim = 256*8,
@@ -258,9 +258,9 @@ class PlanningModel(TorchModuleWrapper):
 
 
     def get_stage(self, current_epoch):
-        # return Stage.FINETUNE
+        return Stage.FINETUNE
         if current_epoch < self.pretrain_epoch_stages[2]:
-            return Stage.FULL_ENCODER
+            return Stage.FINETUNE
         # elif current_epoch < self.pretrain_epoch_stages[2]:
         #     if not self.flag_teacher_init:
         #         self.initialize_teacher()
@@ -295,7 +295,7 @@ class PlanningModel(TorchModuleWrapper):
             elif stage == Stage.PRETRAIN_REPRESENTATION:
                 # self.EMA_update() # currently this is done in lightning_trainer.py
                 return self.forward_pretrain_representation(data)
-            elif stage == Stage.FULL_ENCODER or stage==Stage.CROSS_ATTENDER:
+            elif stage == Stage.FINETUNE:
                 return self.forward_finetune(data)
             elif stage == Stage.ANT_MASK_FINETUNE:
                 return self.forward_antagonistic_mask_finetune(data, current_epoch)

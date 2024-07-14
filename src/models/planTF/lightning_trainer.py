@@ -110,7 +110,9 @@ class LightningTrainer(pl.LightningModule):
                 
                 self.model.EMA_update() # update the teacher model with EMA
 
-            elif self.model.get_stage(self.current_epoch) == Stage.FULL_ENCODER or self.model.get_stage(self.current_epoch) == Stage.ANT_MASK_FINETUNE: 
+            elif self.model.get_stage(self.current_epoch) == Stage.FINETUNE or \
+                    self.model.get_stage(self.current_epoch) == Stage.ANT_MASK_FINETUNE or\
+                    self.model.get_stage(self.current_epoch) == Stage.CROSS_ATTENDER: 
                 opt_pre.zero_grad()
                 opt_fine.zero_grad()
                 self.manual_backward(res["loss"])
@@ -193,8 +195,8 @@ class LightningTrainer(pl.LightningModule):
             res["prediction"], # [bs, n_agents, n_steps, 2]
         )
 
-        goal = res["goal"] # [bs, 4]
-        waypoints = res["waypoints"] # [bs, 8, 4]
+        # goal = res["goal"] # [bs, 4]
+        # waypoints = res["waypoints"] # [bs, 8, 4]
 
 
         targets = data["agent"]["target"]
@@ -236,22 +238,19 @@ class LightningTrainer(pl.LightningModule):
         #     ret_dict.update({"loss": loss})
         #     return ret_dict
         if trajectory.dim() == 4:
-            ego_loss_dict = self._cal_ego_loss_term(trajectory, probability, ego_target)
+            ego_reg_loss = F.smooth_l1_loss(res["trajectory_all"], ego_target[:, None, None, :, :], reduction='none').mean((1, 2, 3, 4))
             ret_dict = {
-            "reg_loss": ego_loss_dict["reg_loss"], 
-            "cls_loss": ego_loss_dict["cls_loss"],
+            "reg_loss": ego_reg_loss, 
             "agent_reg_loss": agent_reg_loss,
-            "ego_goal_loss": ego_loss_dict["ego_goal_loss"],
-            "ego_waypoints_loss": ego_loss_dict["ego_waypoints_loss"],
             }
             # loss = torch.mean(torch.stack([ret_dict[key] for key in ret_dict.keys()]))
-            loss_mat = torch.stack([ret_dict[key] for key in ["reg_loss", "cls_loss", "ego_goal_loss", "ego_waypoints_loss"]], dim=1) # [bs, 4]
+            # loss_mat = torch.stack([ret_dict[key] for key in ["reg_loss", "cls_loss", "ego_goal_loss", "ego_waypoints_loss"]], dim=1) # [bs, 4]
             if self.scaling == True:
                 reg_loss_normed = (ret_dict["reg_loss"] - ret_dict["reg_loss"].min()) / (ret_dict["reg_loss"].max() - ret_dict["reg_loss"].min() + 1e-6) # [bs]
                 scale = torch.exp(reg_loss_normed/self.temperature).detach().clone() # [bs]
-                loss = (loss_mat.mean(-1) * scale).mean() + agent_reg_loss
+                loss = (ego_reg_loss * scale).mean() + agent_reg_loss
             else:
-                loss = loss_mat.mean() + agent_reg_loss
+                loss = ego_reg_loss.mean() + agent_reg_loss
             ret_dict.update({"loss": loss})
             return ret_dict
 
