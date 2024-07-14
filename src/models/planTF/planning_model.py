@@ -282,8 +282,8 @@ class PlanningModel(TorchModuleWrapper):
     def forward(self, data, current_epoch=None):
         if current_epoch is None: # when inference
             # return self.forward_pretrain_separate(data)
-            # return self.forward_finetune(data)
-            return self.forward_antagonistic_mask_finetune(data, current_epoch)
+            return self.forward_finetune(data)
+            # return self.forward_antagonistic_mask_finetune(data, current_epoch)
         else:
             stage = self.get_stage(current_epoch)
             if stage == Stage.PRETRAIN_SEP:
