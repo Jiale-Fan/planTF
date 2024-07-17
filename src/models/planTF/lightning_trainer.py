@@ -439,9 +439,9 @@ class LightningTrainer(pl.LightningModule):
         optimizer_pretrain = torch.optim.AdamW(
             optim_groups_pretrain, lr=self.lr, weight_decay=self.weight_decay
         )
-        optimizer_finetune_p = torch.optim.AdamW(
-            optim_groups_pretrain, lr=self.lr, weight_decay=self.weight_decay
-        )
+        # optimizer_finetune_p = torch.optim.AdamW(
+        #     optim_groups_pretrain, lr=self.lr, weight_decay=self.weight_decay
+        # )
         optimizer_finetune_f = torch.optim.AdamW(
             optim_groups_finetune, lr=self.lr, weight_decay=self.weight_decay
         )
@@ -451,18 +451,27 @@ class LightningTrainer(pl.LightningModule):
             optimizer=optimizer_pretrain,
             lr=self.lr,
             min_lr=1e-6,
-            starting_epoch=self.model.pretrain_epoch_stages,
+            starting_epoch=self.model.pretrain_epoch_stages[0:1],
             epochs=self.epochs,
             warmup_epochs=self.warmup_epochs,
         )
+
+        # scheduler_fine_f = WarmupCosLR(
+        #     optimizer=optimizer_finetune_f,
+        #     lr=self.lr,
+        #     min_lr=1e-6,
+        #     starting_epoch=self.model.pretrain_epoch_stages[1:],
+        #     epochs=self.epochs,
+        #     warmup_epochs=0,
+        # )
 
         scheduler_fine_f = WarmupCosLR(
             optimizer=optimizer_finetune_f,
             lr=self.lr,
             min_lr=1e-6,
-            starting_epoch=self.model.pretrain_epoch_stages[1:],
+            starting_epoch=self.model.pretrain_epoch_stages[1:2],
             epochs=self.epochs,
-            warmup_epochs=0,
+            warmup_epochs=self.warmup_epochs,
         )
 
         return [optimizer_pretrain, optimizer_finetune_f], [scheduler_pre, scheduler_fine_f]

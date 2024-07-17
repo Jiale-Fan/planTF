@@ -12,6 +12,7 @@ class TempoNet(nn.Module):
         depth=3,
         num_head=8,
         dim_head=64,
+        now_timestep=21
     ):
         super().__init__()
         # self.projector = Projector(dim=dim_head, in_channels=state_channel)
@@ -26,13 +27,21 @@ class TempoNet(nn.Module):
             for i in range(depth)
         )
         self.norm = nn.LayerNorm(dim_head)
+        self.now_timestep = now_timestep
 
-    def forward(self, x, key_padding_mask=None):
+        self.pos_emb = build_mlp(4, [dim_head] * 2)
+
+
+    def forward(self, x_orig, key_padding_mask=None):
         # x = self.projector(x)
+        x = x_orig.clone()
         for block in self.blocks:
             x = block(x, key_padding_mask=key_padding_mask)
         x = self.norm(x)
-        return x
+
+        pos_emb = self.pos_emb(x_orig[:, self.now_timestep, :4])
+
+        return x, pos_emb
 
 
 class EgoEncoder(nn.Module):
