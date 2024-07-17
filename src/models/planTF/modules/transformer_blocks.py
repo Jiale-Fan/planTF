@@ -122,3 +122,64 @@ class Block(nn.Module):
             )
 
         return self.forward_pre(src=src, mask=mask, key_padding_mask=key_padding_mask)
+
+class CrossAttender(nn.Module):
+    def __init__(
+        self,
+        dim,
+        num_heads,
+        mlp_ratio=4.0,
+        qkv_bias=False,
+        drop=0.0,
+        attn_drop=0.0,
+        drop_path=0.0,
+        act_layer=nn.GELU,
+        norm_layer=nn.LayerNorm,
+        post_norm=False,
+    ):
+        super().__init__()
+        self.post_norm = post_norm
+
+        self.norm1_q = norm_layer(dim)
+        self.norm1_kv = norm_layer(dim)
+        self.attn = torch.nn.MultiheadAttention(
+            dim,
+            num_heads=num_heads,
+            add_bias_kv=qkv_bias,
+            dropout=attn_drop,
+            batch_first=True,
+        )
+        self.drop_path1 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+
+        self.norm2 = norm_layer(dim)
+        self.mlp = Mlp(
+            in_features=dim,
+            hidden_features=int(dim * mlp_ratio),
+            act_layer=act_layer,
+            drop=drop,
+        )
+        self.drop_path2 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+        self.attn_mat = None
+
+    def forward(
+        self,
+        query,
+        key_value,
+        mask: Optional[Tensor] = None,
+        key_padding_mask: Optional[Tensor] = None,
+    ):
+        query_n = self.norm1_q(query)
+        kv_n = self.norm1_kv(key_value)
+        src2, attn_mat = self.attn(
+            query=query_n,
+            key=kv_n,
+            value=kv_n,
+            attn_mask=mask,
+            key_padding_mask=key_padding_mask,
+            need_weights=True,
+        )
+        self.attn_mat = attn_mat
+        query = query + self.drop_path1(src2)
+        query = query + self.drop_path2(self.mlp(self.norm2(query)))
+        return query
+

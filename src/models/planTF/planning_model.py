@@ -16,7 +16,7 @@ from .modules.map_encoder import MapEncoder
 from .modules.trajectory_decoder import TrajectoryDecoder
 import torch.nn.functional as F
 
-from .modules.transformer_blocks import Block
+from .modules.transformer_blocks import Block, CrossAttender
 from .pretrain_model import PretrainModel
 from torch.nn.utils.rnn import pad_sequence
 from einops import rearrange, reduce, repeat
@@ -210,12 +210,12 @@ class PlanningModel(TorchModuleWrapper):
         )
 
         self.cross_attender = nn.ModuleList(
-            torch.nn.MultiheadAttention(
-            dim,
-            num_heads=num_heads,
-            add_bias_kv=qkv_bias,
-            dropout=0.1,
-            batch_first=True,
+            CrossAttender(
+                dim=dim,
+                num_heads=num_heads,
+                mlp_ratio=mlp_ratio,
+                qkv_bias=qkv_bias,
+                drop_path=[x.item() for x in torch.linspace(0, drop_path, decoder_depth)][i],
             )
             for i in range(decoder_depth)
         )
@@ -747,11 +747,11 @@ class PlanningModel(TorchModuleWrapper):
 
         q = x[:, 0:1]
 
-        q, attn_weights = self.cross_attender[0](query=q, key=x[:, 1:], value=x[:, 1:], key_padding_mask=key_padding_mask[:, 1:], need_weights=True)
+        q = self.cross_attender[0](query=q, key_value=x[:, 1:], key_padding_mask=key_padding_mask[:, 1:])
         goal = self.goal_mlp(q).squeeze(1)
-        q, attn_weights = self.cross_attender[1](query=q, key=x[:, 1:], value=x[:, 1:], key_padding_mask=key_padding_mask[:, 1:], need_weights=True)
+        q = self.cross_attender[1](query=q, key_value=x[:, 1:], key_padding_mask=key_padding_mask[:, 1:])
         waypoints= self.waypoints_mlp(q).view(bs, self.future_steps//self.waypoints_interval, self.out_channels)
-        q, attn_weights = self.cross_attender[2](query=q, key=x[:, 1:], value=x[:, 1:], key_padding_mask=key_padding_mask[:, 1:], need_weights=True)
+        q = self.cross_attender[2](query=q, key_value=x[:, 1:], key_padding_mask=key_padding_mask[:, 1:])
         # restrict the attention to the route only in the cross attender
         # q, attn_weights = blk(query=q, key=x, value=x, key_padding_mask=route_kpmask, need_weights=True) 
 
