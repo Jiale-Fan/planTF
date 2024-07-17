@@ -893,9 +893,10 @@ class PlanningModel(TorchModuleWrapper):
 
         # if agent frames should be masked here? probably not # NOTE
         # (agent_masked_tokens, frame_pred_mask) = self.trajectory_random_masking(agent_embedding, self.trajectory_mask_ratio, frame_valid_mask)
+        agent_embedding[~frame_valid_mask] = self.TempoNet_frame_seed
         agent_embedding_ft = rearrange(agent_embedding.clone(), 'b a t d -> (b a) t d')
         # agent_tempo_key_padding = rearrange(~frame_valid_mask, 'b a t -> (b a) t')
-        agent_embedding_ft[~frame_valid_mask] = self.TempoNet_frame_seed
+        
         agent_embedding_ft = self.pe(agent_embedding_ft)
         # agent_embedding_ft, agent_pos_emb = self.tempo_net(agent_embedding_ft, agent_tempo_key_padding) # if key_padding_mask should be used here? this causes nan values in loss and needs investigation
         agent_embedding_ft, agent_pos_emb = self.tempo_net(agent_embedding_ft)
