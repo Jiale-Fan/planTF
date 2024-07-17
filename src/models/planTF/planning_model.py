@@ -575,6 +575,8 @@ class PlanningModel(TorchModuleWrapper):
         agent_tempo_key_padding = rearrange(~frame_valid_mask, 'b a t -> (b a) t') 
         y, _ = self.tempo_net(agent_masked_tokens_pos_embeded, agent_tempo_key_padding)
 
+        y[y.isnan()] = 0.0
+
         # y = self.tempo_net(agent_masked_tokens_pos_embeded) # if key_padding_mask should be used here? this causes nan values in loss and needs investigation
         # frame pred loss
         frame_pred = rearrange(self.agent_frame_predictor(y), '(b a) t c -> b a t c', b=agent_features.shape[0], a=agent_features.shape[1])
@@ -625,6 +627,10 @@ class PlanningModel(TorchModuleWrapper):
             "TP_loss": tail_pred_loss,
             "loss": lane_pred_loss + agent_pred_loss + tail_pred_loss,
         }
+
+        assert not torch.isnan(lane_pred_loss).any()
+        assert not torch.isnan(agent_pred_loss).any()
+        assert not torch.isnan(tail_pred_loss).any()
 
         return out
 
