@@ -573,7 +573,8 @@ class PlanningModel(TorchModuleWrapper):
         agent_masked_tokens_ = rearrange(agent_masked_tokens, 'b a t d -> (b a) t d').clone()
         agent_masked_tokens_pos_embeded = self.pe(agent_masked_tokens_)
         agent_tempo_key_padding = rearrange(~frame_valid_mask, 'b a t -> (b a) t') 
-        y, _ = self.tempo_net(agent_masked_tokens_pos_embeded, agent_tempo_key_padding)
+        # y, _ = self.tempo_net(agent_masked_tokens_pos_embeded, agent_tempo_key_padding) 
+        y, _ = self.tempo_net(agent_masked_tokens_pos_embeded)
 
         y[y.isnan()] = 0.0
 
@@ -589,7 +590,9 @@ class PlanningModel(TorchModuleWrapper):
 
         agent_embedding_tp = rearrange(agent_embedding[:,:,:self.history_steps].clone(), 'b a t d -> (b a) t d')
         agent_tempo_key_padding_tp = agent_tempo_key_padding[:,:self.history_steps].clone()
-        agent_embedding_tp, agent_pos_emb = self.tempo_net(agent_embedding_tp, agent_tempo_key_padding_tp) # if key_padding_mask should be used here? this causes nan values in loss and needs investigation
+        # agent_embedding_tp, agent_pos_emb = self.tempo_net(agent_embedding_tp, agent_tempo_key_padding_tp) # if key_padding_mask should be used here? this causes nan values in loss and needs investigation
+        agent_embedding_tp, agent_pos_emb = self.tempo_net(agent_embedding_tp)
+        
         agent_embedding_tp = rearrange(agent_embedding_tp, '(b a) t c -> b a t c', b=bs, a=A)
         agent_embedding_tp = reduce(agent_embedding_tp, 'b a t c -> b a c', 'max')
         agent_embedding_tp = agent_embedding_tp + rearrange(agent_pos_emb, '(b a) c -> b a c', b=bs, a=A)
