@@ -33,6 +33,7 @@ class MapEncoder(nn.Module):
         point_position = point_position_3d.view(B, M, -1, 2)
         polygon_type, polygon_on_route, polygon_tl_status, polygon_has_speed_limit, polygon_speed_limit = \
             polygon_property.long().unbind(dim=-1)
+        polygon_has_speed_limit = polygon_has_speed_limit.bool()
         polygon_start = point_position[:,:,0]
 
         point_vector = torch.cat([point_position[:, :, 1:] - point_position[:, :, :-1], torch.zeros([B, M, 1, 2], dtype=point_position.dtype, device=point_position.device)], dim=-2)

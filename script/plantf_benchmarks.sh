@@ -16,7 +16,7 @@ for challenge in $CHALLENGES; do
         worker.threads_per_node=16 \
         experiment_uid=$SPLIT/$planner \
         verbose=true \
-        planner.imitation_planner.planner_ckpt="/home/jiale/Documents/checkpoints/sw4-loss-scaling.ckpt"
+        planner.imitation_planner.planner_ckpt="/home/jiale/Documents/checkpoints/1707_1.0.ckpt"
 done
 
 

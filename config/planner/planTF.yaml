@@ -32,3 +32,4 @@ imitation_planner:
       max_agents: 32
 
   planner_ckpt:
+  use_gpu: False
