@@ -93,7 +93,7 @@ class PlanningModel(TorchModuleWrapper):
         lane_mask_ratio=0.5,
         trajectory_mask_ratio=0.7,
         # pretrain_epoch_stages = [0, 10, 20, 25, 30, 35], # SEPT, ft, ant, ft, ant, ft
-        pretrain_epoch_stages = [0, 10],
+        pretrain_epoch_stages = [0, 0],
         lane_split_threshold=20,
         alpha=0.999,
         expanded_dim = 256*8,
@@ -886,26 +886,34 @@ class PlanningModel(TorchModuleWrapper):
         lane_embedding, lane_pos_emb = self.map_encoder(polygon_pos, polypon_prop, polygon_mask)
         lane_embedding_pos = lane_embedding + lane_pos_emb
 
-        # agent embedding
+        # agent embedding (not dropping frames out )
         agent_features, agent_category, frame_valid_mask, agent_key_padding = self.extract_agent_feature(data, include_future=False)
         bs, A = agent_features.shape[0:2]
         agent_embedding = self.agent_projector(agent_features)+self.agent_type_emb(agent_category)[:,:,None,:] # B A D
 
-        # if agent frames should be masked here? probably not # NOTE
-        # (agent_masked_tokens, frame_pred_mask) = self.trajectory_random_masking(agent_embedding, self.trajectory_mask_ratio, frame_valid_mask)
-        agent_embedding[~frame_valid_mask] = self.TempoNet_frame_seed
-        agent_embedding_ft = rearrange(agent_embedding.clone(), 'b a t d -> (b a) t d')
-        # agent_tempo_key_padding = rearrange(~frame_valid_mask, 'b a t -> (b a) t')
+        # # if agent frames should be masked here? probably not # NOTE
+        # # (agent_masked_tokens, frame_pred_mask) = self.trajectory_random_masking(agent_embedding, self.trajectory_mask_ratio, frame_valid_mask)
+        # agent_embedding[~frame_valid_mask] = self.TempoNet_frame_seed
+        # agent_embedding_ft = rearrange(agent_embedding.clone(), 'b a t d -> (b a) t d')
+        # # agent_tempo_key_padding = rearrange(~frame_valid_mask, 'b a t -> (b a) t')
         
-        agent_embedding_ft = self.pe(agent_embedding_ft)
-        # agent_embedding_ft, agent_pos_emb = self.tempo_net(agent_embedding_ft, agent_tempo_key_padding) # if key_padding_mask should be used here? this causes nan values in loss and needs investigation
-        agent_embedding_ft, agent_pos_emb = self.tempo_net(agent_embedding_ft)
-        agent_embedding_ft = rearrange(agent_embedding_ft, '(b a) t c -> b a t c', b=bs, a=A)
-        agent_embedding_ft = reduce(agent_embedding_ft, 'b a t c -> b a c', 'max')
-        agent_embedding_ft = agent_embedding_ft + rearrange(agent_pos_emb, '(b a) c -> b a c', b=bs, a=A)
+        # agent_embedding_ft = self.pe(agent_embedding_ft)
+        # # agent_embedding_ft, agent_pos_emb = self.tempo_net(agent_embedding_ft, agent_tempo_key_padding) # if key_padding_mask should be used here? this causes nan values in loss and needs investigation
+        # agent_embedding_ft, agent_pos_emb = self.tempo_net(agent_embedding_ft)
+
+        (agent_masked_tokens, frame_pred_mask) = self.trajectory_random_masking(agent_embedding, self.trajectory_mask_ratio, frame_valid_mask)
+        agent_masked_tokens_ = rearrange(agent_masked_tokens, 'b a t d -> (b a) t d').clone()
+        agent_masked_tokens_pos_embeded = self.pe(agent_masked_tokens_)
+        agent_tempo_key_padding = rearrange(~frame_valid_mask, 'b a t -> (b a) t') 
+        # y, _ = self.tempo_net(agent_masked_tokens_pos_embeded, agent_tempo_key_padding) 
+        agent_embedding_emb, agent_pos_emb = self.tempo_net(agent_masked_tokens_pos_embeded)
+
+        agent_embedding_emb = rearrange(agent_embedding_emb, '(b a) t c -> b a t c', b=bs, a=A)
+        agent_embedding_emb = reduce(agent_embedding_emb, 'b a t c -> b a c', 'max')
+        agent_embedding_emb = agent_embedding_emb + rearrange(agent_pos_emb, '(b a) c -> b a c', b=bs, a=A)
 
         if seeds is None:
-            x = torch.cat([agent_embedding_ft, lane_embedding_pos], dim=1)
+            x = torch.cat([agent_embedding_emb, lane_embedding_pos], dim=1)
             key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding], dim=-1)
             res = [ x, key_padding_mask ]
         else:
@@ -913,7 +921,7 @@ class PlanningModel(TorchModuleWrapper):
                 seeds = repeat(seeds, 'd -> bs 1 d', bs=bs)
             else:
                 seeds = repeat(seeds, 'n d -> bs n d', bs=bs)  
-            x = torch.cat([seeds, agent_embedding_ft, lane_embedding_pos], dim=1)
+            x = torch.cat([seeds, agent_embedding_emb, lane_embedding_pos], dim=1)
             # key padding masks
             key_padding_mask = torch.cat([torch.zeros(seeds.shape[0:2], device=agent_key_padding.device, dtype=torch.bool), agent_key_padding, polygon_key_padding], dim=-1)
             res = [ x, key_padding_mask ]
