@@ -25,12 +25,19 @@ class MapEncoder(nn.Module):
         self.unknown_speed_emb = nn.Embedding(1, dim)
         self.pos_emb = build_mlp(4, [dim] * 2)
 
-    def forward(self, point_position_3d, polygon_property, valid_mask) -> torch.Tensor:
+    def forward(self, point_position, polygon_property, valid_mask) -> torch.Tensor:
+        """
+        Args:
+            point_position (Tensor)
+            polygon_property (Tensor)
+            valid_mask (Tensor)
+
+        Returns:
+            torch.Tensor
+        """
         # polygon_pos: B M P=20 2
         # polygon_property: B M 5
-        B, M = point_position_3d.shape[:2]
-        
-        point_position = point_position_3d.view(B, M, -1, 2)
+        B, M = point_position.shape[:2]
         polygon_type, polygon_on_route, polygon_tl_status, polygon_has_speed_limit, polygon_speed_limit = \
             polygon_property.long().unbind(dim=-1)
         polygon_has_speed_limit = polygon_has_speed_limit.bool()

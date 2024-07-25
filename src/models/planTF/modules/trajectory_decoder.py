@@ -2,8 +2,31 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+class SinglemodalTrajectoryDecoder(nn.Module):
+    def __init__(self, embed_dim, future_steps, out_channels) -> None:
+        super().__init__()
 
-class TrajectoryDecoder(nn.Module):
+        self.embed_dim = embed_dim
+        self.future_steps = future_steps
+        self.out_channels = out_channels
+
+        self.proj = nn.Linear(embed_dim, embed_dim)
+
+        hidden = 2 * embed_dim
+        self.loc = nn.Sequential(
+            nn.Linear(embed_dim, hidden),
+            nn.LayerNorm(hidden),
+            nn.ReLU(inplace=True),
+            nn.Linear(hidden, future_steps * out_channels),
+        )
+
+    def forward(self, x):
+        x = self.proj(x)
+        loc = self.loc(x).view(-1, self.future_steps, self.out_channels)
+
+        return loc
+
+class MultimodalTrajectoryDecoder(nn.Module):
     def __init__(self, embed_dim, num_modes, future_steps, out_channels) -> None:
         super().__init__()
 

@@ -13,7 +13,7 @@ from .layers.common_layers import build_mlp
 from .layers.transformer_encoder_layer import TransformerEncoderLayer
 from .modules.agent_encoder import AgentEncoder, EgoEncoder, TempoNet
 from .modules.map_encoder import MapEncoder
-from .modules.trajectory_decoder import TrajectoryDecoder
+from .modules.trajectory_decoder import MultimodalTrajectoryDecoder, SinglemodalTrajectoryDecoder
 import torch.nn.functional as F
 
 from .modules.transformer_blocks import Block, CrossAttender
@@ -100,7 +100,7 @@ class PlanningModel(TorchModuleWrapper):
         gamma = 1.0, # VICReg standard deviation target 
         out_channels = 4,
         N_mask = 2,
-        waypoints_interval = 10,
+        waypoints_number = 20,
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
     ) -> None:
         super().__init__(
@@ -116,7 +116,7 @@ class PlanningModel(TorchModuleWrapper):
         self.future_steps = future_steps
         self.state_channel = state_channel
         self.num_modes = num_modes
-        self.waypoints_interval = waypoints_interval
+        self.waypoints_number = waypoints_number
         
         self.polygon_channel = polygon_channel # the number of features for each lane segment besides points coords which we will use
 
@@ -150,7 +150,7 @@ class PlanningModel(TorchModuleWrapper):
         # self.multimodal_seed = nn.Parameter(torch.randn(num_modes, dim))
         self.ego_seed = nn.Parameter(torch.randn(dim))
 
-        self.agent_projector = Projector(dim=dim, in_channels=11) # NOTE: make consistent to state_channel
+        self.agent_projector = Projector(to_dim=dim, in_channels=11) # NOTE: make consistent to state_channel
         self.agent_type_emb = nn.Embedding(4, dim)
         # self.map_encoder = Projector(dim=dim, in_channels=self.no_lane_segment_points*2+5) # NOTE: make consistent to polygon_channel
         self.map_encoder = MapEncoder(
@@ -171,7 +171,19 @@ class PlanningModel(TorchModuleWrapper):
             )
             for i in range(encoder_depth)
         )
-        self.norm = nn.LayerNorm(dim)
+        self.norm_spa = nn.LayerNorm(dim)
+
+        self.WpNet = nn.ModuleList(
+            Block(
+                dim=dim,
+                num_heads=num_heads,
+                mlp_ratio=mlp_ratio,
+                qkv_bias=qkv_bias,
+                drop_path=dpr[i],
+            )
+            for i in range(encoder_depth)
+        )
+        self.norm_wp = nn.LayerNorm(dim)
 
         # self.expander = nn.Linear(dim*num_seeds, expanded_dim)
 
@@ -202,10 +214,15 @@ class PlanningModel(TorchModuleWrapper):
         # )
         
 
-        self.trajectory_decoder = TrajectoryDecoder(
+        self.waypoint_decoder = SinglemodalTrajectoryDecoder(
             embed_dim=dim,
-            num_modes=num_modes,
-            future_steps=future_steps,
+            future_steps=self.waypoints_number,
+            out_channels=4,
+        )
+
+        self.far_future_traj_decoder = SinglemodalTrajectoryDecoder(
+            embed_dim=dim,
+            future_steps=self.future_steps-self.waypoints_number,
             out_channels=4,
         )
 
@@ -235,7 +252,6 @@ class PlanningModel(TorchModuleWrapper):
 
         # coarse to fine planning
         self.goal_mlp = build_mlp(dim, [512, out_channels], norm=None)
-        self.waypoints_mlp = build_mlp(dim, [512, future_steps//waypoints_interval*out_channels], norm=None)
         self.score_mlp = nn.Sequential(
             nn.Linear(dim, 512),
             nn.ReLU(),
@@ -244,7 +260,11 @@ class PlanningModel(TorchModuleWrapper):
         ) # since we need the last activation to be sigmoid, we do not use the build_mlp function
 
         self.agent_tail_predictor = build_mlp(dim, [dim * 2, (future_steps-1) * 4], norm="ln")
-        self.agent_predictor = build_mlp(dim, [dim * 2, future_steps * 2], norm="ln")
+        self.abs_agent_predictor = build_mlp(dim, [dim * 2, future_steps * 2], norm="ln")
+        self.rel_agent_predictor = build_mlp(dim, [dim * 2, waypoints_number * 2], norm="ln")
+        self.lane_intention_predictor = Projector(to_dim=1, in_channels=dim)
+        self.attraction_point_projector = Projector(to_dim=dim, in_channels=4)
+        self.vel_token_projector = Projector(to_dim=dim, in_channels=1)
 
         self.apply(self._init_weights)
 
@@ -267,15 +287,17 @@ class PlanningModel(TorchModuleWrapper):
         # targeted_list = [self.pos_emb, self.tempo_net, self.agent_seed, self.agent_projector, 
         #         self.map_projector, self.lane_pred, self.agent_frame_pred, self.blocks, self.norm]
         # module_list = [[name, module] for name, module in self.named_modules() if module in targeted_list]
-        return [self.pos_emb, self.tempo_net, self.TempoNet_frame_seed, self.agent_projector, 
-                self.map_encoder, self.lane_pred, self.agent_frame_predictor, self.SpaNet, self.norm, self.agent_tail_predictor]
+        return [self.pos_emb, self.tempo_net, self.TempoNet_frame_seed, self.agent_projector, self.MRM_seed,
+                self.map_encoder, self.lane_pred, self.agent_frame_predictor, self.SpaNet, self.norm_spa, self.agent_tail_predictor]
 
     def get_finetune_modules(self):
-        return [self.ego_seed, self.trajectory_decoder, self.cross_attender, self.goal_mlp, self.waypoints_mlp, self.agent_predictor] # expander
+        return [self.ego_seed, self.waypoint_decoder, self.far_future_traj_decoder, self.cross_attender, self.goal_mlp,
+                self.abs_agent_predictor, self.rel_agent_predictor, self.lane_intention_predictor, self.attraction_point_projector,
+                self.vel_token_projector, self.WpNet, self.norm_wp]
 
 
     def get_stage(self, current_epoch):
-        # return Stage.FINETUNE
+        return Stage.FINETUNE
         if current_epoch < self.pretrain_epoch_stages[1]:
             return Stage.PRETRAIN_SEP
         # elif current_epoch < self.pretrain_epoch_stages[2]:
@@ -298,25 +320,30 @@ class PlanningModel(TorchModuleWrapper):
         
 
     def forward(self, data, current_epoch=None):
+        return self.forward_inference(data)
         if current_epoch is None: # when inference
             # return self.forward_pretrain_separate(data)
-            return self.forward_finetune(data)
+            return self.forward_inference(data)
             # return self.forward_antagonistic_mask_finetune(data, current_epoch)
         else:
-            stage = self.get_stage(current_epoch)
-            if stage == Stage.PRETRAIN_SEP:
-                return self.forward_pretrain_separate(data)
-            elif stage == Stage.PRETRAIN_MIX:
-                return self.forward_pretrain_mix(data)
-            elif stage == Stage.PRETRAIN_REPRESENTATION:
-                # self.EMA_update() # currently this is done in lightning_trainer.py
-                return self.forward_pretrain_representation(data)
-            elif stage == Stage.FINETUNE:
+            if self.training and current_epoch < 10:
                 return self.forward_finetune(data)
-            elif stage == Stage.ANT_MASK_FINETUNE:
-                return self.forward_antagonistic_mask_finetune(data, current_epoch)
             else:
-                raise NotImplementedError(f"Stage {stage} is not implemented.")
+                return self.forward_inference(data)
+            # stage = self.get_stage(current_epoch)
+            # if stage == Stage.PRETRAIN_SEP:
+            #     return self.forward_pretrain_separate(data)
+            # elif stage == Stage.PRETRAIN_MIX:
+            #     return self.forward_pretrain_mix(data)
+            # elif stage == Stage.PRETRAIN_REPRESENTATION:
+            #     # self.EMA_update() # currently this is done in lightning_trainer.py
+            #     return self.forward_pretrain_representation(data)
+            # elif stage == Stage.FINETUNE:
+            #     return self.forward_finetune(data)
+            # elif stage == Stage.ANT_MASK_FINETUNE:
+            #     return self.forward_antagonistic_mask_finetune(data, current_epoch)
+            # else:
+            #     raise NotImplementedError(f"Stage {stage} is not implemented.")
 
     def extract_map_feature(self, data, need_route_kpmask=False):
         # NOTE: put property to one-hot?
@@ -348,7 +375,7 @@ class PlanningModel(TorchModuleWrapper):
         # point_position_feature[valid_mask] = point_position[:,:,0][valid_mask]
 
         point_position_feature, valid_mask, new_poly_prop = PlanningModel.split_lane_segment(point_position[:,:,0], valid_mask, self.lane_split_threshold, polygon_property)
-        point_position_feature = rearrange(point_position_feature, 'b m p c -> b m (p c)')
+        # point_position_feature = rearrange(point_position_feature, 'b m p c -> b m (p c)')
 
         # feature = torch.cat([point_position_feature, new_poly_prop], dim=-1)
         polygon_key_padding = ~(valid_mask.any(-1))
@@ -356,8 +383,8 @@ class PlanningModel(TorchModuleWrapper):
         if not need_route_kpmask:
             return point_position_feature, new_poly_prop, valid_mask, polygon_key_padding
         else: 
-            need_route_kpmask = ~((polygon_key_padding==0)&(new_poly_prop[..., 1]==1)) # valid and on route, then take the opposite
-            return point_position_feature, new_poly_prop, valid_mask, polygon_key_padding, need_route_kpmask # [B, M_new]
+            route_kpmask = ~((polygon_key_padding==0)&(new_poly_prop[..., 1]==1)) # valid and on route, then take the opposite
+            return point_position_feature, new_poly_prop, valid_mask, polygon_key_padding, route_kpmask # [B, M_new]
 
 
 
@@ -424,7 +451,7 @@ class PlanningModel(TorchModuleWrapper):
 
  
 
-    def extract_agent_feature(self, data, include_future=False):
+    def extract_agent_feature(self, data, include_future=False, get_critical_points=False):
 
         steps = self.history_steps if not include_future else self.history_steps + self.future_steps
 
@@ -453,7 +480,7 @@ class PlanningModel(TorchModuleWrapper):
             dim=-1,
         )
 
-
+        ego_state = data["current_state"] # B, 7 (x, y, yaw, vel, acc, steer, yaw_rate). actually yaw_rate can be inferred from vel and steer
 
         agent_key_padding = ~(valid_mask.any(-1))
 
@@ -462,7 +489,19 @@ class PlanningModel(TorchModuleWrapper):
         # category_rep = repeat(category, 'b a -> b a t d', t=steps, d = 1)
         # feature = torch.cat([frame_feature, category_rep], dim=-1)
 
-        return agent_feature, category, valid_mask_vec, agent_key_padding
+        ret = [agent_feature, category, valid_mask_vec, agent_key_padding, ego_state]
+
+        if get_critical_points:
+             # B 4
+            attraction_point = torch.cat([data["agent"]["position"][:, 0, self.history_steps+self.waypoints_number-1], 
+                                        torch.stack([data["agent"]["heading"][:, 0, self.history_steps+self.waypoints_number-1].cos(), 
+                                                    data["agent"]["heading"][:, 0, self.history_steps+self.waypoints_number-1].sin()], dim=-1),], dim=-1).clone()
+            
+            # B 2
+            horizon_point =  data["agent"]["position"][:, 0, -1].clone()
+            ret.extend([attraction_point, horizon_point])
+
+        return ret
         
 
     def lane_random_masking(self, lane_embedding, future_mask_ratio, key_padding_mask):
@@ -547,7 +586,7 @@ class PlanningModel(TorchModuleWrapper):
         x = lane_embedding_masked + lane_pos_emb
         for blk in self.SpaNet:
             x = blk(x, key_padding_mask=polygon_key_padding)
-        x = self.norm(x)
+        x = self.norm_spa(x)
   
         # lane pred loss
         lane_pred_mask = polygon_mask.clone().detach() # attention
@@ -565,7 +604,7 @@ class PlanningModel(TorchModuleWrapper):
 
         ## 2. MTM
 
-        agent_features, agent_category, frame_valid_mask, agent_key_padding = self.extract_agent_feature(data, include_future=True)
+        agent_features, agent_category, frame_valid_mask, agent_key_padding, ego_state = self.extract_agent_feature(data, include_future=True)
 
         agent_embedding = self.agent_projector(agent_features)+self.agent_type_emb(agent_category)[:,:,None,:] # B A D
         (agent_masked_tokens, frame_pred_mask) = self.trajectory_random_masking(agent_embedding, self.trajectory_mask_ratio, frame_valid_mask)
@@ -608,7 +647,7 @@ class PlanningModel(TorchModuleWrapper):
         x = concat
         for blk in self.SpaNet:
             x = blk(x, key_padding_mask=mask_concat)
-        x = self.norm(x)
+        x = self.norm_spa(x)
 
         # if NaNs have not been removed, using debug console we can see following lines 
         # concat[~mask_concat].isnan().any()
@@ -640,11 +679,11 @@ class PlanningModel(TorchModuleWrapper):
     def plot_scene_attention(self, data, attn_weights, output_trajectory, key_padding_mask, k=0):
         i = 0
         polygon_pos, polypon_prop, polygon_mask, polygon_key_padding = self.extract_map_feature(data)
-        agent_features, agent_mask, agent_key_padding = self.extract_agent_feature(data, include_future=False)
+        agent_features, agent_category, frame_valid_mask, agent_key_padding, ego_state = self.extract_agent_feature(data, include_future=False)
         assert agent_features.shape[1]+polygon_pos.shape[1] == attn_weights.shape[1]
         map_points = polygon_pos[i][..., :40]
         map_points_reshape = map_points.reshape(map_points.shape[0], -1, 2)
-        plot_scene_attention(agent_features[i], agent_mask[i], map_points_reshape, attn_weights[i],
+        plot_scene_attention(agent_features[i], frame_valid_mask[i], map_points_reshape, attn_weights[i],
                              key_padding_mask[i, 1:], 
                               output_trajectory[i], filename=self.inference_counter, prefix=k)
         
@@ -738,37 +777,138 @@ class PlanningModel(TorchModuleWrapper):
     def forward_finetune(self, data):
         bs, A = data["agent"]["heading"].shape[0:2]
         # x_orig, key_padding_mask = self.embed(data, torch.cat((self.plan_seed, self.rep_seed)))
-        x_orig, key_padding_mask = self.embed(data, seeds=self.ego_seed, need_route_kpmask=False)
+        x_orig, key_padding_mask, route_key_padding_mask, lane_intention_targets, attraction_point_gt = self.embed(data, training=True)
+
+        # no need to remove the ego token here. Right?
 
         x = x_orig 
         for blk in self.SpaNet:
             x = blk(x, key_padding_mask=key_padding_mask)
-        x = self.norm(x)
+        x = self.norm_spa(x)
 
-        q = x[:, 0:1]
+        abs_prediction = self.abs_agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2)
+        lane_intention = self.lane_intention_predictor(x[:, A:]).squeeze(-1) # B M
+        lane_intention[route_key_padding_mask] = -torch.inf # except the route, all the other map elements are set to -inf
+        lane_intention_prob = F.softmax(lane_intention, dim=-1)
 
-        q = self.cross_attender[0](query=q, key_value=x[:, 1:], key_padding_mask=key_padding_mask[:, 1:])
-        goal = self.goal_mlp(q).squeeze(1)
-        q = self.cross_attender[1](query=q, key_value=x[:, 1:], key_padding_mask=key_padding_mask[:, 1:])
-        waypoints= self.waypoints_mlp(q).view(bs, self.future_steps//self.waypoints_interval, self.out_channels)
-        q = self.cross_attender[2](query=q, key_value=x[:, 1:], key_padding_mask=key_padding_mask[:, 1:])
+        loss_lane_intention = F.cross_entropy(lane_intention, lane_intention_targets, reduction="none")
+
+        # find the lane segment with the highest probability
+        lane_intention_max = lane_intention_prob.argmax(dim=-1)
+        lane_intention_correct_rates = (lane_intention_max == lane_intention_targets).float().mean()
+
+        lane_intention_topk = lane_intention_prob.topk(k=6, dim=-1, largest=True, sorted=False).indices
+        lane_intention_topk_correct_rate = (lane_intention_topk == lane_intention_targets.unsqueeze(-1)).any(-1).float().mean()
+        # intention_lane_seg = x[:, A:][torch.arange(bs), lane_intention_max]
+        # assert route_key_padding_mask[torch.arange(bs), lane_intention_max].any() == False # assert the selected lane segment is on the route
+
+        intention_lane_seg = x[:, A:][torch.arange(bs), lane_intention_targets]
+        assert route_key_padding_mask[torch.arange(bs), lane_intention_targets].any() == False # assert the selected lane segment is on the route
+
+        x_wpnet = torch.cat([intention_lane_seg.unsqueeze(1), x_orig[:,1:]], dim=1)
+        for blk in self.WpNet:
+            x_wpnet = blk(x_wpnet, key_padding_mask=key_padding_mask)
+        x_wpnet = self.norm_wp(x_wpnet)
+        rel_prediction = self.rel_agent_predictor(x_wpnet[:, 1:A]).view(bs, -1, self.waypoints_number, 2)
+        waypoints = self.waypoint_decoder(x_wpnet[:, 0]) # B T_wp 4
+
+        # decode the far-future trajectory
+        # attraction_point = waypoints[:, -1] 
+        attraction_point = attraction_point_gt
+        q = (self.attraction_point_projector(attraction_point)+intention_lane_seg).unsqueeze(1)
+
+        for blk in self.cross_attender:
+            q = blk(query=q, key_value=x_orig[:,1:], key_padding_mask=key_padding_mask[:, 1:])
+
         # restrict the attention to the route only in the cross attender
         # q, attn_weights = blk(query=q, key=x, value=x, key_padding_mask=route_kpmask, need_weights=True) 
 
-        trajectory, probability = self.trajectory_decoder(q)
-        prediction = self.agent_predictor(x[:, 1:A+1]).view(bs, -1, self.future_steps, 2)
+        far_future_traj = self.far_future_traj_decoder(q) 
+        trajectory = torch.cat([waypoints, far_future_traj], dim=1).unsqueeze(1) # B 1 T 4
+        probability = torch.ones(bs, 1, device=trajectory.device) # B 1 
 
         out = {
             "trajectory": trajectory,
             "probability": probability,
-            "prediction": prediction,
-            "goal": goal,
+            "prediction": abs_prediction,
+            "rel_prediction" : rel_prediction,
             "waypoints": waypoints,
+            "far_future_traj": far_future_traj,
+            "lane_intention_loss": loss_lane_intention,
+            "lane_intention_correct_rates": lane_intention_correct_rates,
+            "lane_intention_topk_correct_rate": lane_intention_topk_correct_rate,
         }
 
         if not self.training:
-            best_mode = probability.argmax(dim=-1)
-            output_trajectory = trajectory[torch.arange(bs), best_mode]
+            output_trajectory = trajectory
+            angle = torch.atan2(output_trajectory[..., 3], output_trajectory[..., 2])
+            out["output_trajectory"] = torch.cat(
+                [output_trajectory[..., :2], angle.unsqueeze(-1)], dim=-1
+            )
+
+        # attention visualization
+        if False:
+            attn_weights = self.SpaNet[-1].attn_mat[:, 0].detach()
+            # visualize the scene using the attention weights
+            self.plot_scene_attention(data, attn_weights, output_trajectory, key_padding_mask, 0)
+            self.inference_counter += 1
+
+        return out
+
+    def forward_inference(self, data):
+        bs, A = data["agent"]["heading"].shape[0:2]
+        # x_orig, key_padding_mask = self.embed(data, torch.cat((self.plan_seed, self.rep_seed)))
+        x_orig, key_padding_mask, route_key_padding_mask = self.embed(data)
+
+        # no need to remove the ego token here. Right?
+
+        x = x_orig 
+        for blk in self.SpaNet:
+            x = blk(x, key_padding_mask=key_padding_mask)
+        x = self.norm_spa(x)
+
+        abs_prediction = self.abs_agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2)
+        lane_intention = self.lane_intention_predictor(x[:, A:]).squeeze(-1) # B M
+        lane_intention[route_key_padding_mask] = -torch.inf # except the route, all the other map elements are set to -inf
+        lane_intention_prob = F.softmax(lane_intention, dim=-1)
+
+        # find the lane segment with the highest probability
+        lane_intention_max = lane_intention_prob.argmax(dim=-1)
+        intention_lane_seg = x[:, A:][torch.arange(bs), lane_intention_max]
+        assert route_key_padding_mask[torch.arange(bs), lane_intention_max].any() == False # assert the selected lane segment is on the route
+
+        x_wpnet = torch.cat([intention_lane_seg.unsqueeze(1), x_orig[:,1:]], dim=1)
+        for blk in self.WpNet:
+            x_wpnet = blk(x_wpnet, key_padding_mask=key_padding_mask)
+        x_wpnet = self.norm_wp(x_wpnet)
+        rel_prediction = self.rel_agent_predictor(x_wpnet[:, 1:A]).view(bs, -1, self.waypoints_number, 2)
+        waypoints = self.waypoint_decoder(x_wpnet[:, 0]) # B T_wp 4
+
+        # decode the far-future trajectory
+        attraction_point = waypoints[:, -1] 
+        q = (self.attraction_point_projector(attraction_point)+intention_lane_seg).unsqueeze(1)
+
+        for blk in self.cross_attender:
+            q = blk(query=q, key_value=x_orig[:,1:], key_padding_mask=key_padding_mask[:, 1:])
+
+        # restrict the attention to the route only in the cross attender
+        # q, attn_weights = blk(query=q, key=x, value=x, key_padding_mask=route_kpmask, need_weights=True) 
+
+        far_future_traj = self.far_future_traj_decoder(q) 
+        trajectory = torch.cat([waypoints, far_future_traj], dim=1).unsqueeze(1) # B 1 T 4
+        probability = torch.ones(bs, 1, device=trajectory.device) # B 1 
+
+        out = {
+            "trajectory": trajectory,
+            "probability": probability,
+            "prediction": abs_prediction,
+            "rel_prediction" : rel_prediction,
+            "waypoints": waypoints,
+            "far_future_traj": far_future_traj,
+        }
+
+        if not self.training:
+            output_trajectory = trajectory
             angle = torch.atan2(output_trajectory[..., 3], output_trajectory[..., 2])
             out["output_trajectory"] = torch.cat(
                 [output_trajectory[..., :2], angle.unsqueeze(-1)], dim=-1
@@ -795,13 +935,13 @@ class PlanningModel(TorchModuleWrapper):
 
         bs, A = data["agent"]["heading"].shape[0:2]
         # x_orig, key_padding_mask = self.embed(data, torch.cat((self.plan_seed, self.rep_seed)))
-        x_orig, key_padding_mask = self.embed(data, seeds=self.ego_seed, need_route_kpmask=False)
+        x_orig, key_padding_mask = self.embed(data, need_route_kpmask=False)
 
         x = x_orig 
         for blk in self.SpaNet:
             x = blk(x, key_padding_mask=key_padding_mask)
-        x = self.norm(x)
-        prediction = self.agent_predictor(x[:, 1:A+1]).view(bs, -1, self.future_steps, 2)
+        x = self.norm_spa(x)
+        prediction = self.abs_agent_predictor(x[:, 1:A+1]).view(bs, -1, self.future_steps, 2)
         score = self.score_mlp(x[:, 1:]).squeeze(-1)
 
         masks_3d = self.generate_antagonistic_masks(key_padding_mask[:, 1:], random_ratio, score.detach().clone()) # B, N_mask, M
@@ -813,7 +953,7 @@ class PlanningModel(TorchModuleWrapper):
         q, attn_weights = self.cross_attender[0](query=q, key=x_m, value=x_m, key_padding_mask=masks, need_weights=True)
         goal = self.goal_mlp(q).view(bs, 2, self.out_channels)
         q, attn_weights = self.cross_attender[1](query=q, key=x_m, value=x_m, key_padding_mask=masks, need_weights=True)
-        waypoints= self.waypoints_mlp(q).view(bs, 2, self.future_steps//self.waypoints_interval, self.out_channels)
+        waypoints= self.waypoints_mlp(q).view(bs, 2, self.future_steps//self.waypoints_number, self.out_channels)
         q, attn_weights = self.cross_attender[2](query=q, key=x_m, value=x_m, key_padding_mask=masks, need_weights=True)
         # restrict the attention to the route only in the cross attender
         # q, attn_weights = blk(query=q, key=x, value=x, key_padding_mask=route_kpmask, need_weights=True) 
@@ -870,76 +1010,97 @@ class PlanningModel(TorchModuleWrapper):
         return out
     
     
-    def embed(self, data, seeds=None, include_future=False, need_route_kpmask=False):
+    def embed(self, data, include_future=False, training=False):
         """
+            Extract the features of the map and the agents, and then embed them into the latent space. 
+            Instead of using the embedding of ego history trajectory, we use ego velocity token. 
+
             data: dict
             seeds: tensor (D, )
+
+            returns: 
+                x: tensor (B, N, D)
+                key_padding_mask: tensor (B, N)
+                route_kp_mask: tensor (B, M)
+            if training is True, then also returns:
+                lane_intention_targets: tensor (B, M)
+                rel_targets: tensor (B, A, T, 2)
+
         """
         
-        if need_route_kpmask:
-            polygon_pos, polypon_prop, polygon_mask, route_kp_mask, polygon_key_padding = self.extract_map_feature(data, need_route_kpmask=True)
-        else:
-            polygon_pos, polypon_prop, polygon_mask, polygon_key_padding = self.extract_map_feature(data)
+        polygon_pos, polypon_prop, polygon_mask, route_kp_mask, polygon_key_padding = self.extract_map_feature(data, need_route_kpmask=True)
     
-          
         # lane embedding
         lane_embedding, lane_pos_emb = self.map_encoder(polygon_pos, polypon_prop, polygon_mask)
         lane_embedding_pos = lane_embedding + lane_pos_emb
 
         # agent embedding (not dropping frames out )
-        agent_features, agent_category, frame_valid_mask, agent_key_padding = self.extract_agent_feature(data, include_future=False)
+        if training:    
+            agent_features, agent_category, frame_valid_mask, agent_key_padding, ego_state,\
+                attraction_point, horizon_point = self.extract_agent_feature(data, include_future=False, get_critical_points=True)
+        else:
+            agent_features, agent_category, frame_valid_mask, agent_key_padding, ego_state = self.extract_agent_feature(data, include_future=False)
+
+        # ego state embedding (currently only velocity)
+        ego_vel_token = self.vel_token_projector(ego_state[:, 3:4]).unsqueeze(1) # B 1 D
+
         bs, A = agent_features.shape[0:2]
         agent_embedding = self.agent_projector(agent_features)+self.agent_type_emb(agent_category)[:,:,None,:] # B A D
 
-        # # if agent frames should be masked here? probably not # NOTE
-        # # (agent_masked_tokens, frame_pred_mask) = self.trajectory_random_masking(agent_embedding, self.trajectory_mask_ratio, frame_valid_mask)
-        # agent_embedding[~frame_valid_mask] = self.TempoNet_frame_seed
-        # agent_embedding_ft = rearrange(agent_embedding.clone(), 'b a t d -> (b a) t d')
-        # # agent_tempo_key_padding = rearrange(~frame_valid_mask, 'b a t -> (b a) t')
-        
-        # agent_embedding_ft = self.pe(agent_embedding_ft)
-        # # agent_embedding_ft, agent_pos_emb = self.tempo_net(agent_embedding_ft, agent_tempo_key_padding) # if key_padding_mask should be used here? this causes nan values in loss and needs investigation
-        # agent_embedding_ft, agent_pos_emb = self.tempo_net(agent_embedding_ft)
+        # # if agent frames should be masked here?
+        # 1. if not, use following code
 
-        (agent_masked_tokens, frame_pred_mask) = self.trajectory_random_masking(agent_embedding, self.trajectory_mask_ratio, frame_valid_mask)
-        agent_masked_tokens_ = rearrange(agent_masked_tokens, 'b a t d -> (b a) t d').clone()
-        agent_masked_tokens_pos_embeded = self.pe(agent_masked_tokens_)
-        agent_tempo_key_padding = rearrange(~frame_valid_mask, 'b a t -> (b a) t') 
-        # y, _ = self.tempo_net(agent_masked_tokens_pos_embeded, agent_tempo_key_padding) 
-        agent_embedding_emb, agent_pos_emb = self.tempo_net(agent_masked_tokens_pos_embeded)
+        # (agent_masked_tokens, frame_pred_mask) = self.trajectory_random_masking(agent_embedding, self.trajectory_mask_ratio, frame_valid_mask)
+        agent_embedding[~frame_valid_mask] = self.TempoNet_frame_seed
+        agent_embedding_ft = rearrange(agent_embedding.clone(), 'b a t d -> (b a) t d')
+        # agent_tempo_key_padding = rearrange(~frame_valid_mask, 'b a t -> (b a) t')
+        
+        agent_embedding_ft = self.pe(agent_embedding_ft)
+        # agent_embedding_ft, agent_pos_emb = self.tempo_net(agent_embedding_ft, agent_tempo_key_padding) # if key_padding_mask should be used here? this causes nan values in loss and needs investigation
+        agent_embedding_emb, agent_pos_emb = self.tempo_net(agent_embedding_ft)
+
+        # 2. if yes, use following code
+
+        # (agent_masked_tokens, frame_pred_mask) = self.trajectory_random_masking(agent_embedding, self.trajectory_mask_ratio, frame_valid_mask)
+        # agent_masked_tokens_ = rearrange(agent_masked_tokens, 'b a t d -> (b a) t d').clone()
+        # agent_masked_tokens_pos_embeded = self.pe(agent_masked_tokens_)
+        # agent_tempo_key_padding = rearrange(~frame_valid_mask, 'b a t -> (b a) t') 
+        # # y, _ = self.tempo_net(agent_masked_tokens_pos_embeded, agent_tempo_key_padding) 
+        # agent_embedding_emb, agent_pos_emb = self.tempo_net(agent_masked_tokens_pos_embeded)
+
+        #############
 
         agent_embedding_emb = rearrange(agent_embedding_emb, '(b a) t c -> b a t c', b=bs, a=A)
         agent_embedding_emb = reduce(agent_embedding_emb, 'b a t c -> b a c', 'max')
         agent_embedding_emb = agent_embedding_emb + rearrange(agent_pos_emb, '(b a) c -> b a c', b=bs, a=A)
 
-        if seeds is None:
-            x = torch.cat([agent_embedding_emb, lane_embedding_pos], dim=1)
-            key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding], dim=-1)
-            res = [ x, key_padding_mask ]
-        else:
-            if seeds.dim() == 1:
-                seeds = repeat(seeds, 'd -> bs 1 d', bs=bs)
-            else:
-                seeds = repeat(seeds, 'n d -> bs n d', bs=bs)  
-            x = torch.cat([seeds, agent_embedding_emb, lane_embedding_pos], dim=1)
-            # key padding masks
-            key_padding_mask = torch.cat([torch.zeros(seeds.shape[0:2], device=agent_key_padding.device, dtype=torch.bool), agent_key_padding, polygon_key_padding], dim=-1)
-            res = [ x, key_padding_mask ]
+        x = torch.cat([ego_vel_token, agent_embedding_emb[:, 1:], lane_embedding_pos], dim=1) # drop the ego history token here
+        # key padding masks
+        # key_padding_mask = torch.cat([torch.zeros(ego_vel_token.shape[0:2], device=agent_key_padding.device, dtype=torch.bool), agent_key_padding, polygon_key_padding], dim=-1)
+        
+        key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding], dim=-1)
 
-        if need_route_kpmask:
-            assert seeds == None
-            res.append(torch.cat([agent_key_padding, route_kp_mask], dim=-1))
+        res = [x, key_padding_mask, route_kp_mask]
+
+        if training:
+            # lane_intention_targets
+            dist = torch.norm(polygon_pos[..., :2] - horizon_point[:, None, None, :], dim=-1) # [B, M, D] TODO: consider orientation match?
+            dist[route_kp_mask] = torch.inf
+            lane_intention_targets = dist.min(dim=-1)[0].argmin(dim=-1) # B
+
+            res.extend([lane_intention_targets, attraction_point])
         
         return res
 
 
-    def mask_and_embed(self, data, seeds):
+    def mask_and_embed(self, data, seeds): # 
         """
+            IMPORTANT: unmaintained, unusable now
             data: dict
             seeds: tensor (D, )
         """
 
-        agent_features, agent_mask, agent_key_padding = self.extract_agent_feature(data)
+        agent_features, agent_category, frame_valid_mask, agent_key_padding, ego_state = self.extract_agent_feature(data)
         bs, A = agent_features.shape[0:2]
         # agent_key_padding = ~(agent_mask.any(-1))
         if seeds.dim() == 1:
@@ -960,7 +1121,7 @@ class PlanningModel(TorchModuleWrapper):
         lane_embedding = self.map_encoder(lane_masked_tokens)
 
         agent_embedding = self.agent_projector(agent_features) # B A D
-        (agent_masked_tokens, frame_pred_mask) = self.trajectory_random_masking(agent_embedding, self.trajectory_mask_ratio, agent_mask)
+        (agent_masked_tokens, frame_pred_mask) = self.trajectory_random_masking(agent_embedding, self.trajectory_mask_ratio, frame_valid_mask)
 
         b, a = agent_masked_tokens.shape[0:2]
         agent_masked_tokens_ = rearrange(agent_masked_tokens, 'b a t d -> (b a) t d').clone()
@@ -974,7 +1135,7 @@ class PlanningModel(TorchModuleWrapper):
         x = torch.cat([seeds, x_agent_, lane_embedding], dim=1)
 
         # key padding masks
-        agent_key_padding = ~(agent_mask.any(-1))
+        agent_key_padding = ~(frame_valid_mask.any(-1))
         polygon_key_padding = ~(polygon_mask.any(-1))
         key_padding_mask = torch.cat([torch.zeros(seeds.shape[0:2], device=agent_key_padding.device, dtype=torch.bool), agent_key_padding, polygon_key_padding], dim=-1)
 
@@ -987,7 +1148,7 @@ class PlanningModel(TorchModuleWrapper):
         # forward through student model 
         for blk in self.SpaNet:
             x_stu = blk(x_stu, key_padding_mask=x_stu_key_padding_mask)
-        x_stu = self.norm(x_stu)
+        x_stu = self.norm_spa(x_stu)
 
         x, key_padding_mask = self.embed(data, self.rep_seed, include_future=True)
         # rep_seed is concatenated to each beginning of the sequence

@@ -47,6 +47,8 @@ class LightningTrainer(pl.LightningModule):
         self.temperature = temperature
         self.scaling = scaling
 
+        self.rel_weighting_sigma = 8
+
         self.automatic_optimization=False
 
         self.initial_finetune_flag = False
@@ -159,6 +161,29 @@ class LightningTrainer(pl.LightningModule):
             "ego_goal_loss": ego_goal_loss, # [bs]
             "ego_waypoints_loss": ego_waypoints_loss, # [bs]
         }
+    
+    def _cal_ego_loss_term(self, trajectory, probability, ego_target):
+        # 1. ego regression coarse to fine loss
+        ade = torch.norm(trajectory[..., :2] - ego_target[:, None, :, :2], dim=-1).sum(-1)
+        ade = torch.where(ade.isnan(), torch.inf, ade) 
+        # !!! this is to prevent nan trajectories triggered by the antagonistic masks.
+        # we can do this because if one antagonistic mask is all zeros, the other would be full of ones
+        # but this may interfere with identifying nan problems at other stages
+
+        best_mode = torch.argmin(ade, dim=-1) # [bs]
+        best_traj = trajectory[torch.arange(trajectory.shape[0]), best_mode]
+        ego_reg_loss = F.smooth_l1_loss(best_traj, ego_target, reduction='none').mean((1, 2))
+        # ego_reg_loss_mean = ego_reg_loss.mean()
+
+        ego_cls_loss = F.cross_entropy(probability, best_mode.detach(), reduction='none')
+
+        # loss = ego_reg_loss_mean + ego_cls_loss + agent_reg_loss
+        # ego_loss = ego_reg_loss_mean + ego_cls_loss + ego_goal_loss + ego_waypoints_loss
+
+        return {
+            "reg_loss": ego_reg_loss, # [bs]
+            "cls_loss": ego_cls_loss, # [bs]
+        }
 
     def _compute_objectives(self, res, data) -> Dict[str, torch.Tensor]:
         trajectory, probability, prediction= (
@@ -167,14 +192,40 @@ class LightningTrainer(pl.LightningModule):
             res["prediction"], # [bs, n_agents, n_steps, 2]
         )
 
-        goal = res["goal"] # [bs, 4]
-        waypoints = res["waypoints"] # [bs, 8, 4]
-
-
+        waypoints = res["waypoints"] # [bs, 20, 4]
+        n_wp = waypoints.shape[1]
+        far_future_traj = res["far_future_traj"] # [bs, 60, 4]
+        rel_prediction = res["rel_prediction"] # [bs, n_agents-1, n_waypoints, 2]
+        
         targets = data["agent"]["target"]
-        valid_mask = data["agent"]["valid_mask"][:, :, -trajectory.shape[-2] :]
+        valid_mask = data["agent"]["valid_mask"][:, :, -prediction.shape[-2] :]
 
+        agent_target, agent_mask = targets[:, 1:], valid_mask[:, 1:]
+        # agent_target, agent_mask = targets, valid_mask
+
+        # 1. absolute agent prediction
+        agent_reg_loss = F.smooth_l1_loss(
+            prediction*(agent_mask[..., None]), (agent_target*(agent_mask[..., None]))[..., :2], reduction='none'
+        ).sum((1, 2, 3))/agent_mask.sum((1,2))
+
+        # 2. relative agent prediction
         ego_target_pos, ego_target_heading = targets[:, 0, :, :2], targets[:, 0, :, 2]
+        rel_agent_pos_gt = (targets[:, 1:, :n_wp, :2] - ego_target_pos[:, None, :n_wp, :]) # [bs, n_agents-1, n_waypoints, 2]
+        loss_rel_agent_unweighted = F.smooth_l1_loss(rel_prediction, rel_agent_pos_gt, reduction='none').mean((-1)) # [bs, n_agents-1, n_waypoints]
+
+        coeff = self._gaussian_coeff_function(rel_agent_pos_gt.norm(dim=-1)) # [bs, n_agents-1, n_waypoints]
+        coeff[~agent_mask[:, :, :n_wp]] = 0
+        loss_rel_agent = (loss_rel_agent_unweighted * coeff).sum((1, 2)) / (coeff.sum((1, 2)))
+
+        # 3. lane intention loss
+        if "lane_intention_loss" in res:
+            lane_intention_loss = res["lane_intention_loss"]
+            lane_intention_dict = {k: res[k] for k in res.keys() if k.startswith("lane_intention")}
+        else: 
+            lane_intention_loss = torch.zeros_like(loss_rel_agent)
+            lane_intention_dict = {}
+
+        # 4. waypoint loss
         ego_target = torch.cat(
             [
                 ego_target_pos,
@@ -184,55 +235,57 @@ class LightningTrainer(pl.LightningModule):
             ],
             dim=-1,
         )
-        # agent_target, agent_mask = targets[:, 1:], valid_mask[:, 1:]
-        agent_target, agent_mask = targets, valid_mask
-        agent_reg_loss = F.smooth_l1_loss(
-            prediction[agent_mask], agent_target[agent_mask][:, :2]
-        )
+        waypoint_loss = F.smooth_l1_loss(waypoints, ego_target[:, :n_wp], reduction='none').mean((1, 2))
 
-        if trajectory.dim() == 4:
-            ego_loss_dict = self._cal_ego_loss_term_goal_wp(trajectory, probability, goal, waypoints, ego_target)
-            ret_dict = {
-            "reg_loss": ego_loss_dict["reg_loss"], 
-            "cls_loss": ego_loss_dict["cls_loss"],
+        # 5. far future loss
+        far_future_loss = F.smooth_l1_loss(far_future_traj, ego_target[:, n_wp:], reduction='none').mean((1, 2))
+        
+        # ego_loss_dict = self._cal_ego_loss_term(trajectory, probability, ego_target)
+        ret_dict_batch = {
             "agent_reg_loss": agent_reg_loss,
-            "ego_goal_loss": ego_loss_dict["ego_goal_loss"],
-            "ego_waypoints_loss": ego_loss_dict["ego_waypoints_loss"],
-            }
-            # loss = torch.mean(torch.stack([ret_dict[key] for key in ret_dict.keys()]))
-            loss_mat = torch.stack([ret_dict[key] for key in ["reg_loss", "cls_loss", "ego_goal_loss", "ego_waypoints_loss"]], dim=1) # [bs, 4]
-            if self.scaling == True:
-                reg_loss_normed = (ret_dict["reg_loss"] - ret_dict["reg_loss"].min()) / (ret_dict["reg_loss"].max() - ret_dict["reg_loss"].min() + 1e-6) # [bs]
-                scale = torch.exp(reg_loss_normed/self.temperature).detach().clone() # [bs]
-                loss = (loss_mat.mean(-1) * scale).mean() + agent_reg_loss
-            else:
-                loss = loss_mat.mean() + agent_reg_loss
-            ret_dict.update({"loss": loss})
-            return ret_dict
+            "rel_agent_pos_loss": loss_rel_agent,
+            "lane_intention_loss": lane_intention_loss,
+            "waypoint_loss": waypoint_loss,
+            "far_future_loss": far_future_loss,
+        }
+        # loss = torch.mean(torch.stack([ret_dict[key] for key in ret_dict.keys()]))
+        loss_mat = torch.stack(list(ret_dict_batch.values()), dim=-1) # [bs, 5]
+        if self.scaling == True:
+            reg_loss_normed = (ret_dict_batch["waypoint_loss"] - ret_dict_batch["waypoint_loss"].min()) / (ret_dict_batch["waypoint_loss"].max() - ret_dict_batch["waypoint_loss"].min() + 1e-6) # [bs]
+            scale = torch.exp(reg_loss_normed/self.temperature).detach().clone() # [bs]
+            loss = (loss_mat.mean(-1) * scale).mean()
+        else:
+            loss = loss_mat.mean()
 
-        elif trajectory.dim() == 5:
-            score = res["score"] # [bs, n_element], score ranging from 0 to 1
-            masks = res["masks"] # [bs, N_mask, n_element], binary masks with False for valid elements
+        ret_dict_mean = {key: value.mean() for key, value in ret_dict_batch.items()}
+        ret_dict_mean.update(lane_intention_dict)
+        ret_dict_mean["loss"] = loss
 
-            comparison_key = "reg_loss" # the key can be changed
-            ego_loss_dict_list = [self._cal_ego_loss_term(trajectory[:, i], probability[:, i], goal[:, i], waypoints[:, i], ego_target) for i in range(trajectory.shape[1])]
-            stacked_tensor_list = {key: torch.stack([ego_loss_dict[key] for ego_loss_dict in ego_loss_dict_list], dim=1) for key in ego_loss_dict_list[0].keys()}
-            better_mask = torch.argmin(stacked_tensor_list[comparison_key], dim=1) # [bs]
-            selected_losses = {key: torch.gather(stacked_tensor_list[key], 1, better_mask[:, None]) for key in stacked_tensor_list.keys()}
-            mean_loss_dict = {key: selected_losses[key].mean() for key in selected_losses.keys()}
-            mean_loss_dict.update({"agent_reg_loss": agent_reg_loss})
+        return ret_dict_mean
 
-            score_loss_1 = F.mse_loss(score, torch.where(better_mask == 0, 1.0, -1.0).unsqueeze(-1).repeat(1, score.shape[-1]), reduction='none')
-            score_loss_2 = F.mse_loss(score, torch.where(better_mask == 1, 1.0, -1.0).unsqueeze(-1).repeat(1, score.shape[-1]), reduction='none')
-            score_loss = score_loss_1[~masks[:, 0]].mean() + score_loss_2[~masks[:, 1]].mean()
-            mean_loss_dict.update({"score_loss": score_loss, "0_better_ratio": (better_mask == 0).float().mean()})
+        # elif trajectory.dim() == 5:
+        #     score = res["score"] # [bs, n_element], score ranging from 0 to 1
+        #     masks = res["masks"] # [bs, N_mask, n_element], binary masks with False for valid elements
 
-            mean_loss_dict.update({"loss": torch.mean(torch.stack([mean_loss_dict[key] for key in mean_loss_dict.keys()]))})
-            mean_loss_dict.update({"0_better_ratio": (better_mask == 0).float().sum()})
-            mean_loss_dict.update({"sup_better_ratio": (better_mask == 0).float().mean()})
-            return mean_loss_dict
-        else: 
-            raise ValueError("trajectory dim should be 4 or 5")
+        #     comparison_key = "reg_loss" # the key can be changed
+        #     ego_loss_dict_list = [self._cal_ego_loss_term(trajectory[:, i], probability[:, i], goal[:, i], waypoints[:, i], ego_target) for i in range(trajectory.shape[1])]
+        #     stacked_tensor_list = {key: torch.stack([ego_loss_dict[key] for ego_loss_dict in ego_loss_dict_list], dim=1) for key in ego_loss_dict_list[0].keys()}
+        #     better_mask = torch.argmin(stacked_tensor_list[comparison_key], dim=1) # [bs]
+        #     selected_losses = {key: torch.gather(stacked_tensor_list[key], 1, better_mask[:, None]) for key in stacked_tensor_list.keys()}
+        #     mean_loss_dict = {key: selected_losses[key].mean() for key in selected_losses.keys()}
+        #     mean_loss_dict.update({"agent_reg_loss": agent_reg_loss})
+
+        #     score_loss_1 = F.mse_loss(score, torch.where(better_mask == 0, 1.0, -1.0).unsqueeze(-1).repeat(1, score.shape[-1]), reduction='none')
+        #     score_loss_2 = F.mse_loss(score, torch.where(better_mask == 1, 1.0, -1.0).unsqueeze(-1).repeat(1, score.shape[-1]), reduction='none')
+        #     score_loss = score_loss_1[~masks[:, 0]].mean() + score_loss_2[~masks[:, 1]].mean()
+        #     mean_loss_dict.update({"score_loss": score_loss, "0_better_ratio": (better_mask == 0).float().mean()})
+
+        #     mean_loss_dict.update({"loss": torch.mean(torch.stack([mean_loss_dict[key] for key in mean_loss_dict.keys()]))})
+        #     mean_loss_dict.update({"0_better_ratio": (better_mask == 0).float().sum()})
+        #     mean_loss_dict.update({"sup_better_ratio": (better_mask == 0).float().mean()})
+        #     return mean_loss_dict
+        # else: 
+        #     raise ValueError("trajectory dim should be 4 or 5")
 
         
 
@@ -254,7 +307,8 @@ class LightningTrainer(pl.LightningModule):
         # }
     
     # def winner_take_all_loss_cal(self, trajectory, targets):
-        
+    def _gaussian_coeff_function(self, x):
+        return torch.exp(-x**2/(2*self.rel_weighting_sigma)**2).detach()
 
     def _compute_metrics(self, output, data, prefix) -> Dict[str, torch.Tensor]:
         metrics = self.metrics[prefix](output, data["agent"]["target"][:, 0])
