@@ -320,7 +320,7 @@ class PlanningModel(TorchModuleWrapper):
         
 
     def forward(self, data, current_epoch=None):
-        return self.forward_inference(data)
+        # return self.forward_inference(data)
         if current_epoch is None: # when inference
             # return self.forward_pretrain_separate(data)
             return self.forward_inference(data)
