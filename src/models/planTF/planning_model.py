@@ -827,6 +827,8 @@ class PlanningModel(TorchModuleWrapper):
         trajectory = torch.cat([waypoints, far_future_traj], dim=1).unsqueeze(1) # B 1 T 4
         probability = torch.ones(bs, 1, device=trajectory.device) # B 1 
 
+        assert trajectory.isnan().any() == False
+
         out = {
             "trajectory": trajectory,
             "probability": probability,

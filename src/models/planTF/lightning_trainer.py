@@ -204,9 +204,15 @@ class LightningTrainer(pl.LightningModule):
         # agent_target, agent_mask = targets, valid_mask
 
         # 1. absolute agent prediction
+        deno = agent_mask.sum((1, 2))
+        deno[deno == 0] = 1
         agent_reg_loss = F.smooth_l1_loss(
             prediction*(agent_mask[..., None]), (agent_target*(agent_mask[..., None]))[..., :2], reduction='none'
-        ).sum((1, 2, 3))/agent_mask.sum((1,2))
+        ).sum((1, 2, 3))/deno
+
+        # agent_reg_loss = F.smooth_l1_loss(
+        #     prediction[agent_mask], agent_target[agent_mask][..., :2], reduction='none'
+        # ).mean()
 
         # 2. relative agent prediction
         ego_target_pos, ego_target_heading = targets[:, 0, :, :2], targets[:, 0, :, 2]
@@ -215,10 +221,11 @@ class LightningTrainer(pl.LightningModule):
 
         coeff = self._gaussian_coeff_function(rel_agent_pos_gt.norm(dim=-1)) # [bs, n_agents-1, n_waypoints]
         coeff[~agent_mask[:, :, :n_wp]] = 0
-        loss_rel_agent = (loss_rel_agent_unweighted * coeff).sum((1, 2)) / (coeff.sum((1, 2)))
+        loss_rel_agent = (loss_rel_agent_unweighted * coeff).sum((1, 2)) / (coeff.sum((1, 2))+1e-6)
 
         # 3. lane intention loss
         if "lane_intention_loss" in res:
+        # if True:
             lane_intention_loss = res["lane_intention_loss"]
             lane_intention_dict = {k: res[k] for k in res.keys() if k.startswith("lane_intention")}
         else: 
