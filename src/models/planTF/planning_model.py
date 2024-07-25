@@ -326,7 +326,7 @@ class PlanningModel(TorchModuleWrapper):
             return self.forward_inference(data)
             # return self.forward_antagonistic_mask_finetune(data, current_epoch)
         else:
-            if self.training and current_epoch < 10:
+            if self.training and current_epoch < 25:
                 return self.forward_finetune(data)
             else:
                 return self.forward_inference(data)
