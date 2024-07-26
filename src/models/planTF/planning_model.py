@@ -101,6 +101,7 @@ class PlanningModel(TorchModuleWrapper):
         out_channels = 4,
         N_mask = 2,
         waypoints_number = 20,
+        whether_split_lane = False,
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
     ) -> None:
         super().__init__(
@@ -131,6 +132,7 @@ class PlanningModel(TorchModuleWrapper):
         self.expanded_dim = expanded_dim
         self.out_channels = out_channels
         self.N_mask = N_mask
+        self.whether_split_lane = whether_split_lane
 
         # modules begin
         self.pe = PositionalEncoding(dim, dropout=0.1, max_len=1000)
@@ -373,18 +375,23 @@ class PlanningModel(TorchModuleWrapper):
 
         # point_position_feature = torch.zeros(point_position[:,:,0].shape, device=point_position.device) # B M 20 2
         # point_position_feature[valid_mask] = point_position[:,:,0][valid_mask]
-
-        point_position_feature, valid_mask, new_poly_prop = PlanningModel.split_lane_segment(point_position[:,:,0], valid_mask, self.lane_split_threshold, polygon_property)
+        if self.whether_split_lane:
+            point_position_feature, valid_mask_r, new_poly_prop = PlanningModel.split_lane_segment(point_position[:,:,0], valid_mask, self.lane_split_threshold, polygon_property)
+        else:
+            point_position_feature = point_position[:,:,0]
+            valid_mask_r = valid_mask
+            new_poly_prop = polygon_property
+        
         # point_position_feature = rearrange(point_position_feature, 'b m p c -> b m (p c)')
 
         # feature = torch.cat([point_position_feature, new_poly_prop], dim=-1)
-        polygon_key_padding = ~(valid_mask.any(-1))
+        polygon_key_padding = ~(valid_mask_r.any(-1))
 
         if not need_route_kpmask:
-            return point_position_feature, new_poly_prop, valid_mask, polygon_key_padding
+            return point_position_feature, new_poly_prop, valid_mask_r, polygon_key_padding
         else: 
             route_kpmask = ~((polygon_key_padding==0)&(new_poly_prop[..., 1]==1)) # valid and on route, then take the opposite
-            return point_position_feature, new_poly_prop, valid_mask, polygon_key_padding, route_kpmask # [B, M_new]
+            return point_position_feature, new_poly_prop, valid_mask_r, polygon_key_padding, route_kpmask # [B, M_new]
 
 
 
@@ -842,7 +849,7 @@ class PlanningModel(TorchModuleWrapper):
         }
 
         if not self.training:
-            output_trajectory = trajectory
+            output_trajectory = trajectory[:, 0]
             angle = torch.atan2(output_trajectory[..., 3], output_trajectory[..., 2])
             out["output_trajectory"] = torch.cat(
                 [output_trajectory[..., :2], angle.unsqueeze(-1)], dim=-1
@@ -876,6 +883,9 @@ class PlanningModel(TorchModuleWrapper):
 
         # find the lane segment with the highest probability
         lane_intention_max = lane_intention_prob.argmax(dim=-1)
+        # Ensure indices are within bounds
+        assert lane_intention_max.max() < x[:, A:].shape[1], "Index out of bounds in lane_intention_max"
+
         intention_lane_seg = x[:, A:][torch.arange(bs), lane_intention_max]
         assert route_key_padding_mask[torch.arange(bs), lane_intention_max].any() == False # assert the selected lane segment is on the route
 
