@@ -910,7 +910,7 @@ class PlanningModel(TorchModuleWrapper):
         }
 
         if not self.training:
-            output_trajectory = trajectory
+            output_trajectory = trajectory[:, 0]
             angle = torch.atan2(output_trajectory[..., 3], output_trajectory[..., 2])
             out["output_trajectory"] = torch.cat(
                 [output_trajectory[..., :2], angle.unsqueeze(-1)], dim=-1
