@@ -264,6 +264,8 @@ class PlanningModel(TorchModuleWrapper):
         self.agent_tail_predictor = build_mlp(dim, [dim * 2, (future_steps-1) * 4], norm="ln")
         self.abs_agent_predictor = build_mlp(dim, [dim * 2, future_steps * 2], norm="ln")
         self.rel_agent_predictor = build_mlp(dim, [dim * 2, waypoints_number * 2], norm="ln")
+        self.lane_emb_wp_mlp = build_mlp(dim, [dim * 2 , dim], norm="ln")
+        self.lane_emb_cr_mlp = build_mlp(dim, [dim * 2 , dim], norm="ln")
         self.lane_intention_predictor = Projector(to_dim=1, in_channels=dim)
         self.attraction_point_projector = Projector(to_dim=dim, in_channels=4)
         self.vel_token_projector = Projector(to_dim=dim, in_channels=1)
@@ -328,7 +330,7 @@ class PlanningModel(TorchModuleWrapper):
             return self.forward_inference(data)
             # return self.forward_antagonistic_mask_finetune(data, current_epoch)
         else:
-            if self.training and current_epoch < 25:
+            if self.training and current_epoch <= 25:
                 return self.forward_finetune(data)
             else:
                 return self.forward_inference(data)
@@ -683,15 +685,15 @@ class PlanningModel(TorchModuleWrapper):
 
         return out
 
-    def plot_scene_attention(self, data, attn_weights, output_trajectory, key_padding_mask, k=0):
+    def plot_lane_intention(self, data, lane_intention_score, output_trajectory, key_padding_mask, k=0):
         i = 0
         polygon_pos, polypon_prop, polygon_mask, polygon_key_padding = self.extract_map_feature(data)
         agent_features, agent_category, frame_valid_mask, agent_key_padding, ego_state = self.extract_agent_feature(data, include_future=False)
-        assert agent_features.shape[1]+polygon_pos.shape[1] == attn_weights.shape[1]
-        map_points = polygon_pos[i][..., :40]
-        map_points_reshape = map_points.reshape(map_points.shape[0], -1, 2)
-        plot_scene_attention(agent_features[i], frame_valid_mask[i], map_points_reshape, attn_weights[i],
-                             key_padding_mask[i, 1:], 
+        # assert agent_features.shape[1]+polygon_pos.shape[1] == attn_weights.shape[1]
+        assert polygon_pos.shape[1] == lane_intention_score.shape[1]
+        map_points = polygon_pos[i]
+        plot_scene_attention(agent_features[i], frame_valid_mask[i], map_points, lane_intention_score[i],
+                             key_padding_mask[i, :], 
                               output_trajectory[i], filename=self.inference_counter, prefix=k)
         
 
@@ -798,7 +800,7 @@ class PlanningModel(TorchModuleWrapper):
         lane_intention[route_key_padding_mask] = -torch.inf # except the route, all the other map elements are set to -inf
         lane_intention_prob = F.softmax(lane_intention, dim=-1)
 
-        loss_lane_intention = F.cross_entropy(lane_intention, lane_intention_targets, reduction="none")
+        loss_lane_intention = F.cross_entropy(lane_intention_prob, lane_intention_targets, reduction="none")
 
         # find the lane segment with the highest probability
         lane_intention_max = lane_intention_prob.argmax(dim=-1)
@@ -809,10 +811,10 @@ class PlanningModel(TorchModuleWrapper):
         # intention_lane_seg = x[:, A:][torch.arange(bs), lane_intention_max]
         # assert route_key_padding_mask[torch.arange(bs), lane_intention_max].any() == False # assert the selected lane segment is on the route
 
-        intention_lane_seg = x[:, A:][torch.arange(bs), lane_intention_targets]
+        intention_lane_seg = x_orig[:, A:][torch.arange(bs), lane_intention_targets]
         assert route_key_padding_mask[torch.arange(bs), lane_intention_targets].any() == False # assert the selected lane segment is on the route
 
-        x_wpnet = torch.cat([intention_lane_seg.unsqueeze(1), x_orig[:,1:]], dim=1)
+        x_wpnet = torch.cat([self.lane_emb_wp_mlp(intention_lane_seg).unsqueeze(1), x_orig[:,1:]], dim=1)
         for blk in self.WpNet:
             x_wpnet = blk(x_wpnet, key_padding_mask=key_padding_mask)
         x_wpnet = self.norm_wp(x_wpnet)
@@ -822,7 +824,7 @@ class PlanningModel(TorchModuleWrapper):
         # decode the far-future trajectory
         # attraction_point = waypoints[:, -1] 
         attraction_point = attraction_point_gt
-        q = (self.attraction_point_projector(attraction_point)+intention_lane_seg).unsqueeze(1)
+        q = (self.attraction_point_projector(attraction_point)+self.lane_emb_cr_mlp(intention_lane_seg)).unsqueeze(1)
 
         for blk in self.cross_attender:
             q = blk(query=q, key_value=x_orig[:,1:], key_padding_mask=key_padding_mask[:, 1:])
@@ -859,7 +861,7 @@ class PlanningModel(TorchModuleWrapper):
         if False:
             attn_weights = self.SpaNet[-1].attn_mat[:, 0].detach()
             # visualize the scene using the attention weights
-            self.plot_scene_attention(data, attn_weights, output_trajectory, key_padding_mask, 0)
+            self.plot_lane_intention(data, attn_weights, output_trajectory, key_padding_mask, 0)
             self.inference_counter += 1
 
         return out
@@ -886,10 +888,10 @@ class PlanningModel(TorchModuleWrapper):
         # Ensure indices are within bounds
         assert lane_intention_max.max() < x[:, A:].shape[1], "Index out of bounds in lane_intention_max"
 
-        intention_lane_seg = x[:, A:][torch.arange(bs), lane_intention_max]
+        intention_lane_seg = x_orig[:, A:][torch.arange(bs), lane_intention_max]
         assert route_key_padding_mask[torch.arange(bs), lane_intention_max].any() == False # assert the selected lane segment is on the route
 
-        x_wpnet = torch.cat([intention_lane_seg.unsqueeze(1), x_orig[:,1:]], dim=1)
+        x_wpnet = torch.cat([self.lane_emb_wp_mlp(intention_lane_seg).unsqueeze(1), x_orig[:,1:]], dim=1)
         for blk in self.WpNet:
             x_wpnet = blk(x_wpnet, key_padding_mask=key_padding_mask)
         x_wpnet = self.norm_wp(x_wpnet)
@@ -898,7 +900,7 @@ class PlanningModel(TorchModuleWrapper):
 
         # decode the far-future trajectory
         attraction_point = waypoints[:, -1] 
-        q = (self.attraction_point_projector(attraction_point)+intention_lane_seg).unsqueeze(1)
+        q = (self.attraction_point_projector(attraction_point)+self.lane_emb_cr_mlp(intention_lane_seg)).unsqueeze(1)
 
         for blk in self.cross_attender:
             q = blk(query=q, key_value=x_orig[:,1:], key_padding_mask=key_padding_mask[:, 1:])
@@ -928,9 +930,9 @@ class PlanningModel(TorchModuleWrapper):
 
         # attention visualization
         if False:
-            attn_weights = self.SpaNet[-1].attn_mat[:, 0].detach()
+            # attn_weights = self.SpaNet[-1].attn_mat[:, 0].detach()
             # visualize the scene using the attention weights
-            self.plot_scene_attention(data, attn_weights, output_trajectory, key_padding_mask, 0)
+            self.plot_lane_intention(data, lane_intention_prob, output_trajectory, key_padding_mask, 0)
             self.inference_counter += 1
 
         return out
@@ -1016,7 +1018,7 @@ class PlanningModel(TorchModuleWrapper):
             assert bs == 1
             sorted_score, sorted_idx = torch.sort(score[0], descending=True)
             score[0, sorted_idx[sorted_idx.shape[0]//2:]] = 0
-            self.plot_scene_attention(data, score, output_trajectory, key_padding_mask, 0)
+            self.plot_lane_intention(data, score, output_trajectory, key_padding_mask, 0)
             self.inference_counter += 1
 
         return out
@@ -1040,7 +1042,7 @@ class PlanningModel(TorchModuleWrapper):
 
         """
         
-        polygon_pos, polypon_prop, polygon_mask, route_kp_mask, polygon_key_padding = self.extract_map_feature(data, need_route_kpmask=True)
+        polygon_pos, polypon_prop, polygon_mask, polygon_key_padding, route_kp_mask = self.extract_map_feature(data, need_route_kpmask=True)
     
         # lane embedding
         lane_embedding, lane_pos_emb = self.map_encoder(polygon_pos, polypon_prop, polygon_mask)
