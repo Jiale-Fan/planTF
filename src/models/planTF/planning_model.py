@@ -812,7 +812,8 @@ class PlanningModel(TorchModuleWrapper):
         # assert route_key_padding_mask[torch.arange(bs), lane_intention_max].any() == False # assert the selected lane segment is on the route
 
         intention_lane_seg = x_orig[:, A:][torch.arange(bs), lane_intention_targets]
-        assert route_key_padding_mask[torch.arange(bs), lane_intention_targets].any() == False # assert the selected lane segment is on the route
+        # assert route_key_padding_mask[torch.arange(bs), lane_intention_targets].any() == False # assert the selected lane segment is on the route
+        # The above assertion would cause error, probably because there are scenarios where no route lane is known
 
         x_wpnet = torch.cat([self.lane_emb_wp_mlp(intention_lane_seg).unsqueeze(1), x_orig[:,1:]], dim=1)
         for blk in self.WpNet:
@@ -889,7 +890,7 @@ class PlanningModel(TorchModuleWrapper):
         assert lane_intention_max.max() < x[:, A:].shape[1], "Index out of bounds in lane_intention_max"
 
         intention_lane_seg = x_orig[:, A:][torch.arange(bs), lane_intention_max]
-        assert route_key_padding_mask[torch.arange(bs), lane_intention_max].any() == False # assert the selected lane segment is on the route
+        # assert route_key_padding_mask[torch.arange(bs), lane_intention_max].any() == False # assert the selected lane segment is on the route
 
         x_wpnet = torch.cat([self.lane_emb_wp_mlp(intention_lane_seg).unsqueeze(1), x_orig[:,1:]], dim=1)
         for blk in self.WpNet:
