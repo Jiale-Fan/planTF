@@ -151,8 +151,10 @@ python run_training.py \
   py_func=train +training=train_planTF \
   worker=single_machine_thread_pool worker.max_workers=24 \
   scenario_builder=nuplan cache.cache_path=/media/jiale/Jiale_SSD1/cache/cache_plantf_aug cache.use_cache_without_dataset=true \
-  data_loader.params.batch_size=42 data_loader.params.num_workers=24 \
+  data_loader.params.batch_size=64 data_loader.params.num_workers=24 \
   lr=1e-3 epochs=35 warmup_epochs=3 weight_decay=0.0001 \
   lightning.trainer.params.check_val_every_n_epoch=2 \
-  wandb.mode=online wandb.project=nuplan wandb.name=sw4_mix-mask3
+  wandb.mode=online wandb.project=nuplan wandb.name=2407_1.1_ft25
   '''  
+
+# sudo mount /dev/sdb1 /media/jiale/Jiale_SSD1

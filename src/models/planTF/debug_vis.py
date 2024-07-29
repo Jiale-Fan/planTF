@@ -42,7 +42,9 @@ def plot_scene_attention(hist_trajs, trajectory_valid_mask, map_segments, lane_i
     fig, ax = plt.subplots()
     A, T, D1 = hist_trajs.shape
     M, P, D2 = map_segments.shape
-    normed_attn_weights = lane_intention_score / np.max(lane_intention_score)
+    # normed_attn_weights = lane_intention_score / np.max(lane_intention_score)
+    normed_attn_weights = ((lane_intention_score / np.max(lane_intention_score))+1)/2
+    normed_attn_weights[lane_intention_score==0] = 0
     colors = cm.magma(normed_attn_weights)
 
     # sort the attention weights to make sure that the most important segments are plotted on top

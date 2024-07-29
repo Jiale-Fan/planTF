@@ -36,7 +36,7 @@ def create_gif_from_images(directory, output_filename):
         print("No images found to create a GIF.")
 
 # Usage
-# directory = '/home/jiale/Documents/exp/exp/simulation/open_loop_boxes/test14-hard/planTF/debug_files/'  # Replace with the path to your directory
-directory = '/home/jiale/Documents/exp/exp/simulation/closed_loop_nonreactive_agents/test14-hard/planTF/debug_files/'  # Replace with the path to your directory
+directory = '/home/jiale/Documents/exp/exp/simulation/open_loop_boxes/test14-hard/planTF/debug_files/'  # Replace with the path to your directory
+# directory = '/home/jiale/Documents/exp/exp/simulation/closed_loop_nonreactive_agents/test14-hard/planTF/debug_files/'  # Replace with the path to your directory
 output_filename = 'output.gif'  # Replace with the desired output filename
 create_gif_from_images(directory, output_filename)
