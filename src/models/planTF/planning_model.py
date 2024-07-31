@@ -79,7 +79,7 @@ class PlanningModel(TorchModuleWrapper):
         history_channel=9,
         history_steps=21,
         future_steps=80,
-        encoder_depth=2,
+        encoder_depth=4,
         decoder_depth=3, 
         drop_path=0.2,
         num_heads=8,
@@ -228,17 +228,17 @@ class PlanningModel(TorchModuleWrapper):
             out_channels=4,
         )
 
-        self.cross_attender = nn.ModuleList(
-            CrossAttender(
+        self.FFNet = nn.ModuleList(
+            Block(
                 dim=dim,
                 num_heads=num_heads,
                 mlp_ratio=mlp_ratio,
                 qkv_bias=qkv_bias,
-                drop_path=[x.item() for x in torch.linspace(0, drop_path, decoder_depth)][i],
+                drop_path=dpr[i],
             )
-            for i in range(decoder_depth)
+            for i in range(encoder_depth)
         )
-
+        self.norm_ff = nn.LayerNorm(dim)
         # self.coarse_to_fine_decoder = nn.ModuleList(
         #     torch.nn.TransformerDecoderLayer(dim, 
         #                                      num_heads, 
@@ -265,7 +265,7 @@ class PlanningModel(TorchModuleWrapper):
         self.abs_agent_predictor = build_mlp(dim, [dim * 2, future_steps * 2], norm="ln")
         self.rel_agent_predictor = build_mlp(dim, [dim * 2, waypoints_number * 2], norm="ln")
         self.lane_emb_wp_mlp = build_mlp(dim, [dim * 2 , dim], norm="ln")
-        self.lane_emb_cr_mlp = build_mlp(dim, [dim * 2 , dim], norm="ln")
+        self.lane_emb_ff_mlp = build_mlp(dim, [dim * 2 , dim], norm="ln")
         self.lane_intention_predictor = Projector(to_dim=1, in_channels=dim)
         self.attraction_point_projector = Projector(to_dim=dim, in_channels=4)
         self.vel_token_projector = Projector(to_dim=dim, in_channels=1)
@@ -295,9 +295,9 @@ class PlanningModel(TorchModuleWrapper):
                 self.map_encoder, self.lane_pred, self.agent_frame_predictor, self.SpaNet, self.norm_spa, self.agent_tail_predictor]
 
     def get_finetune_modules(self):
-        return [self.ego_seed, self.waypoint_decoder, self.far_future_traj_decoder, self.cross_attender, self.goal_mlp,
+        return [self.ego_seed, self.waypoint_decoder, self.far_future_traj_decoder, self.FFNet, self.goal_mlp,
                 self.abs_agent_predictor, self.rel_agent_predictor, self.lane_intention_predictor, self.attraction_point_projector,
-                self.vel_token_projector, self.WpNet, self.norm_wp]
+                self.vel_token_projector, self.WpNet, self.norm_wp, self.norm_ff]
 
 
     def get_stage(self, current_epoch):
@@ -370,7 +370,7 @@ class PlanningModel(TorchModuleWrapper):
         # point_vector = data["map"]["point_vector"]  
 
         # # B M 3 20
-        # point_orientation = data["map"]["point_orientation"]
+        point_orientation = data["map"]["point_orientation"]
 
         # # B M 20
         valid_mask = data["map"]["valid_mask"]
@@ -389,11 +389,13 @@ class PlanningModel(TorchModuleWrapper):
         # feature = torch.cat([point_position_feature, new_poly_prop], dim=-1)
         polygon_key_padding = ~(valid_mask_r.any(-1))
 
+        point_orientation_feature = point_orientation[:,:,0].unsqueeze(-1) # B M 20
+
         if not need_route_kpmask:
-            return point_position_feature, new_poly_prop, valid_mask_r, polygon_key_padding
+            return point_position_feature, point_orientation_feature, new_poly_prop, valid_mask_r, polygon_key_padding
         else: 
             route_kpmask = ~((polygon_key_padding==0)&(new_poly_prop[..., 1]==1)) # valid and on route, then take the opposite
-            return point_position_feature, new_poly_prop, valid_mask_r, polygon_key_padding, route_kpmask # [B, M_new]
+            return point_position_feature, point_orientation_feature, new_poly_prop, valid_mask_r, polygon_key_padding, route_kpmask # [B, M_new]
 
 
 
@@ -687,7 +689,7 @@ class PlanningModel(TorchModuleWrapper):
 
     def plot_lane_intention(self, data, lane_intention_score, output_trajectory, key_padding_mask, k=0):
         i = 0
-        polygon_pos, polypon_prop, polygon_mask, polygon_key_padding = self.extract_map_feature(data)
+        polygon_pos, _, polypon_prop, polygon_mask, polygon_key_padding = self.extract_map_feature(data)
         agent_features, agent_category, frame_valid_mask, agent_key_padding, ego_state = self.extract_agent_feature(data, include_future=False)
         # assert agent_features.shape[1]+polygon_pos.shape[1] == attn_weights.shape[1]
         assert polygon_pos.shape[1] == lane_intention_score.shape[1]
@@ -797,7 +799,10 @@ class PlanningModel(TorchModuleWrapper):
 
         abs_prediction = self.abs_agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2)
         lane_intention = self.lane_intention_predictor(x[:, A:]).squeeze(-1) # B M
-        lane_intention[route_key_padding_mask] = -torch.inf # except the route, all the other map elements are set to -inf
+        # lane_intention[route_key_padding_mask] = -torch.inf # except the route, all the other map elements are set to -inf
+        lane_intention[key_padding_mask[:, A:]] = -torch.inf # invalide map elements are set to -inf. non-route lane segments remain possible to be selected,
+        # since after disable route correction, the density of route lane segments gets lower
+
         lane_intention_prob = F.softmax(lane_intention, dim=-1)
 
         loss_lane_intention = F.cross_entropy(lane_intention_prob, lane_intention_targets, reduction="none")
@@ -815,6 +820,16 @@ class PlanningModel(TorchModuleWrapper):
         # assert route_key_padding_mask[torch.arange(bs), lane_intention_targets].any() == False # assert the selected lane segment is on the route
         # The above assertion would cause error, probably because there are scenarios where no route lane is known
 
+        ################ FFNet ################
+        x_ffnet = torch.cat([self.lane_emb_ff_mlp(intention_lane_seg).unsqueeze(1), x_orig[:,1:]], dim=1)
+        for blk in self.FFNet:
+            x_ffnet = blk(x_ffnet, key_padding_mask=key_padding_mask)
+        x_ffnet = self.norm_ff(x_ffnet)
+        far_future_traj = self.far_future_traj_decoder(x_ffnet[:, 0])
+
+        ################ WpNet ################ 
+        # attraction_point = attraction_point_gt
+        # q = (self.attraction_point_projector(attraction_point)+self.lane_emb_cr_mlp(intention_lane_seg)).unsqueeze(1)
         x_wpnet = torch.cat([self.lane_emb_wp_mlp(intention_lane_seg).unsqueeze(1), x_orig[:,1:]], dim=1)
         for blk in self.WpNet:
             x_wpnet = blk(x_wpnet, key_padding_mask=key_padding_mask)
@@ -824,16 +839,10 @@ class PlanningModel(TorchModuleWrapper):
 
         # decode the far-future trajectory
         # attraction_point = waypoints[:, -1] 
-        attraction_point = attraction_point_gt
-        q = (self.attraction_point_projector(attraction_point)+self.lane_emb_cr_mlp(intention_lane_seg)).unsqueeze(1)
-
-        for blk in self.cross_attender:
-            q = blk(query=q, key_value=x_orig[:,1:], key_padding_mask=key_padding_mask[:, 1:])
 
         # restrict the attention to the route only in the cross attender
         # q, attn_weights = blk(query=q, key=x, value=x, key_padding_mask=route_kpmask, need_weights=True) 
 
-        far_future_traj = self.far_future_traj_decoder(q) 
         trajectory = torch.cat([waypoints, far_future_traj], dim=1).unsqueeze(1) # B 1 T 4
         probability = torch.ones(bs, 1, device=trajectory.device) # B 1 
 
@@ -870,7 +879,7 @@ class PlanningModel(TorchModuleWrapper):
     def forward_inference(self, data):
         bs, A = data["agent"]["heading"].shape[0:2]
         # x_orig, key_padding_mask = self.embed(data, torch.cat((self.plan_seed, self.rep_seed)))
-        x_orig, key_padding_mask, route_key_padding_mask = self.embed(data)
+        x_orig, key_padding_mask, route_key_padding_mask, lane_intention_targets, attraction_point_gt = self.embed(data, training=True)
 
         # no need to remove the ego token here. Right?
 
@@ -881,7 +890,10 @@ class PlanningModel(TorchModuleWrapper):
 
         abs_prediction = self.abs_agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2)
         lane_intention = self.lane_intention_predictor(x[:, A:]).squeeze(-1) # B M
-        lane_intention[route_key_padding_mask] = -torch.inf # except the route, all the other map elements are set to -inf
+        # lane_intention[route_key_padding_mask] = -torch.inf # except the route, all the other map elements are set to -inf
+        lane_intention[key_padding_mask[:, A:]] = -torch.inf # invalide map elements are set to -inf. non-route lane segments remain possible to be selected,
+        # since after disable route correction, the density of route lane segments gets lower
+
         lane_intention_prob = F.softmax(lane_intention, dim=-1)
 
         # find the lane segment with the highest probability
@@ -892,24 +904,22 @@ class PlanningModel(TorchModuleWrapper):
         intention_lane_seg = x_orig[:, A:][torch.arange(bs), lane_intention_max]
         # assert route_key_padding_mask[torch.arange(bs), lane_intention_max].any() == False # assert the selected lane segment is on the route
 
+        ################ FFNet ################
+        x_ffnet = torch.cat([self.lane_emb_ff_mlp(intention_lane_seg).unsqueeze(1), x_orig[:,1:]], dim=1)
+        for blk in self.FFNet:
+            x_ffnet = blk(x_ffnet, key_padding_mask=key_padding_mask)
+        x_ffnet = self.norm_ff(x_ffnet)
+        far_future_traj = self.far_future_traj_decoder(x_ffnet[:, 0])
+
+        ################ WpNet ################ 
+        # attraction_point = attraction_point_gt
+        # q = (self.attraction_point_projector(attraction_point)+self.lane_emb_cr_mlp(intention_lane_seg)).unsqueeze(1)
         x_wpnet = torch.cat([self.lane_emb_wp_mlp(intention_lane_seg).unsqueeze(1), x_orig[:,1:]], dim=1)
         for blk in self.WpNet:
             x_wpnet = blk(x_wpnet, key_padding_mask=key_padding_mask)
         x_wpnet = self.norm_wp(x_wpnet)
         rel_prediction = self.rel_agent_predictor(x_wpnet[:, 1:A]).view(bs, -1, self.waypoints_number, 2)
         waypoints = self.waypoint_decoder(x_wpnet[:, 0]) # B T_wp 4
-
-        # decode the far-future trajectory
-        attraction_point = waypoints[:, -1] 
-        q = (self.attraction_point_projector(attraction_point)+self.lane_emb_cr_mlp(intention_lane_seg)).unsqueeze(1)
-
-        for blk in self.cross_attender:
-            q = blk(query=q, key_value=x_orig[:,1:], key_padding_mask=key_padding_mask[:, 1:])
-
-        # restrict the attention to the route only in the cross attender
-        # q, attn_weights = blk(query=q, key=x, value=x, key_padding_mask=route_kpmask, need_weights=True) 
-
-        far_future_traj = self.far_future_traj_decoder(q) 
         trajectory = torch.cat([waypoints, far_future_traj], dim=1).unsqueeze(1) # B 1 T 4
         probability = torch.ones(bs, 1, device=trajectory.device) # B 1 
 
@@ -965,11 +975,11 @@ class PlanningModel(TorchModuleWrapper):
         x_m = repeat(x[:, 1:], 'b m d -> (b n) m d', n=self.N_mask)
         q = repeat(x[:, 0:1], 'b m d -> (b n) m d', n=self.N_mask)
 
-        q, attn_weights = self.cross_attender[0](query=q, key=x_m, value=x_m, key_padding_mask=masks, need_weights=True)
+        q, attn_weights = self.FFNet[0](query=q, key=x_m, value=x_m, key_padding_mask=masks, need_weights=True)
         goal = self.goal_mlp(q).view(bs, 2, self.out_channels)
-        q, attn_weights = self.cross_attender[1](query=q, key=x_m, value=x_m, key_padding_mask=masks, need_weights=True)
+        q, attn_weights = self.FFNet[1](query=q, key=x_m, value=x_m, key_padding_mask=masks, need_weights=True)
         waypoints= self.waypoints_mlp(q).view(bs, 2, self.future_steps//self.waypoints_number, self.out_channels)
-        q, attn_weights = self.cross_attender[2](query=q, key=x_m, value=x_m, key_padding_mask=masks, need_weights=True)
+        q, attn_weights = self.FFNet[2](query=q, key=x_m, value=x_m, key_padding_mask=masks, need_weights=True)
         # restrict the attention to the route only in the cross attender
         # q, attn_weights = blk(query=q, key=x, value=x, key_padding_mask=route_kpmask, need_weights=True) 
 
@@ -1043,7 +1053,7 @@ class PlanningModel(TorchModuleWrapper):
 
         """
         
-        polygon_pos, polypon_prop, polygon_mask, polygon_key_padding, route_kp_mask = self.extract_map_feature(data, need_route_kpmask=True)
+        polygon_pos, polygon_ori, polypon_prop, polygon_mask, polygon_key_padding, route_kp_mask = self.extract_map_feature(data, need_route_kpmask=True)
     
         # lane embedding
         lane_embedding, lane_pos_emb = self.map_encoder(polygon_pos, polypon_prop, polygon_mask)
@@ -1099,7 +1109,7 @@ class PlanningModel(TorchModuleWrapper):
 
         if training:
             # lane_intention_targets
-            dist = torch.norm(polygon_pos[..., :2] - horizon_point[:, None, None, :], dim=-1) # [B, M, D] TODO: consider orientation match?
+            dist = torch.norm(torch.cat([polygon_pos[..., :2], polygon_ori.cos(), polygon_ori.sin()], dim=-1) - attraction_point[:, None, None, :], dim=-1) # [B, M, S]
             dist[route_kp_mask] = torch.inf
             lane_intention_targets = dist.min(dim=-1)[0].argmin(dim=-1) # B
 
