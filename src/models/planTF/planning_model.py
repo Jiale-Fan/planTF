@@ -879,7 +879,7 @@ class PlanningModel(TorchModuleWrapper):
     def forward_inference(self, data):
         bs, A = data["agent"]["heading"].shape[0:2]
         # x_orig, key_padding_mask = self.embed(data, torch.cat((self.plan_seed, self.rep_seed)))
-        x_orig, key_padding_mask, route_key_padding_mask, lane_intention_targets, attraction_point_gt = self.embed(data, training=True)
+        x_orig, key_padding_mask, route_key_padding_mask = self.embed(data, training=False)
 
         # no need to remove the ego token here. Right?
 
