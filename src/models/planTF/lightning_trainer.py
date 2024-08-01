@@ -19,8 +19,11 @@ from torchmetrics import MetricCollection
 from src.metrics import MR, minADE, minFDE
 from src.optim.warmup_cos_lr import WarmupCosLR
 from src.models.planTF.planning_model import Stage
+from src.feature_builders.nuplan_feature_builder import SCENARIO_MAPPING_IDS
 
 logger = logging.getLogger(__name__)
+
+SCENARIO_TYPE_NUM = 74
 
 
 class LightningTrainer(pl.LightningModule):
@@ -52,6 +55,13 @@ class LightningTrainer(pl.LightningModule):
         self.automatic_optimization=False
 
         self.initial_finetune_flag = False
+
+        self.scenario_type_count = torch.zeros(SCENARIO_TYPE_NUM, dtype=torch.int64, device=self.device)
+
+    def on_train_epoch_end(self):
+        count_disc = dict(zip(list(SCENARIO_MAPPING_IDS.keys()), self.scenario_type_count.tolist()))
+        print(count_disc)
+        self.scenario_type_count = torch.zeros(SCENARIO_TYPE_NUM, dtype=torch.int64, device=self.device)
 
     def on_fit_start(self) -> None:
         metrics_collection = MetricCollection(
@@ -129,6 +139,11 @@ class LightningTrainer(pl.LightningModule):
         # TODO: manual gradient clipping?
         logged_loss = {k: v for k, v in res.items() if v.dim() == 0}
         self._log_step(res["loss"], logged_loss, metrics, prefix)
+
+        # count scenario type:
+        type_count = torch.bincount(features["feature"].data["scenario_type"].flatten().to(torch.int64), minlength=SCENARIO_TYPE_NUM).to('cpu')
+        self.scenario_type_count = self.scenario_type_count + (type_count)
+
         return res["loss"]
     
 
