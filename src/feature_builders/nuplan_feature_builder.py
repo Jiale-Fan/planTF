@@ -235,9 +235,9 @@ class NuplanFeatureBuilder(AbstractFeatureBuilder):
         present_ego_state = ego_state_list[present_idx]
         query_xy = present_ego_state.center
 
-        # route_roadblocks_ids = route_roadblock_correction(
-        #     present_ego_state, map_api, route_roadblocks_ids
-        # )
+        route_roadblocks_ids = route_roadblock_correction(
+            present_ego_state, map_api, route_roadblocks_ids
+        )
 
         data = {}
         data["current_state"] = self._get_ego_current_state(
