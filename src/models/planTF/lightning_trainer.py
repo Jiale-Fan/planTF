@@ -58,10 +58,10 @@ class LightningTrainer(pl.LightningModule):
 
         self.scenario_type_count = torch.zeros(SCENARIO_TYPE_NUM, dtype=torch.int64, device=self.device)
 
-    def on_train_epoch_end(self):
-        count_disc = dict(zip(list(SCENARIO_MAPPING_IDS.keys()), self.scenario_type_count.tolist()))
-        print(count_disc)
-        self.scenario_type_count = torch.zeros(SCENARIO_TYPE_NUM, dtype=torch.int64, device=self.device)
+    # def on_train_epoch_end(self):
+    #     count_disc = dict(zip(list(SCENARIO_MAPPING_IDS.keys()), self.scenario_type_count.tolist()))
+    #     print(count_disc)
+    #     self.scenario_type_count = torch.zeros(SCENARIO_TYPE_NUM, dtype=torch.int64, device=self.device)
 
     def on_fit_start(self) -> None:
         metrics_collection = MetricCollection(
@@ -141,8 +141,8 @@ class LightningTrainer(pl.LightningModule):
         self._log_step(res["loss"], logged_loss, metrics, prefix)
 
         # count scenario type:
-        type_count = torch.bincount(features["feature"].data["scenario_type"].flatten().to(torch.int64), minlength=SCENARIO_TYPE_NUM).to('cpu')
-        self.scenario_type_count = self.scenario_type_count + (type_count)
+        # type_count = torch.bincount(features["feature"].data["scenario_type"].flatten().to(torch.int64), minlength=SCENARIO_TYPE_NUM).to('cpu')
+        # self.scenario_type_count = self.scenario_type_count + (type_count)
 
         return res["loss"]
     

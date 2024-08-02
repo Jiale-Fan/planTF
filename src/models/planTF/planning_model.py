@@ -940,7 +940,7 @@ class PlanningModel(TorchModuleWrapper):
             )
 
         # attention visualization
-        if True:
+        if False:
             # attn_weights = self.SpaNet[-1].attn_mat[:, 0].detach()
             # visualize the scene using the attention weights
             self.plot_lane_intention(data, lane_intention_prob, output_trajectory, key_padding_mask, 0)
