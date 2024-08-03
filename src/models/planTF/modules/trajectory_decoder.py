@@ -22,7 +22,8 @@ class SinglemodalTrajectoryDecoder(nn.Module):
 
     def forward(self, x):
         x = self.proj(x)
-        loc = self.loc(x).view(-1, self.future_steps, self.out_channels)
+        loc = self.loc(x)
+        loc = loc.view(loc.shape[:-1]+(self.future_steps, self.out_channels))
 
         return loc
 

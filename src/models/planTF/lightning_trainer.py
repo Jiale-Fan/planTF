@@ -36,7 +36,7 @@ class LightningTrainer(pl.LightningModule):
         warmup_epochs,
         pretrain_epochs = 10,
         temperature = 0.7,
-        scaling = True,
+        scaling = False,
     ) -> None:
         super().__init__()
         self.save_hyperparameters(ignore=["model"])
@@ -177,7 +177,7 @@ class LightningTrainer(pl.LightningModule):
             "ego_waypoints_loss": ego_waypoints_loss, # [bs]
         }
     
-    def _cal_ego_loss_term(self, trajectory, probability, ego_target):
+    def _cal_ego_loss_term(self, trajectory, ego_target):
         # 1. ego regression coarse to fine loss
         ade = torch.norm(trajectory[..., :2] - ego_target[:, None, :, :2], dim=-1).sum(-1)
         ade = torch.where(ade.isnan(), torch.inf, ade) 
@@ -190,15 +190,12 @@ class LightningTrainer(pl.LightningModule):
         ego_reg_loss = F.smooth_l1_loss(best_traj, ego_target, reduction='none').mean((1, 2))
         # ego_reg_loss_mean = ego_reg_loss.mean()
 
-        ego_cls_loss = F.cross_entropy(probability, best_mode.detach(), reduction='none')
+        # ego_cls_loss = F.cross_entropy(probability, best_mode.detach(), reduction='none')
 
         # loss = ego_reg_loss_mean + ego_cls_loss + agent_reg_loss
         # ego_loss = ego_reg_loss_mean + ego_cls_loss + ego_goal_loss + ego_waypoints_loss
 
-        return {
-            "reg_loss": ego_reg_loss, # [bs]
-            "cls_loss": ego_cls_loss, # [bs]
-        }
+        return ego_reg_loss
 
     def _compute_objectives(self, res, data) -> Dict[str, torch.Tensor]:
         trajectory, probability, prediction= (
@@ -208,7 +205,7 @@ class LightningTrainer(pl.LightningModule):
         )
 
         waypoints = res["waypoints"] # [bs, 20, 4]
-        n_wp = waypoints.shape[1]
+        n_wp = waypoints.shape[2]
         far_future_traj = res["far_future_traj"] # [bs, 60, 4]
         rel_prediction = res["rel_prediction"] # [bs, n_agents-1, n_waypoints, 2]
         
@@ -257,10 +254,12 @@ class LightningTrainer(pl.LightningModule):
             ],
             dim=-1,
         )
-        waypoint_loss = F.smooth_l1_loss(waypoints, ego_target[:, :n_wp], reduction='none').mean((1, 2))
+        # waypoint_loss = F.smooth_l1_loss(waypoints, ego_target[:, :n_wp], reduction='none').mean((1, 2))
+        waypoint_loss = self._cal_ego_loss_term(waypoints, ego_target[:, :n_wp])
 
         # 5. far future loss
-        far_future_loss = F.smooth_l1_loss(far_future_traj, ego_target[:, n_wp:], reduction='none').mean((1, 2))
+        # far_future_loss = F.smooth_l1_loss(far_future_traj, ego_target[:, n_wp:], reduction='none').mean((1, 2))
+        far_future_loss = self._cal_ego_loss_term(far_future_traj, ego_target[:, n_wp:])
         
         # ego_loss_dict = self._cal_ego_loss_term(trajectory, probability, ego_target)
         ret_dict_batch = {

@@ -853,8 +853,8 @@ class PlanningModel(TorchModuleWrapper):
             "probability": probability,
             "prediction": abs_prediction,
             "rel_prediction" : rel_prediction,
-            "waypoints": waypoints,
-            "far_future_traj": far_future_traj,
+            "waypoints": waypoints.unsqueeze(1),
+            "far_future_traj": far_future_traj.unsqueeze(1),
             "lane_intention_loss": loss_lane_intention,
             "lane_intention_correct_rates": lane_intention_correct_rates,
             "lane_intention_topk_correct_rate": lane_intention_topk_correct_rate,
@@ -897,31 +897,34 @@ class PlanningModel(TorchModuleWrapper):
         lane_intention_prob = F.softmax(lane_intention, dim=-1)
 
         # find the lane segment with the highest probability
-        lane_intention_max = lane_intention_prob.argmax(dim=-1)
-        # Ensure indices are within bounds
-        assert lane_intention_max.max() < x[:, A:].shape[1], "Index out of bounds in lane_intention_max"
+        # lane_intention_max = lane_intention_prob.argmax(dim=-1)
 
-        intention_lane_seg = x_orig[:, A:][torch.arange(bs), lane_intention_max]
+        lane_intention_topk = lane_intention_prob.topk(k=self.num_modes, dim=-1, largest=True, sorted=False).indices
+        intention_lane_segs = x_orig[:, A:][torch.arange(bs).unsqueeze(1), lane_intention_topk]
+
+        # Ensure indices are within bounds
+        # assert lane_intention_max.max() < x[:, A:].shape[1], "Index out of bounds in lane_intention_max"
         # assert route_key_padding_mask[torch.arange(bs), lane_intention_max].any() == False # assert the selected lane segment is on the route
 
         ################ FFNet ################
-        x_ffnet = torch.cat([self.lane_emb_ff_mlp(intention_lane_seg).unsqueeze(1), x_orig[:,1:]], dim=1)
+        x_ffnet = torch.cat([self.lane_emb_ff_mlp(intention_lane_segs), x_orig[:,1:]], dim=1)
+        key_padding_mask = torch.cat([torch.zeros((bs, self.num_modes-1), dtype=torch.bool, device=key_padding_mask.device), key_padding_mask], dim=1)
         for blk in self.FFNet:
             x_ffnet = blk(x_ffnet, key_padding_mask=key_padding_mask)
         x_ffnet = self.norm_ff(x_ffnet)
-        far_future_traj = self.far_future_traj_decoder(x_ffnet[:, 0])
+        far_future_traj = self.far_future_traj_decoder(x_ffnet[:, :self.num_modes])
 
         ################ WpNet ################ 
         # attraction_point = attraction_point_gt
         # q = (self.attraction_point_projector(attraction_point)+self.lane_emb_cr_mlp(intention_lane_seg)).unsqueeze(1)
-        x_wpnet = torch.cat([self.lane_emb_wp_mlp(intention_lane_seg).unsqueeze(1), x_orig[:,1:]], dim=1)
+        x_wpnet = torch.cat([self.lane_emb_wp_mlp(intention_lane_segs), x_orig[:,1:]], dim=1)
         for blk in self.WpNet:
             x_wpnet = blk(x_wpnet, key_padding_mask=key_padding_mask)
         x_wpnet = self.norm_wp(x_wpnet)
-        rel_prediction = self.rel_agent_predictor(x_wpnet[:, 1:A]).view(bs, -1, self.waypoints_number, 2)
-        waypoints = self.waypoint_decoder(x_wpnet[:, 0]) # B T_wp 4
-        trajectory = torch.cat([waypoints, far_future_traj], dim=1).unsqueeze(1) # B 1 T 4
-        probability = torch.ones(bs, 1, device=trajectory.device) # B 1 
+        rel_prediction = self.rel_agent_predictor(x_wpnet[:, self.num_modes-1+1:self.num_modes-1+A]).view(bs, -1, self.waypoints_number, 2)
+        waypoints = self.waypoint_decoder(x_wpnet[:, :self.num_modes]) # B k T_wp 4
+        trajectory = torch.cat([waypoints, far_future_traj], dim=2) # B k T 4
+        probability = lane_intention_prob[torch.arange(bs).unsqueeze(1), lane_intention_topk]
 
         out = {
             "trajectory": trajectory,
