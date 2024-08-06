@@ -36,6 +36,7 @@ def get_current_roadblock_candidates(
     layers = [SemanticMapLayer.ROADBLOCK, SemanticMapLayer.ROADBLOCK_CONNECTOR]
     roadblock_dict = map_api.get_proximal_map_objects(
         point=ego_pose.point, radius=1.0, layers=layers
+        # point=ego_pose.point, radius=2.5, layers=layers # in PLUTO they changed the radius to 2.5
     )
     roadblock_candidates = (
         roadblock_dict[SemanticMapLayer.ROADBLOCK]
