@@ -930,11 +930,9 @@ class PlanningModel(TorchModuleWrapper):
         abs_prediction = self.abs_agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2)
         lane_intention_2s = self.lane_intention_2s_predictor(x[:, A:]).squeeze(-1) # B M
         lane_intention_2s[route_key_padding_mask] = -torch.inf # except the route, all the other map elements are set to -inf # lane_intention[key_padding_mask[:, A:]] = -torch.inf # invalide map elements are set to -inf. non-route lane segments remain possible to be selected, # since after disable route correction, the density of route lane segments gets lower
-        lane_intention_2s_prob = F.softmax(lane_intention_2s, dim=-1)
 
         lane_intention_8s = self.lane_intention_8s_predictor(x[:, A:]).squeeze(-1) # B M
         lane_intention_8s[route_key_padding_mask] = -torch.inf # except the route, all the other map elements are set to -inf
-        lane_intention_8s_prob = F.softmax(lane_intention_8s, dim=-1)
 
         lane_intention_prob_2s = F.softmax(lane_intention_2s, dim=-1)
         lane_intention_prob_8s = F.softmax(lane_intention_8s, dim=-1)
@@ -967,7 +965,7 @@ class PlanningModel(TorchModuleWrapper):
         ################ FFNet ################
         x_ffnet = torch.cat([self.lane_emb_ff_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
                             self.lane_emb_ff_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
-                            self.waypoints_embedder(waypoints.view(bs, -1)).unsqueeze(1),
+                            self.waypoints_embedder(waypoints.view(bs, -1).detach()).unsqueeze(1),
                             x_orig], dim=1)
         
         key_padding_mask_ff = torch.cat([torch.zeros((bs, 3), dtype=torch.bool, device=key_padding_mask.device),

@@ -35,8 +35,8 @@ def get_current_roadblock_candidates(
 
     layers = [SemanticMapLayer.ROADBLOCK, SemanticMapLayer.ROADBLOCK_CONNECTOR]
     roadblock_dict = map_api.get_proximal_map_objects(
-        point=ego_pose.point, radius=1.0, layers=layers
-        # point=ego_pose.point, radius=2.5, layers=layers # in PLUTO they changed the radius to 2.5
+        # point=ego_pose.point, radius=1.0, layers=layers
+        point=ego_pose.point, radius=2.5, layers=layers # in PLUTO they changed the radius to 2.5
     )
     roadblock_candidates = (
         roadblock_dict[SemanticMapLayer.ROADBLOCK]
@@ -146,38 +146,38 @@ def route_roadblock_correction(
     route_roadblock_ids = list(route_roadblock_dict.keys())
 
     # Fix 1: when agent starts off-route
-    if starting_block.id not in route_roadblock_ids:
-        # Backward search if current roadblock not in route
-        graph_search = BreadthFirstSearchRoadBlock(
-            route_roadblock_ids[0], map_api, forward_search=False
-        )
-        (path, path_id), path_found = graph_search.search(
-            starting_block_ids, max_depth=search_depth_backward
-        )
+    # if starting_block.id not in route_roadblock_ids:
+    #     # Backward search if current roadblock not in route
+    #     graph_search = BreadthFirstSearchRoadBlock(
+    #         route_roadblock_ids[0], map_api, forward_search=False
+    #     )
+    #     (path, path_id), path_found = graph_search.search(
+    #         starting_block_ids, max_depth=search_depth_backward
+    #     )
 
-        if path_found:
-            route_roadblocks[:0] = path[:-1]
-            route_roadblock_ids[:0] = path_id[:-1]
+    #     if path_found:
+    #         route_roadblocks[:0] = path[:-1]
+    #         route_roadblock_ids[:0] = path_id[:-1]
 
-        else:
-            # Forward search to any route roadblock
-            graph_search = BreadthFirstSearchRoadBlock(
-                starting_block.id, map_api, forward_search=True
-            )
-            (path, path_id), path_found = graph_search.search(
-                route_roadblock_ids[:3], max_depth=search_depth_forward
-            )
+    #     else:
+    #         # Forward search to any route roadblock
+    #         graph_search = BreadthFirstSearchRoadBlock(
+    #             starting_block.id, map_api, forward_search=True
+    #         )
+    #         (path, path_id), path_found = graph_search.search(
+    #             route_roadblock_ids[:3], max_depth=search_depth_forward
+    #         )
 
-            if path_found:
-                end_roadblock_idx = np.argmax(
-                    np.array(route_roadblock_ids) == path_id[-1]
-                )
+    #         if path_found:
+    #             end_roadblock_idx = np.argmax(
+    #                 np.array(route_roadblock_ids) == path_id[-1]
+    #             )
 
-                route_roadblocks = route_roadblocks[end_roadblock_idx + 1 :]
-                route_roadblock_ids = route_roadblock_ids[end_roadblock_idx + 1 :]
+    #             route_roadblocks = route_roadblocks[end_roadblock_idx + 1 :]
+    #             route_roadblock_ids = route_roadblock_ids[end_roadblock_idx + 1 :]
 
-                route_roadblocks[:0] = path
-                route_roadblock_ids[:0] = path_id
+    #             route_roadblocks[:0] = path
+    #             route_roadblock_ids[:0] = path_id
 
     # Fix 2: check if roadblocks are linked, search for links if not
     roadblocks_to_append = {}
