@@ -102,6 +102,7 @@ class PlanningModel(TorchModuleWrapper):
         N_mask = 2,
         waypoints_number = 20,
         whether_split_lane = False,
+        time_shift_steps = 5,
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
     ) -> None:
         super().__init__(
@@ -118,6 +119,7 @@ class PlanningModel(TorchModuleWrapper):
         self.state_channel = state_channel
         self.num_modes = num_modes
         self.waypoints_number = waypoints_number
+        self.time_shift_steps = time_shift_steps
         
         self.polygon_channel = polygon_channel # the number of features for each lane segment besides points coords which we will use
 
@@ -331,7 +333,11 @@ class PlanningModel(TorchModuleWrapper):
         # for debugging
         
 
-    def forward(self, data, current_epoch=None):
+    def forward(self, data, current_epoch=None, shift=None):
+
+        if shift is not None and shift:
+            data = NuplanFeature.time_shift(data, shift_steps=self.time_shift_steps, hist_steps=self.history_steps)
+
         # return self.forward_inference(data)
         if current_epoch is None: # when inference
             # return self.forward_pretrain_separate(data)

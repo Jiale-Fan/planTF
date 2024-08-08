@@ -166,3 +166,88 @@ class NuplanFeature(AbstractModelFeature):
             data["angle"] = center_angle
 
         return NuplanFeature(data=data)
+
+    @classmethod
+    def batch_rotation_matmul(self, matrix, rotate_mat):
+        # original_shape = matrix.shape
+        # if len(matrix.shape) == 4:
+        #     b = torch.repeat(rotate_mat.transpose(2,0,1)[:, np.newaxis, :, :], matrix.shape[1], axis=1)
+        # elif len(matrix.shape) == 5:
+        #     b = np.repeat(rotate_mat.transpose(2,0,1)[:, np.newaxis, :, :], matrix.shape[1], axis=1)
+        #     b = np.repeat(b[:, :, np.newaxis, :, :], matrix.shape[2], axis=2)
+        # flatten_matrix = matrix.reshape(-1, original_shape[-2], original_shape[-1])
+        # flatten_b = b.reshape(-1, b.shape[-2], b.shape[-1])
+        # res = np.matmul(flatten_matrix, flatten_b)
+        # return res.reshape(original_shape)
+        ori_shape = matrix.shape
+        matrix_reshape = matrix.view(ori_shape[0], -1, ori_shape[-1])
+        res = torch.matmul(matrix_reshape, rotate_mat)
+        return res.view(ori_shape)
+    
+
+    @classmethod 
+    def time_shift(self, data, shift_steps=5, hist_steps=21) -> dict:
+            
+        assert shift_steps > 0 and shift_steps < hist_steps
+
+        # normalize the data according to its previous state
+        center_xy, center_angle = data["agent"]["position"][:, 0, hist_steps-shift_steps].clone(), data["agent"]["heading"][:, 0, hist_steps-shift_steps].clone()
+
+        rotate_mat = torch.stack(
+            [
+                torch.cos(center_angle), -torch.sin(center_angle),
+                torch.sin(center_angle), torch.cos(center_angle),
+            ],
+            dim = 1
+        ).view(-1, 2, 2) # [bs, 2, 2]
+
+        data["current_state"][:, :3] = 0
+        data["agent"]["position"] = NuplanFeature.batch_rotation_matmul(
+            data["agent"]["position"] - center_xy[:, None, None, :], rotate_mat
+        )
+        data["agent"]["velocity"] = NuplanFeature.batch_rotation_matmul(data["agent"]["velocity"], rotate_mat)
+        data["agent"]["heading"] -= center_angle[:,None,None]
+
+        data["map"]["point_position"] = NuplanFeature.batch_rotation_matmul(
+            data["map"]["point_position"] - center_xy[:, None, None, None, :], rotate_mat
+        )
+        data["map"]["point_vector"] = NuplanFeature.batch_rotation_matmul(data["map"]["point_vector"], rotate_mat)
+        data["map"]["point_orientation"] -= center_angle[:,None,None,None]
+
+        data["map"]["polygon_center"][..., :2] = torch.matmul(
+            data["map"]["polygon_center"][..., :2] - center_xy[:, None, :], rotate_mat
+        )
+        data["map"]["polygon_center"][..., 2] -= center_angle[:,None]
+        data["map"]["polygon_position"] = torch.matmul(
+            data["map"]["polygon_position"] - center_xy[:, None, :], rotate_mat
+        )
+        data["map"]["polygon_orientation"] -= center_angle[:,None]
+
+        # shift the time step for agent data
+
+        for item in ["position", "velocity", "shape"]:
+            zeros = torch.zeros(data["agent"][item].shape, dtype=data["agent"][item].dtype, device=data["agent"][item].device)
+            data["agent"][item] = torch.cat(
+                [zeros[:,:,:shift_steps], data["agent"][item][:, :, shift_steps:]], dim=-2
+            )
+
+        for item in ["heading", "valid_mask"]:
+            zeros = torch.zeros(data["agent"][item].shape, dtype=data["agent"][item].dtype, device=data["agent"][item].device)
+            data["agent"][item] = torch.cat(
+                [zeros[:,:,:shift_steps], data["agent"][item][:, :, shift_steps:]], dim=-1
+            )
+
+        target_position = (
+            data["agent"]["position"][:, :, hist_steps:]
+            - data["agent"]["position"][:, :, hist_steps - 1][:, :, None]
+        )
+        target_heading = (
+            data["agent"]["heading"][:, :, hist_steps:]
+            - data["agent"]["heading"][:, :, hist_steps - 1][:, :, None]
+        )
+        target = torch.concat([target_position, target_heading[..., None]], -1)
+        target[~data["agent"]["valid_mask"][:, :, hist_steps:]] = 0
+
+        data["agent"]["target"] = target
+
+        return data

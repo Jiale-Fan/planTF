@@ -57,6 +57,7 @@ class LightningTrainer(pl.LightningModule):
         self.initial_finetune_flag = False
 
         self.scenario_type_count = torch.zeros(SCENARIO_TYPE_NUM, dtype=torch.int64, device=self.device)
+        self.bernouli_dist = torch.distributions.bernoulli.Bernoulli(torch.tensor([0.4]))
 
     # def on_train_epoch_end(self):
     #     count_disc = dict(zip(list(SCENARIO_MAPPING_IDS.keys()), self.scenario_type_count.tolist()))
@@ -83,7 +84,7 @@ class LightningTrainer(pl.LightningModule):
     ) -> torch.Tensor:
         features, _, _ = batch
 
-        res = self.model(features["feature"].data, self.current_epoch)
+        res = self.model(features["feature"].data, self.current_epoch, self.bernouli_dist.sample().to(torch.bool).item())
 
         metrics = None
 
