@@ -334,7 +334,7 @@ class PlanningModel(TorchModuleWrapper):
         
 
     def forward(self, data, current_epoch=None):
-        current_epoch = 28
+        # current_epoch = 28
 
         data_shift, shift_ori_xy, rotation_mat = NuplanFeature.time_shift(data, shift_steps=self.time_shift_steps, hist_steps=self.history_steps)
 
