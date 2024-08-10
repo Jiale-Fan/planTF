@@ -333,10 +333,10 @@ class PlanningModel(TorchModuleWrapper):
         # for debugging
         
 
-    def forward(self, data, current_epoch=None, shift=None):
+    def forward(self, data, current_epoch=None):
+        current_epoch = 28
 
-        if shift is not None and shift:
-            data = NuplanFeature.time_shift(data, shift_steps=self.time_shift_steps, hist_steps=self.history_steps)
+        data_shift, shift_ori_xy, rotation_mat = NuplanFeature.time_shift(data, shift_steps=self.time_shift_steps, hist_steps=self.history_steps)
 
         # return self.forward_inference(data)
         if current_epoch is None: # when inference
@@ -345,9 +345,11 @@ class PlanningModel(TorchModuleWrapper):
             # return self.forward_antagonistic_mask_finetune(data, current_epoch)
         else:
             if self.training and current_epoch <= 25:
-                return self.forward_finetune(data)
+                res_non_shift = self.forward_finetune(data)
+                res_shift = self.forward_finetune(data_shift)
             else:
-                return self.forward_inference(data)
+                res_non_shift = self.forward_inference(data)
+                res_shift = self.forward_inference(data_shift)
             # stage = self.get_stage(current_epoch)
             # if stage == Stage.PRETRAIN_SEP:
             #     return self.forward_pretrain_separate(data)
@@ -362,6 +364,12 @@ class PlanningModel(TorchModuleWrapper):
             #     return self.forward_antagonistic_mask_finetune(data, current_epoch)
             # else:
             #     raise NotImplementedError(f"Stage {stage} is not implemented.")
+
+        res_non_shift["trajectory_shifted"] = NuplanFeature.trajectory_renormalization(res_shift["trajectory"], shift_ori_xy, rotation_mat)
+        # res_non_shift["prediction_shifted"] = res_shift["prediction"]
+        # res_non_shift["rel_prediction_shifted"] = res_shift["rel_prediction"]
+        
+        return res_non_shift
 
     def extract_map_feature(self, data, need_route_kpmask=False):
         # NOTE: put property to one-hot?

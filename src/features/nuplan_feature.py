@@ -184,14 +184,41 @@ class NuplanFeature(AbstractModelFeature):
         res = torch.matmul(matrix_reshape, rotate_mat)
         return res.view(ori_shape)
     
+    @classmethod
+    def trajectory_renormalization(self, trajectory, center_xy, rotate_mat):
+        # trajectory: [B, num_modes, num_steps, 4(x, y, cos a, sin a)]
+        # center_xy: [B, 2]
+        # rotate_mat: [B, 2, 2] 
+        rotate_mat_inv = rotate_mat.transpose(1, 2)
+        new_trajectory_xy = NuplanFeature.batch_rotation_matmul(
+            trajectory[..., :2], rotate_mat_inv
+        ) + center_xy[:, None, None, :]
+        new_trajectory_orientation = NuplanFeature.batch_rotation_matmul(
+            trajectory[..., 2:], rotate_mat_inv
+        )
+        new_trajectory = torch.cat([new_trajectory_xy, new_trajectory_orientation], dim=-1)
+        return new_trajectory
+    
 
     @classmethod 
     def time_shift(self, data, shift_steps=5, hist_steps=21) -> dict:
+
+        # make a deep copy of the data first
+        new_data = {}
+        for key, value in data.items():
+            if isinstance(value, torch.Tensor):
+                new_data[key] = value.clone()
+            elif isinstance(value, dict):
+                new_data[key] = {}
+                for k, v in value.items():
+                    new_data[key][k] = v.clone()
+            else:
+                new_data[key] = value
             
         assert shift_steps > 0 and shift_steps < hist_steps
 
         # normalize the data according to its previous state
-        center_xy, center_angle = data["agent"]["position"][:, 0, hist_steps-shift_steps].clone(), data["agent"]["heading"][:, 0, hist_steps-shift_steps].clone()
+        center_xy, center_angle = new_data["agent"]["position"][:, 0, hist_steps-shift_steps].clone(), new_data["agent"]["heading"][:, 0, hist_steps-shift_steps].clone()
 
         rotate_mat = torch.stack(
             [
@@ -201,53 +228,53 @@ class NuplanFeature(AbstractModelFeature):
             dim = 1
         ).view(-1, 2, 2) # [bs, 2, 2]
 
-        data["current_state"][:, :3] = 0
-        data["agent"]["position"] = NuplanFeature.batch_rotation_matmul(
-            data["agent"]["position"] - center_xy[:, None, None, :], rotate_mat
+        new_data["current_state"][:, :3] = 0
+        new_data["agent"]["position"] = NuplanFeature.batch_rotation_matmul(
+            new_data["agent"]["position"] - center_xy[:, None, None, :], rotate_mat
         )
-        data["agent"]["velocity"] = NuplanFeature.batch_rotation_matmul(data["agent"]["velocity"], rotate_mat)
-        data["agent"]["heading"] -= center_angle[:,None,None]
+        new_data["agent"]["velocity"] = NuplanFeature.batch_rotation_matmul(new_data["agent"]["velocity"], rotate_mat)
+        new_data["agent"]["heading"] -= center_angle[:,None,None]
 
-        data["map"]["point_position"] = NuplanFeature.batch_rotation_matmul(
-            data["map"]["point_position"] - center_xy[:, None, None, None, :], rotate_mat
+        new_data["map"]["point_position"] = NuplanFeature.batch_rotation_matmul(
+            new_data["map"]["point_position"] - center_xy[:, None, None, None, :], rotate_mat
         )
-        data["map"]["point_vector"] = NuplanFeature.batch_rotation_matmul(data["map"]["point_vector"], rotate_mat)
-        data["map"]["point_orientation"] -= center_angle[:,None,None,None]
+        new_data["map"]["point_vector"] = NuplanFeature.batch_rotation_matmul(new_data["map"]["point_vector"], rotate_mat)
+        new_data["map"]["point_orientation"] -= center_angle[:,None,None,None]
 
-        data["map"]["polygon_center"][..., :2] = torch.matmul(
-            data["map"]["polygon_center"][..., :2] - center_xy[:, None, :], rotate_mat
+        new_data["map"]["polygon_center"][..., :2] = torch.matmul(
+            new_data["map"]["polygon_center"][..., :2] - center_xy[:, None, :], rotate_mat
         )
-        data["map"]["polygon_center"][..., 2] -= center_angle[:,None]
-        data["map"]["polygon_position"] = torch.matmul(
-            data["map"]["polygon_position"] - center_xy[:, None, :], rotate_mat
+        new_data["map"]["polygon_center"][..., 2] -= center_angle[:,None]
+        new_data["map"]["polygon_position"] = torch.matmul(
+            new_data["map"]["polygon_position"] - center_xy[:, None, :], rotate_mat
         )
-        data["map"]["polygon_orientation"] -= center_angle[:,None]
+        new_data["map"]["polygon_orientation"] -= center_angle[:,None]
 
         # shift the time step for agent data
 
         for item in ["position", "velocity", "shape"]:
-            zeros = torch.zeros(data["agent"][item].shape, dtype=data["agent"][item].dtype, device=data["agent"][item].device)
-            data["agent"][item] = torch.cat(
-                [zeros[:,:,:shift_steps], data["agent"][item][:, :, shift_steps:]], dim=-2
+            zeros = torch.zeros(new_data["agent"][item].shape, dtype=new_data["agent"][item].dtype, device=new_data["agent"][item].device)
+            new_data["agent"][item] = torch.cat(
+                [zeros[:,:,:shift_steps], new_data["agent"][item][:, :, shift_steps:]], dim=-2
             )
 
         for item in ["heading", "valid_mask"]:
-            zeros = torch.zeros(data["agent"][item].shape, dtype=data["agent"][item].dtype, device=data["agent"][item].device)
-            data["agent"][item] = torch.cat(
-                [zeros[:,:,:shift_steps], data["agent"][item][:, :, shift_steps:]], dim=-1
+            zeros = torch.zeros(new_data["agent"][item].shape, dtype=new_data["agent"][item].dtype, device=new_data["agent"][item].device)
+            new_data["agent"][item] = torch.cat(
+                [zeros[:,:,:shift_steps], new_data["agent"][item][:, :, shift_steps:]], dim=-1
             )
 
         target_position = (
-            data["agent"]["position"][:, :, hist_steps:]
-            - data["agent"]["position"][:, :, hist_steps - 1][:, :, None]
+            new_data["agent"]["position"][:, :, hist_steps:]
+            - new_data["agent"]["position"][:, :, hist_steps - 1][:, :, None]
         )
         target_heading = (
-            data["agent"]["heading"][:, :, hist_steps:]
-            - data["agent"]["heading"][:, :, hist_steps - 1][:, :, None]
+            new_data["agent"]["heading"][:, :, hist_steps:]
+            - new_data["agent"]["heading"][:, :, hist_steps - 1][:, :, None]
         )
         target = torch.concat([target_position, target_heading[..., None]], -1)
-        target[~data["agent"]["valid_mask"][:, :, hist_steps:]] = 0
+        target[~new_data["agent"]["valid_mask"][:, :, hist_steps:]] = 0
 
-        data["agent"]["target"] = target
+        new_data["agent"]["target"] = target
 
-        return data
+        return new_data, center_xy, rotate_mat

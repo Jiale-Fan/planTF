@@ -84,7 +84,8 @@ class LightningTrainer(pl.LightningModule):
     ) -> torch.Tensor:
         features, _, _ = batch
 
-        res = self.model(features["feature"].data, self.current_epoch, self.bernouli_dist.sample().to(torch.bool).item())
+        # res = self.model(features["feature"].data, self.current_epoch, self.bernouli_dist.sample().to(torch.bool).item())
+        res = self.model(features["feature"].data, self.current_epoch)
 
         metrics = None
 
@@ -138,8 +139,8 @@ class LightningTrainer(pl.LightningModule):
         #     sch.step(self.current_epoch)
 
         # TODO: manual gradient clipping?
-        logged_loss = {k: v for k, v in res.items() if v.dim() == 0}
-        self._log_step(res["loss"], logged_loss, metrics, prefix)
+        # logged_loss = {k: v for k, v in res.items() if v.dim() == 0}
+        # self._log_step(res["loss"], logged_loss, metrics, prefix)
 
         # count scenario type:
         # type_count = torch.bincount(features["feature"].data["scenario_type"].flatten().to(torch.int64), minlength=SCENARIO_TYPE_NUM).to('cpu')
@@ -203,7 +204,7 @@ class LightningTrainer(pl.LightningModule):
 
     def _compute_objectives(self, res, data) -> Dict[str, torch.Tensor]:
         trajectory, probability, prediction= (
-            res["trajectory"], # [bs, N_mask*n_mode, n_steps, 4]
+            res["trajectory"], # [bs, 1, n_steps, 4]
             res["probability"], # [bs, N_mask*n_mode]
             res["prediction"], # [bs, n_agents, n_steps, 2]
         )
@@ -262,7 +263,12 @@ class LightningTrainer(pl.LightningModule):
 
         # 5. far future loss
         far_future_loss = F.smooth_l1_loss(far_future_traj, ego_target[:, n_wp:], reduction='none').mean((1, 2))
-        
+
+        # 6. time shift consistency loss
+        shift_step = self.model.time_shift_steps
+        trajectory_consistency = F.smooth_l1_loss(res["trajectory"][:,:,:-shift_step], res["trajectory_shifted"][:,:,shift_step:], reduction='none').mean((1, 2, 3))
+        # for key in ["trajectory", "prediction", "rel_prediction"]:
+
         # ego_loss_dict = self._cal_ego_loss_term(trajectory, probability, ego_target)
         ret_dict_batch = {
             "agent_reg_loss": agent_reg_loss,
@@ -270,6 +276,7 @@ class LightningTrainer(pl.LightningModule):
             "lane_intention_loss": lane_intention_loss,
             "waypoint_loss": waypoint_loss,
             "far_future_loss": far_future_loss,
+            "trajectory_consistency_loss": trajectory_consistency,
         }
         # loss = torch.mean(torch.stack([ret_dict[key] for key in ret_dict.keys()]))
         loss_mat = torch.stack(list(ret_dict_batch.values()), dim=-1) # [bs, 5]
