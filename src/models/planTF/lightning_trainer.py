@@ -139,8 +139,8 @@ class LightningTrainer(pl.LightningModule):
         #     sch.step(self.current_epoch)
 
         # TODO: manual gradient clipping?
-        # logged_loss = {k: v for k, v in res.items() if v.dim() == 0}
-        # self._log_step(res["loss"], logged_loss, metrics, prefix)
+        logged_loss = {k: v for k, v in res.items() if v.dim() == 0}
+        self._log_step(res["loss"], logged_loss, metrics, prefix)
 
         # count scenario type:
         # type_count = torch.bincount(features["feature"].data["scenario_type"].flatten().to(torch.int64), minlength=SCENARIO_TYPE_NUM).to('cpu')
