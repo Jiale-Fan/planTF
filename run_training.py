@@ -150,13 +150,16 @@ export CUDA_VISIBLE_DEVICES=0,1,2
 python run_training.py \
   py_func=train +training=train_planTF \
   worker=single_machine_thread_pool worker.max_workers=24 \
-  scenario_builder=nuplan cache.cache_path=/home/jiale/Documents/exp/cache_per_type_route_corr cache.use_cache_without_dataset=true \
+  scenario_builder=nuplan cache.cache_path=/media/jiale/Jiale_SSD1/cache_1M cache.use_cache_without_dataset=true \
   data_loader.params.batch_size=64 data_loader.params.num_workers=24 \
   lr=1e-3 epochs=35 warmup_epochs=3 weight_decay=0.0001 \
   lightning.trainer.params.check_val_every_n_epoch=2 \
-  wandb.mode=online wandb.project=nuplan wandb.name=2407_1.5_per_type_route_corr
+  wandb.mode=online wandb.project=nuplan wandb.name=1910_v1.1_1M
   '''  
 
+# sudo fdisk -l
+
 # sudo mount /dev/sdb1 /media/jiale/Jiale_SSD1
+# sudo mount /dev/sdb1 /media/jiale/T7
 # /home/jiale/Documents/exp/cache_per_type_route_corr
 # /media/jiale/Jiale_SSD1/cache/cache_100k
