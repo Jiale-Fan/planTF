@@ -16,7 +16,7 @@ for challenge in $CHALLENGES; do
         worker.threads_per_node=24 \
         experiment_uid=$SPLIT/$planner \
         verbose=true \
-        planner.imitation_planner.planner_ckpt="/home/jiale/Documents/checkpoints/plantf_nocorr.ckpt"
+        planner.imitation_planner.planner_ckpt="/home/jiale/Documents/checkpoints/planTF_official.ckpt"
 done
 
 
