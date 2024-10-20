@@ -1083,9 +1083,9 @@ class PlanningModel(TorchModuleWrapper):
             "trajectory": trajectory,
             "probability": probability,
             "prediction": abs_prediction,
-            # "rel_prediction" : rel_prediction,
-            # "waypoints": waypoints,
-            # "far_future_traj": far_future_traj,
+            "rel_prediction" : rel_prediction,
+            "waypoints": waypoints.unsqueeze(1),
+            "far_future_traj": far_future_traj.unsqueeze(1),
         }
 
         if not self.training:
