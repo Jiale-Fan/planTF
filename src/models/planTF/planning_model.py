@@ -332,7 +332,7 @@ class PlanningModel(TorchModuleWrapper):
         
 
     def forward(self, data, current_epoch=None):
-        # return self.forward_pretrain_progressive(data)
+        # return self.forward_finetune_multimodal(data)
         if current_epoch is None: # when inference
             # return self.forward_pretrain_separate(data)
             return self.forward_inference(data)
@@ -918,7 +918,7 @@ class PlanningModel(TorchModuleWrapper):
     def forward_finetune_multimodal(self, data):
         bs, A = data["agent"]["heading"].shape[0:2]
         # x_orig, key_padding_mask = self.embed(data, torch.cat((self.plan_seed, self.rep_seed)))
-        x_orig, key_padding_mask, route_key_padding_mask = self.embed(data, training=False)
+        x_orig, key_padding_mask, route_key_padding_mask, lane_intention_2s_gt, lane_intention_8s_gt, waypoints_gt = self.embed(data, training=True)
 
         # no need to remove the ego token here. Right?
 
@@ -944,6 +944,17 @@ class PlanningModel(TorchModuleWrapper):
         # Ensure indices are within bounds
         # assert lane_intention_max.max() < x[:, A:].shape[1], "Index out of bounds in lane_intention_max"
 
+        loss_lane_intention_2s = F.cross_entropy(lane_intention_2s_prob, lane_intention_2s_gt, reduction="none")
+        loss_lane_intention_8s = F.cross_entropy(lane_intention_8s_prob, lane_intention_8s_gt, reduction="none")
+
+        # find the lane segment with the highest probability
+        lane_intention_max_2s = lane_intention_2s_prob.argmax(dim=-1)
+        lane_intention_correct_rates_2s = (lane_intention_max_2s == lane_intention_2s_gt).float().mean()
+        lane_intention_topk_correct_rate_2s = (lane_intention_topk_2s == lane_intention_2s_gt.unsqueeze(-1)).any(-1).float().mean()
+
+        lane_intention_max_8s = lane_intention_8s_prob.argmax(dim=-1)
+        lane_intention_correct_rates_8s = (lane_intention_max_8s == lane_intention_8s_gt).float().mean()
+        lane_intention_topk_correct_rate_8s = (lane_intention_topk_8s == lane_intention_8s_gt.unsqueeze(-1)).any(-1).float().mean()
 
         # assert route_key_padding_mask[torch.arange(bs), lane_intention_max].any() == False # assert the selected lane segment is on the route
 
@@ -1006,6 +1017,11 @@ class PlanningModel(TorchModuleWrapper):
             "rel_prediction" : multimodal_rel_prediction,
             "waypoints": multimodal_waypoints,
             "far_future_traj": multimodal_far_future_traj,
+            "lane_intention_loss": loss_lane_intention_2s+loss_lane_intention_8s,
+            "lane_intention_correct_rates": lane_intention_correct_rates_2s,
+            "lane_intention_topk_correct_rate": lane_intention_topk_correct_rate_2s,
+            "lane_intention_correct_rates_8s": lane_intention_correct_rates_8s,
+            "lane_intention_topk_correct_rate_8s": lane_intention_topk_correct_rate_8s,
         }
 
         if not self.training:
