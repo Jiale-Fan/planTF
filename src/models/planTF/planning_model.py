@@ -332,7 +332,7 @@ class PlanningModel(TorchModuleWrapper):
         
 
     def forward(self, data, current_epoch=None):
-        # return self.forward_finetune_multimodal(data)
+        # return self.forward_pretrain_progressive(data)
         if current_epoch is None: # when inference
             # return self.forward_pretrain_separate(data)
             return self.forward_inference(data)
@@ -853,9 +853,11 @@ class PlanningModel(TorchModuleWrapper):
         # attraction_point = attraction_point_gt
         # q = (self.attraction_point_projector(attraction_point)+self.lane_emb_cr_mlp(intention_lane_seg)).unsqueeze(1)
         x_wpnet = torch.cat([self.lane_emb_wp_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
-                              x], dim=1)
-        key_padding_mask_wp = torch.cat([torch.zeros((bs, 1), dtype=torch.bool, device=key_padding_mask.device),
-                                          key_padding_mask], dim=1)
+                             self.lane_emb_wp_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
+                              x_orig[:,1:]], dim=1)
+        key_padding_mask_wp = torch.cat([torch.zeros((bs, 2), dtype=torch.bool, device=key_padding_mask.device),
+                                          key_padding_mask[:, 1:]], dim=1)
+
         for blk in self.WpNet:
             x_wpnet = blk(x_wpnet, key_padding_mask=key_padding_mask_wp)
         x_wpnet = self.norm_wp(x_wpnet)
@@ -863,12 +865,14 @@ class PlanningModel(TorchModuleWrapper):
         waypoints = self.waypoint_decoder(x_wpnet[:, 0]) # B T_wp 4
 
         ################ FFNet ################
-        x_ffnet = torch.cat([self.lane_emb_ff_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
+        x_ffnet = torch.cat([self.lane_emb_ff_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
+                            self.lane_emb_ff_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
                             self.waypoints_embedder(waypoints_gt.view(bs, -1)).unsqueeze(1),
-                            x], dim=1)
+                            x_orig], dim=1)
         
-        key_padding_mask_ff = torch.cat([torch.zeros((bs, 2), dtype=torch.bool, device=key_padding_mask.device),
+        key_padding_mask_ff = torch.cat([torch.zeros((bs, 3), dtype=torch.bool, device=key_padding_mask.device),
                                           key_padding_mask], dim=1)
+
         for blk in self.FFNet:
             x_ffnet = blk(x_ffnet, key_padding_mask=key_padding_mask_ff)
         x_ffnet = self.norm_ff(x_ffnet)
@@ -972,9 +976,11 @@ class PlanningModel(TorchModuleWrapper):
             intention_lane_seg_8s = x_orig[:, A:][torch.arange(bs), lane_intention_topk_8s[:, i]]
 
             x_wpnet = torch.cat([self.lane_emb_wp_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
-                                x], dim=1)
-            key_padding_mask_wp = torch.cat([torch.zeros((bs, 1), dtype=torch.bool, device=key_padding_mask.device),
-                                            key_padding_mask], dim=1)
+                             self.lane_emb_wp_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
+                              x_orig[:,1:]], dim=1)
+            key_padding_mask_wp = torch.cat([torch.zeros((bs, 2), dtype=torch.bool, device=key_padding_mask.device),
+                                          key_padding_mask[:, 1:]], dim=1)
+
             for blk in self.WpNet:
                 x_wpnet = blk(x_wpnet, key_padding_mask=key_padding_mask_wp)
             x_wpnet = self.norm_wp(x_wpnet)
@@ -985,13 +991,14 @@ class PlanningModel(TorchModuleWrapper):
             rel_prediction_list.append(rel_prediction)
 
             ################ FFNet ################
-            x_ffnet = torch.cat([
-                                self.lane_emb_ff_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
-                                self.waypoints_embedder(waypoints.view(bs, -1).detach()).unsqueeze(1),
-                                x], dim=1)
-            
-            key_padding_mask_ff = torch.cat([torch.zeros((bs, 2), dtype=torch.bool, device=key_padding_mask.device),
-                                            key_padding_mask], dim=1)
+            x_ffnet = torch.cat([self.lane_emb_ff_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
+                            self.lane_emb_ff_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
+                            self.waypoints_embedder(waypoints_gt.view(bs, -1)).unsqueeze(1),
+                            x_orig], dim=1)
+        
+            key_padding_mask_ff = torch.cat([torch.zeros((bs, 3), dtype=torch.bool, device=key_padding_mask.device),
+                                          key_padding_mask], dim=1)
+
             for blk in self.FFNet:
                 x_ffnet = blk(x_ffnet, key_padding_mask=key_padding_mask_ff)
             x_ffnet = self.norm_ff(x_ffnet)
