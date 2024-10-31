@@ -706,7 +706,7 @@ class PlanningModel(TorchModuleWrapper):
 
         return out
 
-    def plot_lane_intention(self, data, lane_intention_score, output_trajectory, key_padding_mask, k=0):
+    def plot_lane_intention(self, data, lane_intention_score, output_trajectory, key_padding_mask, agent_score=None, k=0):
         i = 0
         polygon_pos, _, polypon_prop, polygon_mask, polygon_key_padding = self.extract_map_feature(data)
         agent_features, agent_category, frame_valid_mask, agent_key_padding, ego_state = self.extract_agent_feature(data, include_future=False)
@@ -715,7 +715,7 @@ class PlanningModel(TorchModuleWrapper):
         map_points = polygon_pos[i]
         plot_scene_attention(agent_features[i], frame_valid_mask[i], map_points, lane_intention_score[i],
                              key_padding_mask[i, :], 
-                              output_trajectory[i], filename=self.inference_counter, prefix=k)
+                              output_trajectory[i], agent_score[i], filename=self.inference_counter, prefix=k)
         
 
     # def attention_guided_mask_generation(self, attn_weights, key_padding_mask):
@@ -995,10 +995,21 @@ class PlanningModel(TorchModuleWrapper):
             )
 
         # attention visualization
-        if False:
-            # attn_weights = self.SpaNet[-1].attn_mat[:, 0].detach()
+        if True:
+            ## visualize WPNet
+            # attn_weights = self.WpNet[-1].attn_mat[:, 0].detach()
+            # # score_to_visualize = lane_intention_prob_2s
+            # score_to_visualize = attn_weights[:, 1+A:]
+            # # visualize the scene using the attention weights
+            # self.plot_lane_intention(data, score_to_visualize, output_trajectory, key_padding_mask, attn_weights[:, 1:1+A], 0)
+            # self.inference_counter += 1
+
+            ## visualize FFNet
+            attn_weights = self.FFNet[-1].attn_mat[:, 0].detach()
+            # score_to_visualize = lane_intention_prob_2s
+            score_to_visualize = attn_weights[:, 3+A:]
             # visualize the scene using the attention weights
-            self.plot_lane_intention(data, lane_intention_prob_2s, output_trajectory, key_padding_mask, 0)
+            self.plot_lane_intention(data, score_to_visualize, output_trajectory, key_padding_mask, attn_weights[:, 3:3+A], 0)
             self.inference_counter += 1
 
         return out

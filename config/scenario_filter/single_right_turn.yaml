@@ -6,13 +6,15 @@ scenario_tokens:
   # - 8de10fd86b825304
   # - b87b168f906c5e06
   # - 0d81266c0d1a5bae
-  - 377d56226d275218
+  # - 377d56226d275218
+  - a0f50ac13caa51ac
 
 log_names: # Filter scenarios by log names
   # - 2021.05.25.12.30.39_veh-25_00321_01196
   # - 2021.09.16.15.47.30_veh-45_00623_00891
   # - 2021.10.06.05.58.04_veh-49_01458_01972
-  - 2021.10.06.07.36.28_veh-51_01688_01826
+  # - 2021.10.06.07.36.28_veh-51_01688_01826
+  - 2021.08.30.17.34.35_veh-40_01546_01786 
 map_names: null # Filter scenarios by map names
 
 num_scenarios_per_type: null # Number of scenarios per type

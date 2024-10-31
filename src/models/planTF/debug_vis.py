@@ -6,7 +6,7 @@ from src.utils.conversion import to_device, to_numpy, to_tensor
 import os
 
 def plot_scene_attention(hist_trajs, trajectory_valid_mask, map_segments, lane_intention_score, key_padding_mask,
-                         planned_trajs, filename='1', savepath='./debug_files/', prefix=None):
+                         planned_trajs, agent_score = None, filename='1', savepath='./debug_files/', prefix=None):
     """
     Plot the scene with color-coded attention weights.
 
@@ -34,18 +34,24 @@ def plot_scene_attention(hist_trajs, trajectory_valid_mask, map_segments, lane_i
     hist_trajs = to_numpy(hist_trajs)
     map_segments = to_numpy(map_segments)
     lane_intention_score = to_numpy(lane_intention_score)
+    agent_score = to_numpy(agent_score)
     trajectory_valid_mask = to_numpy(trajectory_valid_mask)
     planned_trajs = to_numpy(planned_trajs)
     key_padding_mask = to_numpy(key_padding_mask)
+
+    if agent_score is not None:
+        max_score = max(np.max(agent_score), np.max(lane_intention_score))
+    else:
+        max_score = np.max(lane_intention_score)
 
     plt.clf()
     fig, ax = plt.subplots()
     A, T, D1 = hist_trajs.shape
     M, P, D2 = map_segments.shape
     # normed_attn_weights = lane_intention_score / np.max(lane_intention_score)
-    normed_attn_weights = ((lane_intention_score / np.max(lane_intention_score))+1)/2
-    normed_attn_weights[lane_intention_score==0] = 0
-    colors = cm.magma(normed_attn_weights)
+    normed_lane_score = lane_intention_score / max_score
+    normed_lane_score[lane_intention_score==0] = 0
+    colors = cm.magma(normed_lane_score)
 
     # sort the attention weights to make sure that the most important segments are plotted on top
     # sorted_idx=np.argsort(lane_intention_score[A:])
@@ -68,16 +74,21 @@ def plot_scene_attention(hist_trajs, trajectory_valid_mask, map_segments, lane_i
     # use different markers and color map for trajectories to distinguish them from map segments
     # normed_attn_weights_traj = attention_weights[:A] / np.max(attention_weights[:A])
 
-    # normed_attn_weights_traj = normed_attn_weights
-    # colors_traj = cm.summer(normed_attn_weights_traj) 
+    if agent_score is not None:
+        normed_agent_score = agent_score / max_score
+        normed_agent_score[agent_score==0] = 0
+        colors_traj = cm.summer(normed_agent_score) 
+
     for a in range(A):
         if not np.any(trajectory_valid_mask[a]):
             continue
         segment_data = hist_trajs[a]
         x = segment_data[trajectory_valid_mask[a], 0]
         y = segment_data[trajectory_valid_mask[a], 1]
-        # plt.scatter(x, y, c=[colors_traj[a]], label=f'Traj {a + 1}', s=0.2, marker='x')
-        plt.scatter(x, y, c='g', label=f'Traj {a + 1}', s=0.2, marker='x')
+        if agent_score is not None:
+            plt.scatter(x, y, c=[colors_traj[a]], label=f'Traj {a + 1}', s=0.2, marker='x')
+        else:
+            plt.scatter(x, y, c='g', label=f'Traj {a + 1}', s=0.2, marker='x')
 
     # plot planned trajectories
     plt.scatter(hist_trajs[0,-1,0], hist_trajs[0,-1,1], c='r', label=f'Ego Position', s=6, marker='*')
