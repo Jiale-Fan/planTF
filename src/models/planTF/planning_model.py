@@ -995,7 +995,7 @@ class PlanningModel(TorchModuleWrapper):
             )
 
         # attention visualization
-        if True:
+        if False:
             ## visualize WPNet
             # attn_weights = self.WpNet[-1].attn_mat[:, 0].detach()
             # # score_to_visualize = lane_intention_prob_2s
