@@ -332,15 +332,15 @@ class PlanningModel(TorchModuleWrapper):
         
 
     def forward(self, data, current_epoch=None):
-        # return self.forward_pretrain_progressive(data)
+        # return self.forward_finetune_multimodal(data)
         if current_epoch is None: # when inference
             # return self.forward_pretrain_separate(data)
             return self.forward_inference(data)
             # return self.forward_antagonistic_mask_finetune(data, current_epoch)
         else:
-            if self.training and current_epoch <= 10:
+            if self.training and current_epoch <= 25:
                 return self.forward_pretrain_progressive(data)
-            elif self.training and current_epoch > 10:
+            elif self.training and current_epoch > 25:
                 return self.forward_finetune_multimodal(data)
             else:
                 return self.forward_inference(data)
@@ -854,7 +854,7 @@ class PlanningModel(TorchModuleWrapper):
         # q = (self.attraction_point_projector(attraction_point)+self.lane_emb_cr_mlp(intention_lane_seg)).unsqueeze(1)
         x_wpnet = torch.cat([self.lane_emb_wp_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
                              self.lane_emb_wp_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
-                              x[:,1:]], dim=1)
+                              x_orig[:,1:]], dim=1)
         key_padding_mask_wp = torch.cat([torch.zeros((bs, 2), dtype=torch.bool, device=key_padding_mask.device),
                                           key_padding_mask[:, 1:]], dim=1)
 
@@ -868,7 +868,7 @@ class PlanningModel(TorchModuleWrapper):
         x_ffnet = torch.cat([self.lane_emb_ff_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
                             self.lane_emb_ff_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
                             self.waypoints_embedder(waypoints_gt.view(bs, -1)).unsqueeze(1),
-                            x], dim=1)
+                            x_orig], dim=1)
         
         key_padding_mask_ff = torch.cat([torch.zeros((bs, 3), dtype=torch.bool, device=key_padding_mask.device),
                                           key_padding_mask], dim=1)
@@ -978,7 +978,7 @@ class PlanningModel(TorchModuleWrapper):
 
             x_wpnet = torch.cat([self.lane_emb_wp_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
                              self.lane_emb_wp_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
-                              x[:,1:]], dim=1)
+                              x_orig[:,1:]], dim=1)
             key_padding_mask_wp = torch.cat([torch.zeros((bs, 2), dtype=torch.bool, device=key_padding_mask.device),
                                           key_padding_mask[:, 1:]], dim=1)
 
@@ -995,7 +995,7 @@ class PlanningModel(TorchModuleWrapper):
             x_ffnet = torch.cat([self.lane_emb_ff_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
                             self.lane_emb_ff_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
                             self.waypoints_embedder(waypoints.view(bs, -1)).unsqueeze(1),
-                            x], dim=1)
+                            x_orig], dim=1)
         
             key_padding_mask_ff = torch.cat([torch.zeros((bs, 3), dtype=torch.bool, device=key_padding_mask.device),
                                           key_padding_mask], dim=1)
@@ -1014,7 +1014,9 @@ class PlanningModel(TorchModuleWrapper):
         multimodal_rel_prediction = torch.stack(rel_prediction_list, dim=1) # B M A T_wp 2
 
         trajectory = torch.cat([multimodal_waypoints, multimodal_far_future_traj], dim=2) # B M T 4
-        probability = torch.zeros(bs, self.num_modes, device=trajectory.device) # B M
+        # probability = torch.zeros(bs, self.num_modes, device=trajectory.device) # B M
+
+        probability = torch.zeros(bs, 1, device=trajectory.device)
 
         probability[:, 0] = 1.0
 
@@ -1025,7 +1027,7 @@ class PlanningModel(TorchModuleWrapper):
             "rel_prediction" : multimodal_rel_prediction,
             "waypoints": multimodal_waypoints,
             "far_future_traj": multimodal_far_future_traj,
-            "lane_intention_loss": loss_lane_intention_2s+loss_lane_intention_8s,
+            # "lane_intention_loss": loss_lane_intention_2s+loss_lane_intention_8s,
             "lane_intention_correct_rates": lane_intention_correct_rates_2s,
             "lane_intention_topk_correct_rate": lane_intention_topk_correct_rate_2s,
             "lane_intention_correct_rates_8s": lane_intention_correct_rates_8s,
@@ -1079,7 +1081,7 @@ class PlanningModel(TorchModuleWrapper):
         # q = (self.attraction_point_projector(attraction_point)+self.lane_emb_cr_mlp(intention_lane_seg)).unsqueeze(1)
         x_wpnet = torch.cat([self.lane_emb_wp_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
                              self.lane_emb_wp_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
-                              x[:,1:]], dim=1)
+                              x_orig[:,1:]], dim=1)
         key_padding_mask_wp = torch.cat([torch.zeros((bs, 2), dtype=torch.bool, device=key_padding_mask.device),
                                           key_padding_mask[:, 1:]], dim=1)
         
@@ -1093,7 +1095,7 @@ class PlanningModel(TorchModuleWrapper):
         x_ffnet = torch.cat([self.lane_emb_ff_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
                             self.lane_emb_ff_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
                             self.waypoints_embedder(waypoints.view(bs, -1)).unsqueeze(1),
-                            x], dim=1)
+                            x_orig], dim=1)
         
         key_padding_mask_ff = torch.cat([torch.zeros((bs, 3), dtype=torch.bool, device=key_padding_mask.device),
                                           key_padding_mask], dim=1)
