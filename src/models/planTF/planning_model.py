@@ -994,7 +994,7 @@ class PlanningModel(TorchModuleWrapper):
             ################ FFNet ################
             x_ffnet = torch.cat([self.lane_emb_ff_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
                             self.lane_emb_ff_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
-                            self.waypoints_embedder(waypoints.view(bs, -1)).unsqueeze(1),
+                            self.waypoints_embedder(waypoints.view(bs, -1).detach()).unsqueeze(1),
                             x_orig], dim=1)
         
             key_padding_mask_ff = torch.cat([torch.zeros((bs, 3), dtype=torch.bool, device=key_padding_mask.device),
