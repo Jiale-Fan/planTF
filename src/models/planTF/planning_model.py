@@ -1027,7 +1027,7 @@ class PlanningModel(TorchModuleWrapper):
             "rel_prediction" : multimodal_rel_prediction,
             "waypoints": multimodal_waypoints,
             "far_future_traj": multimodal_far_future_traj,
-            # "lane_intention_loss": loss_lane_intention_2s+loss_lane_intention_8s,
+            "lane_intention_loss": loss_lane_intention_2s+loss_lane_intention_8s,
             "lane_intention_correct_rates": lane_intention_correct_rates_2s,
             "lane_intention_topk_correct_rate": lane_intention_topk_correct_rate_2s,
             "lane_intention_correct_rates_8s": lane_intention_correct_rates_8s,
