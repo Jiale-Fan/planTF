@@ -187,6 +187,17 @@ class PlanningModel(TorchModuleWrapper):
         )
         self.norm_wp = nn.LayerNorm(dim)
 
+        self.agent_encoder = AgentEncoder(
+            state_channel=state_channel,
+            history_channel=history_channel,
+            dim=dim,
+            hist_steps=history_steps,
+            drop_path=drop_path,
+            use_ego_history=use_ego_history,
+            state_attn_encoder=state_attn_encoder,
+            state_dropout=state_dropout,
+        )
+
         # self.expander = nn.Linear(dim*num_seeds, expanded_dim)
 
         # self.blocks_teacher = nn.ModuleList(
@@ -1251,43 +1262,32 @@ class PlanningModel(TorchModuleWrapper):
         else:
             agent_features, agent_category, frame_valid_mask, agent_key_padding, ego_state = self.extract_agent_feature(data, include_future=False)
 
-        # ego state embedding (currently only velocity)
-        ego_vel_token = self.vel_token_projector(ego_state[:, 3:4]).unsqueeze(1) # B 1 D
 
-        bs, A = agent_features.shape[0:2]
-        agent_embedding = self.agent_projector(agent_features)+self.agent_type_emb(agent_category)[:,:,None,:] # B A D
+        #############################################################################################
+        # # ego state embedding (currently only velocity)
 
-        # # if agent frames should be masked here?
-        # 1. if not, use following code
+        # ego_vel_token = self.vel_token_projector(ego_state[:, 3:4]).unsqueeze(1) # B 1 D
 
-        # (agent_masked_tokens, frame_pred_mask) = self.trajectory_random_masking(agent_embedding, self.trajectory_mask_ratio, frame_valid_mask)
-        agent_embedding[~frame_valid_mask] = self.TempoNet_frame_seed
-        agent_embedding_ft = rearrange(agent_embedding.clone(), 'b a t d -> (b a) t d')
-        # agent_tempo_key_padding = rearrange(~frame_valid_mask, 'b a t -> (b a) t')
+        # bs, A = agent_features.shape[0:2]
+        # agent_embedding = self.agent_projector(agent_features)+self.agent_type_emb(agent_category)[:,:,None,:] # B A D
+
+        # agent_embedding[~frame_valid_mask] = self.TempoNet_frame_seed
+        # agent_embedding_ft = rearrange(agent_embedding.clone(), 'b a t d -> (b a) t d')        
+        # agent_embedding_ft = self.pe(agent_embedding_ft)
+        # agent_embedding_emb, agent_pos_emb = self.tempo_net(agent_embedding_ft)
+
+        # agent_embedding_emb = rearrange(agent_embedding_emb, '(b a) t c -> b a t c', b=bs, a=A)
+        # agent_embedding_emb = reduce(agent_embedding_emb, 'b a t c -> b a c', 'max')
+        # agent_embedding_emb = agent_embedding_emb + rearrange(agent_pos_emb, '(b a) c -> b a c', b=bs, a=A)
         
-        agent_embedding_ft = self.pe(agent_embedding_ft)
-        # agent_embedding_ft, agent_pos_emb = self.tempo_net(agent_embedding_ft, agent_tempo_key_padding) # if key_padding_mask should be used here? this causes nan values in loss and needs investigation
-        agent_embedding_emb, agent_pos_emb = self.tempo_net(agent_embedding_ft)
-
-        # 2. if yes, use following code
-
-        # (agent_masked_tokens, frame_pred_mask) = self.trajectory_random_masking(agent_embedding, self.trajectory_mask_ratio, frame_valid_mask)
-        # agent_masked_tokens_ = rearrange(agent_masked_tokens, 'b a t d -> (b a) t d').clone()
-        # agent_masked_tokens_pos_embeded = self.pe(agent_masked_tokens_)
-        # agent_tempo_key_padding = rearrange(~frame_valid_mask, 'b a t -> (b a) t') 
-        # # y, _ = self.tempo_net(agent_masked_tokens_pos_embeded, agent_tempo_key_padding) 
-        # agent_embedding_emb, agent_pos_emb = self.tempo_net(agent_masked_tokens_pos_embeded)
-
-        #############
-
-        agent_embedding_emb = rearrange(agent_embedding_emb, '(b a) t c -> b a t c', b=bs, a=A)
-        agent_embedding_emb = reduce(agent_embedding_emb, 'b a t c -> b a c', 'max')
-        agent_embedding_emb = agent_embedding_emb + rearrange(agent_pos_emb, '(b a) c -> b a c', b=bs, a=A)
-
-        x = torch.cat([ego_vel_token, agent_embedding_emb[:, 1:], lane_embedding_pos], dim=1) # drop the ego history token here
-        # key padding masks
-        # key_padding_mask = torch.cat([torch.zeros(ego_vel_token.shape[0:2], device=agent_key_padding.device, dtype=torch.bool), agent_key_padding, polygon_key_padding], dim=-1)
+        # x = torch.cat([ego_vel_token, agent_embedding_emb[:, 1:], lane_embedding_pos], dim=1) # drop the ego history token here
         
+        #############################################################################################
+
+        x_agent = self.agent_encoder(data)
+
+        x = torch.cat([x_agent, lane_embedding_pos], dim=1)
+
         key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding], dim=-1)
 
         res = [x, key_padding_mask, route_kp_mask]
