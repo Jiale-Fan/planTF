@@ -102,6 +102,7 @@ class PlanningModel(TorchModuleWrapper):
         N_mask = 2,
         waypoints_number = 20,
         whether_split_lane = False,
+        ori_threshold = 0.7653,
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
     ) -> None:
         super().__init__(
@@ -133,6 +134,7 @@ class PlanningModel(TorchModuleWrapper):
         self.out_channels = out_channels
         self.N_mask = N_mask
         self.whether_split_lane = whether_split_lane
+        self.ori_threshold = ori_threshold
 
         # modules begin
         self.pe = PositionalEncoding(dim, dropout=0.1, max_len=1000)
@@ -1180,11 +1182,17 @@ class PlanningModel(TorchModuleWrapper):
             polygon_pos_and_ori = torch.cat([polygon_pos[..., :2], polygon_ori.cos(), polygon_ori.sin()], dim=-1)
             # lane_intention_target 2s
             dist = torch.norm( polygon_pos_and_ori - attraction_point[:, None, None, :], dim=-1) # [B, M, S]
+            ori_diff_2s = torch.norm(polygon_pos_and_ori[..., 2:] - attraction_point[:, None, None, 2:], dim=-1) # [B, M]
+            diff_above_threshold = ori_diff_2s > self.ori_threshold
             dist[route_kp_mask] = torch.inf
+            dist[diff_above_threshold] = torch.inf
             lane_intention_2s = dist.min(dim=-1)[0].argmin(dim=-1) # B
             # lane_intention_target 8s
             dist = torch.norm(polygon_pos_and_ori - horizon_point[:, None, None, :], dim=-1) # [B, M, S]
+            ori_diff_8s = torch.norm(polygon_pos_and_ori[..., 2:] - horizon_point[:, None, None, 2:], dim=-1) # [B, M]
+            diff_above_threshold = ori_diff_8s > self.ori_threshold
             dist[route_kp_mask] = torch.inf
+            dist[diff_above_threshold] = torch.inf
             lane_intention_8s = dist.min(dim=-1)[0].argmin(dim=-1) # B
 
             res.extend([lane_intention_2s, lane_intention_8s, waypoints_gt])
