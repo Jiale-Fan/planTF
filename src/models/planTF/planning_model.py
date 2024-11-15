@@ -820,11 +820,11 @@ class PlanningModel(TorchModuleWrapper):
 
         abs_prediction = self.abs_agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2)
         lane_intention_2s = self.lane_intention_2s_predictor(x[:, A:]).squeeze(-1) # B M
-        lane_intention_2s[key_padding_mask] = -torch.inf # except the route, all the other map elements are set to -inf # lane_intention[key_padding_mask[:, A:]] = -torch.inf # invalide map elements are set to -inf. non-route lane segments remain possible to be selected, # since after disable route correction, the density of route lane segments gets lower
+        lane_intention_2s[key_padding_mask[:, A:]] = -torch.inf # except the route, all the other map elements are set to -inf # lane_intention[key_padding_mask[:, A:]] = -torch.inf # invalide map elements are set to -inf. non-route lane segments remain possible to be selected, # since after disable route correction, the density of route lane segments gets lower
         lane_intention_2s_prob = F.softmax(lane_intention_2s, dim=-1)
 
         lane_intention_8s = self.lane_intention_8s_predictor(x[:, A:]).squeeze(-1) # B M
-        lane_intention_8s[key_padding_mask] = -torch.inf # except the route, all the other map elements are set to -inf
+        lane_intention_8s[key_padding_mask[:, A:]] = -torch.inf # except the route, all the other map elements are set to -inf
         lane_intention_8s_prob = F.softmax(lane_intention_8s, dim=-1)
 
         loss_lane_intention_2s = F.cross_entropy(lane_intention_2s_prob, lane_intention_2s_gt, reduction="none")
@@ -932,10 +932,10 @@ class PlanningModel(TorchModuleWrapper):
 
         abs_prediction = self.abs_agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2)
         lane_intention_2s = self.lane_intention_2s_predictor(x[:, A:]).squeeze(-1) # B M
-        lane_intention_2s[key_padding_mask] = -torch.inf # except the route, all the other map elements are set to -inf # lane_intention[key_padding_mask[:, A:]] = -torch.inf # invalide map elements are set to -inf. non-route lane segments remain possible to be selected, # since after disable route correction, the density of route lane segments gets lower
+        lane_intention_2s[key_padding_mask[:, A:]] = -torch.inf # except the route, all the other map elements are set to -inf # lane_intention[key_padding_mask[:, A:]] = -torch.inf # invalide map elements are set to -inf. non-route lane segments remain possible to be selected, # since after disable route correction, the density of route lane segments gets lower
 
         lane_intention_8s = self.lane_intention_8s_predictor(x[:, A:]).squeeze(-1) # B M
-        lane_intention_8s[key_padding_mask] = -torch.inf # except the route, all the other map elements are set to -inf
+        lane_intention_8s[key_padding_mask[:, A:]] = -torch.inf # except the route, all the other map elements are set to -inf
 
         lane_intention_prob_2s = F.softmax(lane_intention_2s, dim=-1)
         lane_intention_prob_8s = F.softmax(lane_intention_8s, dim=-1)
@@ -1184,14 +1184,14 @@ class PlanningModel(TorchModuleWrapper):
             dist = torch.norm( polygon_pos_and_ori - attraction_point[:, None, None, :], dim=-1) # [B, M, S]
             ori_diff_2s = torch.norm(polygon_pos_and_ori[..., 2:] - attraction_point[:, None, None, 2:], dim=-1) # [B, M]
             diff_above_threshold = ori_diff_2s > self.ori_threshold
-            dist[key_padding_mask] = torch.inf
+            dist[polygon_key_padding] = torch.inf
             dist[diff_above_threshold] = torch.inf
             lane_intention_2s = dist.min(dim=-1)[0].argmin(dim=-1) # B
             # lane_intention_target 8s
             dist = torch.norm(polygon_pos_and_ori - horizon_point[:, None, None, :], dim=-1) # [B, M, S]
             ori_diff_8s = torch.norm(polygon_pos_and_ori[..., 2:] - horizon_point[:, None, None, 2:], dim=-1) # [B, M]
             diff_above_threshold = ori_diff_8s > self.ori_threshold
-            dist[key_padding_mask] = torch.inf
+            dist[polygon_key_padding] = torch.inf
             dist[diff_above_threshold] = torch.inf
             lane_intention_8s = dist.min(dim=-1)[0].argmin(dim=-1) # B
 
