@@ -71,7 +71,7 @@ class Block(nn.Module):
             drop=drop,
         )
         self.drop_path2 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
-        self.attn_mat = None
+        # self.attn_mat = None
 
     def forward_pre(
         self,
@@ -87,11 +87,14 @@ class Block(nn.Module):
             attn_mask=mask,
             key_padding_mask=key_padding_mask,
             need_weights=True,
+            average_attn_weights=False,
         )
-        self.attn_mat = attn_mat
+        # self.attn_mat = attn_mat
         src = src + self.drop_path1(src2)
         src = src + self.drop_path2(self.mlp(self.norm2(src)))
-        return src
+
+        attn_l2_reg = torch.norm(attn_mat, p=2, dim=-1).mean()
+        return src, attn_l2_reg
 
     def forward_post(
         self,

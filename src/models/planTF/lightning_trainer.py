@@ -279,6 +279,8 @@ class LightningTrainer(pl.LightningModule):
         else:
             loss = loss_mat.mean()
 
+        loss = loss - res["attention_l2_regularization_loss"]
+
         ret_dict_mean = {key: value.mean() for key, value in ret_dict_batch.items()}
         ret_dict_mean.update(lane_intention_dict)
         ret_dict_mean["loss"] = loss

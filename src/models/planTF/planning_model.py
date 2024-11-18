@@ -811,11 +811,13 @@ class PlanningModel(TorchModuleWrapper):
         # x_orig, key_padding_mask = self.embed(data, torch.cat((self.plan_seed, self.rep_seed)))
         x_orig, key_padding_mask, route_key_padding_mask, lane_intention_2s_gt, lane_intention_8s_gt, waypoints_gt = self.embed(data, training=True)
 
+        attention_l2_regularization_loss = 0.0
         # no need to remove the ego token here. Right?
 
         x = x_orig 
         for blk in self.SpaNet:
-            x = blk(x, key_padding_mask=key_padding_mask)
+            x, attn_reg = blk(x, key_padding_mask=key_padding_mask)
+            attention_l2_regularization_loss += attn_reg
         x = self.norm_spa(x)
 
         abs_prediction = self.abs_agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2)
@@ -858,7 +860,8 @@ class PlanningModel(TorchModuleWrapper):
         key_padding_mask_wp = torch.cat([torch.zeros((bs, 1), dtype=torch.bool, device=key_padding_mask.device),
                                           key_padding_mask[:, 1:]], dim=1)
         for blk in self.WpNet:
-            x_wpnet = blk(x_wpnet, key_padding_mask=key_padding_mask_wp)
+            x_wpnet, attn_reg = blk(x_wpnet, key_padding_mask=key_padding_mask_wp)
+            attention_l2_regularization_loss += attn_reg
         x_wpnet = self.norm_wp(x_wpnet)
         rel_prediction = self.rel_agent_predictor(x_wpnet[:, 1+1:A+1]).view(bs, -1, self.waypoints_number, 2)
         waypoints = self.waypoint_decoder(x_wpnet[:, 0]) # B T_wp 4
@@ -873,7 +876,8 @@ class PlanningModel(TorchModuleWrapper):
         key_padding_mask_ff = torch.cat([torch.zeros((bs, 2), dtype=torch.bool, device=key_padding_mask.device),
                                           key_padding_mask], dim=1)
         for blk in self.FFNet:
-            x_ffnet = blk(x_ffnet, key_padding_mask=key_padding_mask_ff)
+            x_ffnet, attn_reg = blk(x_ffnet, key_padding_mask=key_padding_mask_ff)
+            attention_l2_regularization_loss += attn_reg
         x_ffnet = self.norm_ff(x_ffnet)
         far_future_traj = self.far_future_traj_decoder(x_ffnet[:, 0])
 
@@ -900,6 +904,7 @@ class PlanningModel(TorchModuleWrapper):
             "lane_intention_topk_correct_rate": lane_intention_topk_correct_rate_2s,
             "lane_intention_correct_rates_8s": lane_intention_correct_rates_8s,
             "lane_intention_topk_correct_rate_8s": lane_intention_topk_correct_rate_8s,
+            "attention_l2_regularization_loss": attention_l2_regularization_loss
         }
 
         if not self.training:
@@ -925,9 +930,12 @@ class PlanningModel(TorchModuleWrapper):
 
         # no need to remove the ego token here. Right?
 
+        attention_l2_regularization_loss = 0.0
+
         x = x_orig 
         for blk in self.SpaNet:
-            x = blk(x, key_padding_mask=key_padding_mask)
+            x, attn_reg = blk(x, key_padding_mask=key_padding_mask)
+            attention_l2_regularization_loss += attn_reg
         x = self.norm_spa(x)
 
         abs_prediction = self.abs_agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2)
@@ -960,7 +968,8 @@ class PlanningModel(TorchModuleWrapper):
         key_padding_mask_wp = torch.cat([torch.zeros((bs, 1), dtype=torch.bool, device=key_padding_mask.device),
                                           key_padding_mask[:, 1:]], dim=1)
         for blk in self.WpNet:
-            x_wpnet = blk(x_wpnet, key_padding_mask=key_padding_mask_wp)
+            x_wpnet, attn_reg = blk(x_wpnet, key_padding_mask=key_padding_mask_wp)
+            attention_l2_regularization_loss += attn_reg
         x_wpnet = self.norm_wp(x_wpnet)
         rel_prediction = self.rel_agent_predictor(x_wpnet[:, 1+1:A+1]).view(bs, -1, self.waypoints_number, 2)
         waypoints = self.waypoint_decoder(x_wpnet[:, 0]) # B T_wp 4
@@ -975,7 +984,8 @@ class PlanningModel(TorchModuleWrapper):
         key_padding_mask_ff = torch.cat([torch.zeros((bs, 2), dtype=torch.bool, device=key_padding_mask.device),
                                           key_padding_mask], dim=1)
         for blk in self.FFNet:
-            x_ffnet = blk(x_ffnet, key_padding_mask=key_padding_mask_ff)
+            x_ffnet, attn_reg = blk(x_ffnet, key_padding_mask=key_padding_mask_ff)
+            attention_l2_regularization_loss += attn_reg
         x_ffnet = self.norm_ff(x_ffnet)
         far_future_traj = self.far_future_traj_decoder(x_ffnet[:, 0])
 
@@ -989,6 +999,7 @@ class PlanningModel(TorchModuleWrapper):
             "rel_prediction" : rel_prediction,
             "waypoints": waypoints,
             "far_future_traj": far_future_traj,
+            "attention_l2_regularization_loss": attention_l2_regularization_loss
         }
 
         if not self.training:

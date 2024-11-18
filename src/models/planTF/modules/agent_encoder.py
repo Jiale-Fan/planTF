@@ -36,7 +36,7 @@ class TempoNet(nn.Module):
         # x = self.projector(x)
         x = x_orig.clone()
         for block in self.blocks:
-            x = block(x, key_padding_mask=key_padding_mask)
+            x, _ = block(x, key_padding_mask=key_padding_mask)
         x = self.norm(x)
 
         pos_emb = self.pos_emb(x_orig[:, self.now_timestep, :4])
