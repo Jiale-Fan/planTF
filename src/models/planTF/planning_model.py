@@ -48,7 +48,7 @@ class Stage(Enum):
     PRETRAIN_SEP = 0
     PRETRAIN_MIX = 1
     PRETRAIN_REPRESENTATION = 2
-    FINETUNE = 3
+    DEFAULT = 3
     ANT_MASK_FINETUNE = 4
 
 class PositionalEncoding(nn.Module):
@@ -96,7 +96,7 @@ class PlanningModel(TorchModuleWrapper):
         pretrain_epoch_stages = [0, 0],
         lane_split_threshold=20,
         alpha=0.999,
-        expanded_dim = 256*8,
+        expanded_dim = 2048,
         gamma = 1.0, # VICReg standard deviation target 
         out_channels = 4,
         N_mask = 2,
@@ -277,6 +277,9 @@ class PlanningModel(TorchModuleWrapper):
         self.attraction_point_projector = Projector(to_dim=dim, in_channels=4)
         self.vel_token_projector = Projector(to_dim=dim, in_channels=1)
 
+        self.cme_motion_mlp = build_mlp(dim, [2048, 256], norm="ln")
+        self.cme_env_mlp = build_mlp(dim, [2048, 256], norm="ln")
+
         self.apply(self._init_weights)
 
 
@@ -299,7 +302,9 @@ class PlanningModel(TorchModuleWrapper):
         #         self.map_projector, self.lane_pred, self.agent_frame_pred, self.blocks, self.norm]
         # module_list = [[name, module] for name, module in self.named_modules() if module in targeted_list]
         return [self.pos_emb, self.tempo_net, self.TempoNet_frame_seed, self.agent_projector, self.MRM_seed,
-                self.map_encoder, self.lane_pred, self.agent_frame_predictor, self.SpaNet, self.norm_spa, self.agent_tail_predictor]
+                self.map_encoder, self.lane_pred, self.agent_frame_predictor, self.SpaNet, self.norm_spa, self.agent_tail_predictor, 
+                # JointMotion CME 
+                self.cme_motion_mlp, self.cme_env_mlp]
 
     def get_finetune_modules(self):
         return [self.ego_seed, self.waypoint_decoder, self.far_future_traj_decoder, self.FFNet, self.goal_mlp,
@@ -311,7 +316,7 @@ class PlanningModel(TorchModuleWrapper):
 
 
     def get_stage(self, current_epoch):
-        return Stage.FINETUNE
+        return Stage.DEFAULT
         if current_epoch < self.pretrain_epoch_stages[1]:
             return Stage.PRETRAIN_SEP
         # elif current_epoch < self.pretrain_epoch_stages[2]:
@@ -329,7 +334,7 @@ class PlanningModel(TorchModuleWrapper):
         #     return Stage.ANT_MASK_FINETUNE
         else:
             # return Stage.ANT_MASK_FINETUNE
-            return Stage.FINETUNE
+            return Stage.DEFAULT
         # for debugging
         
 
@@ -340,6 +345,8 @@ class PlanningModel(TorchModuleWrapper):
             return self.forward_inference(data)
             # return self.forward_antagonistic_mask_finetune(data, current_epoch)
         else:
+            if self.training and current_epoch <= 10:
+                return self.forward_CME_pretrain(data)
             if self.training and current_epoch <= 20:
                 return self.forward_teacher_enforcing(data)
             elif self.training and current_epoch > 20:
@@ -807,6 +814,37 @@ class PlanningModel(TorchModuleWrapper):
         #     print('Successfully dealt')
         
         return mask_pair
+
+    def forward_CME_pretrain(self, data):
+        bs, A = data["agent"]["heading"].shape[0:2]
+        # x_orig, key_padding_mask = self.embed(data, torch.cat((self.plan_seed, self.rep_seed)))
+        x_orig, key_padding_mask, route_key_padding_mask, lane_intention_2s_gt, lane_intention_8s_gt, waypoints_gt = self.embed(data, training=True)
+        x_agent = x_orig[:, :A]
+        x_map = x_orig[:, A:]
+        h_agent = torch.mean(x_agent*(~key_padding_mask[:,:A,None]), dim=1)
+        h_map = torch.mean(x_map*(~key_padding_mask[:,A:,None]), dim=1)
+
+        z_motion = self.cme_motion_mlp(h_agent)
+        z_env = self.cme_env_mlp(h_map)
+
+        v_loss_motion = self.variance_loss(z_motion)
+        v_loss_env = self.variance_loss(z_env)
+        c_loss_motion = self.covariance_loss(z_motion)
+        c_loss_env = self.covariance_loss(z_env)
+        inv_loss = self.invariance_loss(z_motion, z_env)
+
+        v_loss = v_loss_motion + v_loss_env
+        c_loss = c_loss_motion + c_loss_env
+
+        out = {
+            "loss": 2.5*v_loss + 0.1*c_loss + 2.5*inv_loss,
+            "v_loss": v_loss,
+            "c_loss": c_loss,
+            "inv_loss": inv_loss,
+        }
+
+        return out
+    
 
     def forward_teacher_enforcing(self, data):
         bs, A = data["agent"]["heading"].shape[0:2]
@@ -1421,3 +1459,18 @@ class PlanningModel(TorchModuleWrapper):
             for param, param_t in zip(student.parameters(), teacher.parameters()):
                 param_t.data = self.alpha*param_t.data + (1-self.alpha)*param.data
 
+    def variance_loss(self, z): 
+        S = torch.sqrt(torch.var(z, dim=0)+1e-6)
+        v_loss = torch.mean(torch.clip(self.gamma-S, min=0))
+        return v_loss
+    
+    def covariance_loss(self, z):
+        delta_z = z - torch.mean(z, dim=0, keepdim=True) # B D
+        cov = torch.sum(torch.matmul(rearrange(delta_z, 'b d -> b d 1'), rearrange(delta_z, 'b d -> b 1 d')), dim=0)/(delta_z.shape[0]-1) # D D
+        cov_off_diag = cov - torch.diag(torch.diagonal(cov))
+        c_loss = torch.sum(torch.pow(cov_off_diag, 2))/self.expanded_dim
+        return c_loss
+    
+    def invariance_loss(self, z, z_t):
+        inv_loss = torch.mean(torch.norm(z - z_t, dim=-1))
+        return inv_loss

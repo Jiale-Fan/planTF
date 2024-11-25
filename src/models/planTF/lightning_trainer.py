@@ -88,13 +88,16 @@ class LightningTrainer(pl.LightningModule):
         metrics = None
 
         if 'trajectory' in res and 'probability' in res:
+        # if they are present, this suggests that the model is not in pretrain mode
             planning_loss = self._compute_objectives(res, features["feature"].data)
             if res["trajectory"].dim() == 5:
                 res = {key: res[key][:, 0] for key in res.keys()}
             metrics = self._compute_metrics(res, features["feature"].data, prefix)
             res.update(planning_loss) 
 
-        assert 'loss' in res
+        else:
+        # the model should be in pretrain mode, loss has already been calculated
+            assert 'loss' in res
 
         opts = self.optimizers()
         schs = self.lr_schedulers()
@@ -119,9 +122,9 @@ class LightningTrainer(pl.LightningModule):
                 schs[0].step(self.current_epoch)
                 schs[1].step(self.current_epoch)
                 
-                self.model.EMA_update() # update the teacher model with EMA
+                # self.model.EMA_update() # update the teacher model with EMA
 
-            elif self.model.get_stage(self.current_epoch) == Stage.FINETUNE or self.model.get_stage(self.current_epoch) == Stage.ANT_MASK_FINETUNE: 
+            elif self.model.get_stage(self.current_epoch) == Stage.DEFAULT or self.model.get_stage(self.current_epoch) == Stage.ANT_MASK_FINETUNE: 
                 opt_pre.zero_grad()
                 opt_fine.zero_grad()
                 self.manual_backward(res["loss"])
@@ -136,7 +139,6 @@ class LightningTrainer(pl.LightningModule):
         # for sch in self.lr_schedulers():
         #     sch.step(self.current_epoch)
 
-        # TODO: manual gradient clipping?
         logged_loss = {k: v for k, v in res.items() if v.dim() == 0}
         self._log_step(res["loss"], logged_loss, metrics, prefix)
 
