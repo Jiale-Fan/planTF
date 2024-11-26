@@ -41,6 +41,7 @@ trainer:
     strategy: ddp_find_unused_parameters_true
 
     # checkpoint_callback: true  # enable default checkpoint
+    log_every_n_steps: 10
 
   overfitting:
     enable: false  # run an overfitting test instead of training
