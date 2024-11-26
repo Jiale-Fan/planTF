@@ -302,19 +302,22 @@ class LightningTrainer(pl.LightningModule):
         # if True:
             lane_intention_loss = res["lane_intention_loss"]
             lane_intention_dict = {k: res[k] for k in res.keys() if k.startswith("lane_intention")}
-        elif "lane_intention_2s_prob" in res: 
-            lane_intention_2s_prob = res["lane_intention_2s_prob"]
-            lane_intention_8s_prob = res["lane_intention_8s_prob"]
-            lane_intention_topk_2s = res["lane_intention_topk_2s"]
-            lane_intention_topk_8s = res["lane_intention_topk_8s"]
 
-            loss_lane_intention_2s = F.cross_entropy(lane_intention_2s_prob, lane_intention_topk_2s[torch.arange(bs), best_mode_wp], reduction="none")
-            loss_lane_intention_8s = F.cross_entropy(lane_intention_8s_prob, lane_intention_topk_8s[torch.arange(bs), best_mode_wp], reduction="none")
+        # elif "lane_intention_2s_prob" in res: 
+        #     lane_intention_2s_prob = res["lane_intention_2s_prob"]
+        #     lane_intention_8s_prob = res["lane_intention_8s_prob"]
+        #     lane_intention_topk_2s = res["lane_intention_topk_2s"]
+        #     lane_intention_topk_8s = res["lane_intention_topk_8s"]
 
-            lane_intention_loss = loss_lane_intention_2s + loss_lane_intention_8s
+        #     loss_lane_intention_2s = F.cross_entropy(lane_intention_2s_prob, lane_intention_topk_2s[torch.arange(bs), best_mode_wp], reduction="none")
+        #     loss_lane_intention_8s = F.cross_entropy(lane_intention_8s_prob, lane_intention_topk_8s[torch.arange(bs), best_mode_wp], reduction="none")
 
+        #     lane_intention_loss = loss_lane_intention_2s + loss_lane_intention_8s
+        #     lane_intention_dict = {k: res[k] for k in res.keys() if k.startswith("lane_intention")}
+        
         else:
             lane_intention_loss = torch.zeros(bs, device=agent_reg_loss.device)
+            lane_intention_dict = {}
 
         # ego_loss_dict = self._cal_ego_loss_term(trajectory, probability, ego_target)
         ret_dict_batch = {
@@ -335,6 +338,7 @@ class LightningTrainer(pl.LightningModule):
 
         ret_dict_mean = {key: value.mean() for key, value in ret_dict_batch.items()}
         ret_dict_mean["loss"] = loss
+        ret_dict_mean.update(lane_intention_dict)
 
         return ret_dict_mean
 

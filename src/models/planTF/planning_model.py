@@ -837,7 +837,7 @@ class PlanningModel(TorchModuleWrapper):
         c_loss = c_loss_motion + c_loss_env
 
         out = {
-            "loss": 10*v_loss + 1*c_loss + 2.5*inv_loss,
+            "loss": 10*v_loss + 0.5*c_loss + 2.5*inv_loss,
             "v_loss": v_loss,
             "c_loss": c_loss,
             "inv_loss": inv_loss,
