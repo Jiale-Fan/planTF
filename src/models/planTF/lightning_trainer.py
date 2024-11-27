@@ -584,7 +584,7 @@ class LightningTrainer(pl.LightningModule):
             optimizer=optimizer_pretrain,
             lr=self.lr,
             min_lr=1e-6,
-            starting_epoch=self.model.pretrain_epoch_stages[0:1],
+            starting_epoch=self.model.pretrain_epoch_stages,
             epochs=self.epochs,
             warmup_epochs=self.warmup_epochs,
         )
@@ -602,7 +602,7 @@ class LightningTrainer(pl.LightningModule):
             optimizer=optimizer_finetune_f,
             lr=self.lr,
             min_lr=1e-6,
-            starting_epoch=self.model.pretrain_epoch_stages[1:2],
+            starting_epoch=self.model.pretrain_epoch_stages[1:],
             epochs=self.epochs,
             warmup_epochs=self.warmup_epochs,
         )
