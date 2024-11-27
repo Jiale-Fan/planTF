@@ -93,7 +93,7 @@ class PlanningModel(TorchModuleWrapper):
         lane_mask_ratio=0.5,
         trajectory_mask_ratio=0.7,
         # pretrain_epoch_stages = [0, 10, 20, 25, 30, 35], # SEPT, ft, ant, ft, ant, ft
-        pretrain_epoch_stages = [0, 0],
+        pretrain_epoch_stages = [0, 10],
         lane_split_threshold=20,
         alpha=0.999,
         expanded_dim = 2048,
@@ -302,7 +302,7 @@ class PlanningModel(TorchModuleWrapper):
         #         self.map_projector, self.lane_pred, self.agent_frame_pred, self.blocks, self.norm]
         # module_list = [[name, module] for name, module in self.named_modules() if module in targeted_list]
         return [self.pos_emb, self.tempo_net, self.TempoNet_frame_seed, self.agent_projector, self.MRM_seed,
-                self.map_encoder, self.lane_pred, self.agent_frame_predictor, self.SpaNet, self.norm_spa, self.agent_tail_predictor, 
+                self.map_encoder, self.lane_pred, self.agent_frame_predictor,  self.agent_tail_predictor, 
                 # JointMotion CME 
                 self.cme_motion_mlp, self.cme_env_mlp]
 
@@ -312,7 +312,7 @@ class PlanningModel(TorchModuleWrapper):
                 self.lane_intention_8s_predictor, 
                 self.vel_token_projector, self.WpNet, self.norm_wp, self.norm_ff, 
                 self.lane_emb_wp_2s_mlp, self.lane_emb_ff_2s_mlp, self.lane_emb_wp_8s_mlp, self.lane_emb_ff_8s_mlp, self.score_mlp, 
-                self.waypoints_embedder]
+                self.waypoints_embedder, self.SpaNet, self.norm_spa]
 
 
     def get_stage(self, current_epoch):
@@ -347,9 +347,9 @@ class PlanningModel(TorchModuleWrapper):
         else:
             if self.training and current_epoch <= 10:
                 return self.forward_CME_pretrain(data)
-            if self.training and current_epoch <= 20:
+            if self.training and current_epoch <= 30:
                 return self.forward_teacher_enforcing(data)
-            elif self.training and current_epoch > 20:
+            elif self.training and current_epoch > 30:
                 return self.forward_multimodal_finetune(data)
             else:
                 return self.forward_inference(data)
@@ -837,7 +837,7 @@ class PlanningModel(TorchModuleWrapper):
         c_loss = c_loss_motion + c_loss_env
 
         out = {
-            "loss": 10*v_loss + 0.5*c_loss + 2.5*inv_loss,
+            "loss": 10*v_loss + 0.2*c_loss + 2.5*inv_loss,
             "v_loss": v_loss,
             "c_loss": c_loss,
             "inv_loss": inv_loss,
