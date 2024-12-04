@@ -103,6 +103,7 @@ class PlanningModel(TorchModuleWrapper):
         waypoints_number = 20,
         whether_split_lane = False,
         ori_threshold = 0.7653,
+        map_collection_threshold = 10,
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
     ) -> None:
         super().__init__(
@@ -135,6 +136,7 @@ class PlanningModel(TorchModuleWrapper):
         self.N_mask = N_mask
         self.whether_split_lane = whether_split_lane
         self.ori_threshold = ori_threshold
+        self.map_collection_threshold = map_collection_threshold
 
         # modules begin
         self.pe = PositionalEncoding(dim, dropout=0.1, max_len=1000)
@@ -406,7 +408,7 @@ class PlanningModel(TorchModuleWrapper):
         # point_position_feature = rearrange(point_position_feature, 'b m p c -> b m (p c)')
 
         # feature = torch.cat([point_position_feature, new_poly_prop], dim=-1)
-        polygon_key_padding = ~(valid_mask_r.any(-1))
+        polygon_key_padding = ~(valid_mask_r.any(-1)) # 
 
         point_orientation_feature = point_orientation[:,:,0].unsqueeze(-1) # B M 20
 
@@ -818,11 +820,7 @@ class PlanningModel(TorchModuleWrapper):
     def forward_CME_pretrain(self, data):
         bs, A = data["agent"]["heading"].shape[0:2]
         # x_orig, key_padding_mask = self.embed(data, torch.cat((self.plan_seed, self.rep_seed)))
-        x_orig, key_padding_mask, route_key_padding_mask, lane_intention_2s_gt, lane_intention_8s_gt, waypoints_gt = self.embed(data, training=True)
-        x_agent = x_orig[:, :A]
-        x_map = x_orig[:, A:]
-        h_agent = torch.mean(x_agent*(~key_padding_mask[:,:A,None]), dim=1)
-        h_map = torch.mean(x_map*(~key_padding_mask[:,A:,None]), dim=1)
+        h_agent, h_map = self.pretrain_embed(data)
 
         z_motion = self.cme_motion_mlp(h_agent)
         z_env = self.cme_env_mlp(h_map)
@@ -837,7 +835,7 @@ class PlanningModel(TorchModuleWrapper):
         c_loss = c_loss_motion + c_loss_env
 
         out = {
-            "loss": 10*v_loss + 0.1*c_loss + 2.5*inv_loss,
+            "loss": 10*v_loss + 0.0125*c_loss + 2.5*inv_loss, # NOTE: tuned down c_loss by 8x to make it the same as previous experiment
             "v_loss": v_loss,
             "c_loss": c_loss,
             "inv_loss": inv_loss,
@@ -1358,6 +1356,69 @@ class PlanningModel(TorchModuleWrapper):
         
         return res
 
+    def pretrain_embed(self, data,):
+        """
+            Extract the features of the map and the agents, and then embed them into the latent space. 
+            For the purpose of pretrain using VICReg loss, we do local map element colloection for each of the k nearest neighboring agents in each scenario. 
+            Then, an average pooling is applied for each set of lane segments. 
+
+            inputs:
+                sdata: dict
+
+            returns: 
+                x_k_motion: tensor (B_k, D)
+                x_k_env: tensor (B_k, D)
+
+        """
+        
+        polygon_pos, polygon_ori, polypon_prop, polygon_mask, polygon_key_padding, route_kp_mask = self.extract_map_feature(data, need_route_kpmask=True)
+    
+        # lane embedding
+        lane_embedding, lane_pos_emb = self.map_encoder(polygon_pos, polypon_prop, polygon_mask)
+        lane_embedding_pos = lane_embedding + lane_pos_emb
+
+        # agent embedding (not dropping frames out )
+        agent_features, agent_category, frame_valid_mask, agent_key_padding, ego_state,\
+                attraction_point, horizon_point, waypoints_gt = self.extract_agent_feature(data, include_future=True, get_critical_points=True)
+
+
+        bs, A = agent_features.shape[0:2]
+        agent_embedding = self.agent_projector(agent_features)+self.agent_type_emb(agent_category)[:,:,None,:] # B A D
+
+        # # if agent frames should be masked here?
+        # 1. if not, use following code
+
+        # (agent_masked_tokens, frame_pred_mask) = self.trajectory_random_masking(agent_embedding, self.trajectory_mask_ratio, frame_valid_mask)
+        agent_embedding[~frame_valid_mask] = self.TempoNet_frame_seed
+        agent_embedding_ft = rearrange(agent_embedding.clone(), 'b a t d -> (b a) t d')
+        # agent_tempo_key_padding = rearrange(~frame_valid_mask, 'b a t -> (b a) t')
+        
+        agent_embedding_ft = self.pe(agent_embedding_ft)
+        # agent_embedding_ft, agent_pos_emb = self.tempo_net(agent_embedding_ft, agent_tempo_key_padding) # if key_padding_mask should be used here? this causes nan values in loss and needs investigation
+        agent_embedding_emb, agent_pos_emb = self.tempo_net(agent_embedding_ft)
+
+        agent_embedding_emb = rearrange(agent_embedding_emb, '(b a) t c -> b a t c', b=bs, a=A)
+        agent_embedding_emb = reduce(agent_embedding_emb, 'b a t c -> b a c', 'max')
+        agent_embedding_emb = agent_embedding_emb + rearrange(agent_pos_emb, '(b a) c -> b a c', b=bs, a=A) # b a c
+
+        # 2. filter the agents by the number of valid frames. we ask the agent to have at least 30% of valid frames to be included in local CME pretrain task
+        num_valid_frames = frame_valid_mask.sum(-1) # [B, A,]
+        valid_agent = (num_valid_frames >= 0.3 * (self.history_steps+self.future_steps)) & (~agent_key_padding) # [B, A,] bool
+        valid_agent_token = agent_embedding_emb[valid_agent] # [B_k]
+        valid_agent_traj = agent_features[..., :2][valid_agent] # [B_k, num_step, 2]
+
+        local_map_set = polygon_pos.unsqueeze(1).repeat(1, A, 1, 1, 1)[valid_agent] # [B, A, M, 20, 2] -> [B_k, M, 20, 2]
+
+        dist_step_to_map_point = torch.norm(valid_agent_traj[:,None,:,None,:] - local_map_set[:,:,None,:,:], dim=-1) # [B_k, M, num_step, 20]
+        dist_agent_to_map_element = torch.min(torch.min(dist_step_to_map_point, dim=-1).values, dim=-1).values # [B_k, M]
+        map_element_inclusion_mask = (dist_agent_to_map_element<self.map_collection_threshold) & (~polygon_key_padding.unsqueeze(1).repeat(1, A, 1)[valid_agent]) # [B_k, M] bool
+
+        lane_embedding_expanded = lane_embedding_pos.unsqueeze(1).repeat(1,A,1,1)[[valid_agent]] # [B_k, M, D]
+        lane_embedding_pooled = batch_average_pooling(lane_embedding_expanded, map_element_inclusion_mask) # [B_k, D]
+
+        return valid_agent_token, lane_embedding_pooled
+
+
 
     def mask_and_embed(self, data, seeds): # 
         """
@@ -1465,12 +1526,42 @@ class PlanningModel(TorchModuleWrapper):
         return v_loss
     
     def covariance_loss(self, z):
+        D = z.shape[-1]
         delta_z = z - torch.mean(z, dim=0, keepdim=True) # B D
         cov = torch.sum(torch.matmul(rearrange(delta_z, 'b d -> b d 1'), rearrange(delta_z, 'b d -> b 1 d')), dim=0)/(delta_z.shape[0]-1) # D D
         cov_off_diag = cov - torch.diag(torch.diagonal(cov))
-        c_loss = torch.sum(torch.pow(cov_off_diag, 2))/self.expanded_dim
+        c_loss = torch.sum(torch.pow(cov_off_diag, 2))/D 
         return c_loss
     
     def invariance_loss(self, z, z_t):
         inv_loss = torch.mean(torch.norm(z - z_t, dim=-1))
         return inv_loss
+    
+
+def batch_average_pooling(embs, mask):
+    """
+        Input: 
+            embs: [B_k, M, D] 
+            mask: [B_k, M], 
+
+        Output:
+            [B_k, D], only calculate the average of the unmasked elements
+    """
+    # Ensure the mask is broadcastable to the tensor's shape
+    mask = mask.unsqueeze(-1)  # Shape [B_k, M, 1]
+
+    # Apply the mask and sum over the M dimension
+    masked_tensor = embs * mask  # Shape [B_k, M, D]
+    sum_unmasked = masked_tensor.sum(dim=1)  # Shape [B_k, D]
+
+    # Count the number of unmasked elements in each batch
+    num_unmasked = mask.sum(dim=1)  # Shape [B_k, 1]
+
+    # Avoid division by zero by adding a small epsilon where num_unmasked == 0
+    epsilon = 1e10
+    num_unmasked = num_unmasked + (num_unmasked == 0) * epsilon
+
+    # Compute the mean of the unmasked elements
+    mean_unmasked = sum_unmasked / num_unmasked  # Shape [B_k, D]
+
+    return mean_unmasked
