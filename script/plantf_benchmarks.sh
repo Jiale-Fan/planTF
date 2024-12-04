@@ -6,6 +6,8 @@ CKPT_ROOT="~/Documents/checkpoints/"
 PLANNER="planTF"
 SPLIT=$1
 CHALLENGES="closed_loop_nonreactive_agents closed_loop_reactive_agents open_loop_boxes"
+# CHALLENGES="open_loop_boxes"
+
 
 for challenge in $CHALLENGES; do
     python run_simulation.py \
@@ -16,7 +18,7 @@ for challenge in $CHALLENGES; do
         worker.threads_per_node=16 \
         experiment_uid=$SPLIT/$planner \
         verbose=true \
-        planner.imitation_planner.planner_ckpt="/home/jiale/Documents/checkpoints/2211_1.5.ckpt"
+        planner.imitation_planner.planner_ckpt="/home/jiale/Documents/checkpoints/2211_1.7.ckpt"
 done
 
 

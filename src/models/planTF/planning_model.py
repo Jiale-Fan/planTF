@@ -93,7 +93,7 @@ class PlanningModel(TorchModuleWrapper):
         lane_mask_ratio=0.5,
         trajectory_mask_ratio=0.7,
         # pretrain_epoch_stages = [0, 10, 20, 25, 30, 35], # SEPT, ft, ant, ft, ant, ft
-        pretrain_epoch_stages = [0, 10],
+        pretrain_epoch_stages = [0, 0],
         lane_split_threshold=20,
         alpha=0.999,
         expanded_dim = 2048,
@@ -277,8 +277,8 @@ class PlanningModel(TorchModuleWrapper):
         self.attraction_point_projector = Projector(to_dim=dim, in_channels=4)
         self.vel_token_projector = Projector(to_dim=dim, in_channels=1)
 
-        self.cme_motion_mlp = build_mlp(dim, [2048, 256], norm="ln")
-        self.cme_env_mlp = build_mlp(dim, [2048, 256], norm="ln")
+        self.cme_motion_mlp = build_mlp(dim, [2048, 2048, 2048], norm="ln")
+        self.cme_env_mlp = build_mlp(dim, [2048, 2048, 2048], norm="ln")
 
         self.apply(self._init_weights)
 
@@ -345,11 +345,11 @@ class PlanningModel(TorchModuleWrapper):
             return self.forward_inference(data)
             # return self.forward_antagonistic_mask_finetune(data, current_epoch)
         else:
-            if self.training and current_epoch <= 10:
-                return self.forward_CME_pretrain(data)
-            if self.training and current_epoch <= 30:
+            # if self.training and current_epoch <= 10:
+            #     return self.forward_CME_pretrain(data)
+            if self.training and current_epoch <= 20:
                 return self.forward_teacher_enforcing(data)
-            elif self.training and current_epoch > 30:
+            elif self.training and current_epoch > 20:
                 return self.forward_multimodal_finetune(data)
             else:
                 return self.forward_inference(data)
