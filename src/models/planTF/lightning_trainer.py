@@ -582,7 +582,7 @@ class LightningTrainer(pl.LightningModule):
         # Get lr_schedulers
         scheduler_pre = WarmupCosLR(
             optimizer=optimizer_pretrain,
-            lr=self.lr,
+            lr=[self.lr, 0.5*self.lr],
             min_lr=1e-6,
             starting_epoch=self.model.pretrain_epoch_stages,
             epochs=self.epochs,
@@ -600,7 +600,7 @@ class LightningTrainer(pl.LightningModule):
 
         scheduler_fine_f = WarmupCosLR(
             optimizer=optimizer_finetune_f,
-            lr=self.lr,
+            lr=[self.lr],
             min_lr=1e-6,
             starting_epoch=self.model.pretrain_epoch_stages[1:],
             epochs=self.epochs,

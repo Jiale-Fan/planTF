@@ -8,6 +8,7 @@ class WarmupCosLR(_LRScheduler):
         self, optimizer, min_lr, lr, starting_epoch, warmup_epochs, epochs, last_epoch=-1, verbose=False
     ) -> None:
         self.min_lr = min_lr
+        # assert type(lr) == list
         self.lr = lr
         self.warmup_epochs = warmup_epochs
         self.epochs = epochs
@@ -34,7 +35,7 @@ class WarmupCosLR(_LRScheduler):
         self.__dict__.update(state_dict)
 
     def get_init_lr(self):
-        lr = self.lr / self.warmup_epochs
+        lr = self.lr[0] / self.warmup_epochs
         return lr
 
     def get_lr(self):
@@ -51,9 +52,9 @@ class WarmupCosLR(_LRScheduler):
                     break
             i = i-1
             if self.last_epoch < self.warmup_epochs + self.starting_epoch[i]:
-                lr = self.lr * (self.last_epoch - self.starting_epoch[i] + 1) / self.warmup_epochs
+                lr = self.lr[i] * (self.last_epoch - self.starting_epoch[i] + 1) / self.warmup_epochs
             else:
-                lr = self.min_lr + 0.5 * (self.lr - self.min_lr) * (
+                lr = self.min_lr + 0.5 * (self.lr[i] - self.min_lr) * (
                     1
                     + math.cos(
                         math.pi
