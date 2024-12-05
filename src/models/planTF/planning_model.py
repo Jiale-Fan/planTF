@@ -835,7 +835,7 @@ class PlanningModel(TorchModuleWrapper):
         c_loss = c_loss_motion + c_loss_env
 
         out = {
-            "loss": 10*v_loss + 0.0125*c_loss + 2.5*inv_loss, # NOTE: tuned down c_loss by 8x to make it the same as previous experiment
+            "loss": 10*v_loss + 100*c_loss + 2.5*inv_loss, # NOTE: tuned down c_loss by 8x to make it the same as previous experiment
             "v_loss": v_loss,
             "c_loss": c_loss,
             "inv_loss": inv_loss,
@@ -1530,7 +1530,7 @@ class PlanningModel(TorchModuleWrapper):
         delta_z = z - torch.mean(z, dim=0, keepdim=True) # B D
         cov = torch.sum(torch.matmul(rearrange(delta_z, 'b d -> b d 1'), rearrange(delta_z, 'b d -> b 1 d')), dim=0)/(delta_z.shape[0]-1) # D D
         cov_off_diag = cov - torch.diag(torch.diagonal(cov))
-        c_loss = torch.sum(torch.pow(cov_off_diag, 2))/D 
+        c_loss = torch.sum(torch.pow(cov_off_diag, 2))/(D*(D-1)) 
         return c_loss
     
     def invariance_loss(self, z, z_t):
