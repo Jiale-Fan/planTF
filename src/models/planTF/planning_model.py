@@ -89,7 +89,6 @@ class PlanningModel(TorchModuleWrapper):
         state_dropout=0.75,
         mlp_ratio=4.0,
         qkv_bias=False,
-        total_epochs=35,
         lane_mask_ratio=0.5,
         trajectory_mask_ratio=0.7,
         # pretrain_epoch_stages = [0, 10, 20, 25, 30, 35], # SEPT, ft, ant, ft, ant, ft
@@ -104,6 +103,7 @@ class PlanningModel(TorchModuleWrapper):
         whether_split_lane = False,
         ori_threshold = 0.7653,
         map_collection_threshold = 10,
+        agent_cme_displacement_threshold = 5, 
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
     ) -> None:
         super().__init__(
@@ -137,6 +137,7 @@ class PlanningModel(TorchModuleWrapper):
         self.whether_split_lane = whether_split_lane
         self.ori_threshold = ori_threshold
         self.map_collection_threshold = map_collection_threshold
+        self.agent_cme_displacement_threshold = agent_cme_displacement_threshold
 
         # modules begin
         self.pe = PositionalEncoding(dim, dropout=0.1, max_len=1000)
@@ -1403,7 +1404,14 @@ class PlanningModel(TorchModuleWrapper):
 
         # 2. filter the agents by the number of valid frames. we ask the agent to have at least 30% of valid frames to be included in local CME pretrain task
         num_valid_frames = frame_valid_mask.sum(-1) # [B, A,]
-        valid_agent = (num_valid_frames >= 0.3 * (self.history_steps+self.future_steps)) & (~agent_key_padding) # [B, A,] bool
+        # determine if the agent is valid according to time, length of trajectory, and agent type
+        valid_agent_time = (num_valid_frames >= 0.3 * (self.history_steps+self.future_steps)) # [B, A,] bool
+        agent_displacement = get_traj_displacement(frame_valid_mask, agent_features[..., :2])
+        valid_agent_displacement = agent_displacement > self.agent_cme_displacement_threshold # [B, A,] bool
+        valid_agent_type = ((agent_category == 0) | (agent_category == 1)) # 0: ego, 1: vehicle, 2: pedestrain, 3: bicycle
+
+        valid_agent = valid_agent_displacement & valid_agent_type & valid_agent_time & (~agent_key_padding) # [B, A,] bool
+
         valid_agent_token = agent_embedding_emb[valid_agent] # [B_k]
         valid_agent_traj = agent_features[..., :2][valid_agent] # [B_k, num_step, 2]
 
@@ -1413,7 +1421,7 @@ class PlanningModel(TorchModuleWrapper):
         dist_agent_to_map_element = torch.min(torch.min(dist_step_to_map_point, dim=-1).values, dim=-1).values # [B_k, M]
         map_element_inclusion_mask = (dist_agent_to_map_element<self.map_collection_threshold) & (~polygon_key_padding.unsqueeze(1).repeat(1, A, 1)[valid_agent]) # [B_k, M] bool
 
-        lane_embedding_expanded = lane_embedding_pos.unsqueeze(1).repeat(1,A,1,1)[[valid_agent]] # [B_k, M, D]
+        lane_embedding_expanded = lane_embedding_pos.unsqueeze(1).repeat(1,A,1,1)[valid_agent] # [B_k, M, D]
         lane_embedding_pooled = batch_average_pooling(lane_embedding_expanded, map_element_inclusion_mask) # [B_k, D]
 
         return valid_agent_token, lane_embedding_pooled
@@ -1565,3 +1573,30 @@ def batch_average_pooling(embs, mask):
     mean_unmasked = sum_unmasked / num_unmasked  # Shape [B_k, D]
 
     return mean_unmasked
+
+def get_traj_displacement(valid_frame_mask, agent_trajectories):
+    """
+    Input:
+        valid_frame_mask: tensor [B, A, T]
+        agent_trajectories: tensor[B, A, T, 2]
+    Return:
+        agent_displacement: tensor [B, A]
+    """
+
+    B, A, T = valid_frame_mask.shape
+
+    idx = torch.arange(0, T, 1).to(valid_frame_mask.device)
+    mask_idx = valid_frame_mask*idx[None, None, :]
+    end_idx = torch.argmax(mask_idx, dim=-1).view(-1) # [B, A]
+
+    idx = torch.arange(T, 0, -1).to(valid_frame_mask.device)
+    mask_idx = valid_frame_mask*idx[None, None, :]
+    start_idx = torch.argmax(mask_idx, dim=-1).view(-1) # [B, A]
+
+    agent_disp_flat = agent_trajectories.view(B*A, T, -1)
+
+    agent_displacement = torch.norm(agent_disp_flat[torch.arange(B*A), end_idx] - agent_disp_flat[torch.arange(B*A), start_idx], p=2, dim=-1)
+    agent_displacement = agent_displacement.reshape(B, A)
+
+    return agent_displacement
+
