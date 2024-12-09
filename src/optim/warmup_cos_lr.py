@@ -1,6 +1,7 @@
 import math
 
 from torch.optim.lr_scheduler import _LRScheduler
+import collections
 
 
 class WarmupCosLR(_LRScheduler):
@@ -8,11 +9,12 @@ class WarmupCosLR(_LRScheduler):
         self, optimizer, min_lr, lr, starting_epoch, warmup_epochs, epochs, last_epoch=-1, verbose=False
     ) -> None:
         self.min_lr = min_lr
-        # assert type(lr) == list
+        assert type(lr) == list
         self.lr = lr
         self.warmup_epochs = warmup_epochs
         self.epochs = epochs
         self.starting_epoch = starting_epoch
+        self.need_reset_flag = True
         super(WarmupCosLR, self).__init__(optimizer, last_epoch, verbose)
 
     def state_dict(self):
@@ -42,11 +44,21 @@ class WarmupCosLR(_LRScheduler):
         """
             starting_epoch is a list containing the starting epoch of each stage. 
         """
+
+        if self.last_epoch in self.starting_epoch:
+            if self.need_reset_flag:
+                self.optimizer.state = collections.defaultdict(dict) # reset optimizer internal state
+                self.need_reset_flag = False
+            else: 
+                self.need_reset_flag = True
+            
+
         if self.last_epoch < self.starting_epoch[0]:
             lr = 0.0
         else: 
             i = 0
             while self.last_epoch >= self.starting_epoch[i]:
+                
                 i += 1
                 if i == len(self.starting_epoch):
                     break
