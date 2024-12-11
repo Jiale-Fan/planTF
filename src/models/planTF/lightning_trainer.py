@@ -89,8 +89,10 @@ class LightningTrainer(pl.LightningModule):
 
 
         if self.model.model_type =="baseline":
-            res = self._compute_objectives_baseline(res, features["feature"].data)
-            metrics = self._compute_metrics(res, features["feature"].data, prefix)
+            planning_loss = self._compute_objectives_baseline(res, features["feature"].data)
+            if 'trajectory' in res and 'probability' in res:
+                metrics = self._compute_metrics(res, features["feature"].data, prefix)
+            res.update(planning_loss)
         elif self.model.model_type == "ours":
             if 'trajectory' in res and 'probability' in res:
             # if they are present, this suggests that the model is not in pretrain mode
