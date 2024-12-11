@@ -354,7 +354,15 @@ class PlanningModel(TorchModuleWrapper):
 
     def forward(self, data, current_epoch=None):
         if self.model_type == "baseline": 
-            return self.forward_planTF(data)
+            if current_epoch is None: # when inference
+                # return self.forward_pretrain_separate(data)
+                return self.forward_planTF(data)
+                # return self.forward_antagonistic_mask_finetune(data, current_epoch)
+            else:
+                if self.training and current_epoch <= 10:
+                    return self.forward_CME_pretrain(data)
+                else:
+                    return self.forward_planTF(data)
             # return self.forward_CME_pretrain(data)
         elif self.model_type == "ours": 
             if current_epoch is None: # when inference
@@ -364,7 +372,7 @@ class PlanningModel(TorchModuleWrapper):
             else:
                 if self.training and current_epoch <= 10:
                     return self.forward_CME_pretrain(data)
-                if self.training and current_epoch <= 30:
+                elif self.training and current_epoch <= 30:
                     return self.forward_teacher_enforcing(data)
                 elif self.training and current_epoch > 30:
                     return self.forward_multimodal_finetune(data)
