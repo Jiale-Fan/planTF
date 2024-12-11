@@ -92,7 +92,7 @@ class PlanningModel(TorchModuleWrapper):
         lane_mask_ratio=0.5,
         trajectory_mask_ratio=0.7,
         # pretrain_epoch_stages = [0, 10, 20, 25, 30, 35], # SEPT, ft, ant, ft, ant, ft
-        pretrain_epoch_stages = [0, 10],
+        pretrain_epoch_stages = [0, ],
         lane_split_threshold=20,
         alpha=0.999,
         expanded_dim = 2048,
@@ -104,6 +104,7 @@ class PlanningModel(TorchModuleWrapper):
         ori_threshold = 0.7653,
         map_collection_threshold = 10,
         agent_cme_displacement_threshold = 5, 
+        model_type = "baseline", # "baseline" for planTF like simple tf encoder architecture, and "ours" for progressive trajectory planning framework
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
     ) -> None:
         super().__init__(
@@ -138,6 +139,9 @@ class PlanningModel(TorchModuleWrapper):
         self.ori_threshold = ori_threshold
         self.map_collection_threshold = map_collection_threshold
         self.agent_cme_displacement_threshold = agent_cme_displacement_threshold
+        self.model_type = model_type
+
+        assert model_type in ["baseline", "ours"]
 
         # modules begin
         self.pe = PositionalEncoding(dim, dropout=0.1, max_len=1000)
@@ -283,6 +287,13 @@ class PlanningModel(TorchModuleWrapper):
         self.cme_motion_mlp = build_mlp(dim, [2048, 256], norm="ln")
         self.cme_env_mlp = build_mlp(dim, [2048, 256], norm="ln")
 
+        self.plantf_traj_decoder = MultimodalTrajectoryDecoder(
+            embed_dim=dim,
+            num_modes=6, # NOTE
+            future_steps=future_steps,
+            out_channels=4,
+        )
+
         self.apply(self._init_weights)
 
 
@@ -315,7 +326,7 @@ class PlanningModel(TorchModuleWrapper):
                 self.lane_intention_8s_predictor, 
                 self.vel_token_projector, self.WpNet, self.norm_wp, self.norm_ff, 
                 self.lane_emb_wp_2s_mlp, self.lane_emb_ff_2s_mlp, self.lane_emb_wp_8s_mlp, self.lane_emb_ff_8s_mlp, self.score_mlp, 
-                self.waypoints_embedder, self.SpaNet, self.norm_spa]
+                self.waypoints_embedder, self.SpaNet, self.norm_spa, self.plantf_traj_decoder]
 
 
     def get_stage(self, current_epoch):
@@ -342,34 +353,37 @@ class PlanningModel(TorchModuleWrapper):
         
 
     def forward(self, data, current_epoch=None):
-        # return self.forward_multimodal_finetune(data)
-        if current_epoch is None: # when inference
-            # return self.forward_pretrain_separate(data)
-            return self.forward_inference(data)
-            # return self.forward_antagonistic_mask_finetune(data, current_epoch)
-        else:
-            if self.training and current_epoch <= 10:
-                return self.forward_CME_pretrain(data)
-            if self.training and current_epoch <= 30:
-                return self.forward_teacher_enforcing(data)
-            elif self.training and current_epoch > 30:
-                return self.forward_multimodal_finetune(data)
-            else:
+        if self.model_type == "baseline": 
+            return self.forward_planTF(data)
+            # return self.forward_CME_pretrain(data)
+        elif self.model_type == "ours": 
+            if current_epoch is None: # when inference
+                # return self.forward_pretrain_separate(data)
                 return self.forward_inference(data)
-            # stage = self.get_stage(current_epoch)
-            # if stage == Stage.PRETRAIN_SEP:
-            #     return self.forward_pretrain_separate(data)
-            # elif stage == Stage.PRETRAIN_MIX:
-            #     return self.forward_pretrain_mix(data)
-            # elif stage == Stage.PRETRAIN_REPRESENTATION:
-            #     # self.EMA_update() # currently this is done in lightning_trainer.py
-            #     return self.forward_pretrain_representation(data)
-            # elif stage == Stage.FINETUNE:
-            #     return self.forward_finetune(data)
-            # elif stage == Stage.ANT_MASK_FINETUNE:
-            #     return self.forward_antagonistic_mask_finetune(data, current_epoch)
-            # else:
-            #     raise NotImplementedError(f"Stage {stage} is not implemented.")
+                # return self.forward_antagonistic_mask_finetune(data, current_epoch)
+            else:
+                if self.training and current_epoch <= 10:
+                    return self.forward_CME_pretrain(data)
+                if self.training and current_epoch <= 30:
+                    return self.forward_teacher_enforcing(data)
+                elif self.training and current_epoch > 30:
+                    return self.forward_multimodal_finetune(data)
+                else:
+                    return self.forward_inference(data)
+                # stage = self.get_stage(current_epoch)
+                # if stage == Stage.PRETRAIN_SEP:
+                #     return self.forward_pretrain_separate(data)
+                # elif stage == Stage.PRETRAIN_MIX:
+                #     return self.forward_pretrain_mix(data)
+                # elif stage == Stage.PRETRAIN_REPRESENTATION:
+                #     # self.EMA_update() # currently this is done in lightning_trainer.py
+                #     return self.forward_pretrain_representation(data)
+                # elif stage == Stage.FINETUNE:
+                #     return self.forward_finetune(data)
+                # elif stage == Stage.ANT_MASK_FINETUNE:
+                #     return self.forward_antagonistic_mask_finetune(data, current_epoch)
+                # else:
+                #     raise NotImplementedError(f"Stage {stage} is not implemented.")
 
     def extract_map_feature(self, data, need_route_kpmask=False):
         # NOTE: put property to one-hot?
@@ -844,6 +858,38 @@ class PlanningModel(TorchModuleWrapper):
 
         return out
     
+    def forward_planTF(self, data):
+
+        bs, A = data["agent"]["heading"].shape[0:2]
+
+        x_orig, key_padding_mask, route_key_padding_mask = self.embed(data, training=False, substitue_ego=True)
+
+        x = x_orig
+
+        for blk in self.SpaNet:
+            x = blk(x, key_padding_mask=key_padding_mask)
+        x = self.norm_spa(x)
+
+        trajectory, probability = self.plantf_traj_decoder(x[:, 0])
+        prediction = self.abs_agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2)
+
+        out = {
+            "trajectory": trajectory,
+            "probability": probability,
+            "prediction": prediction,
+        }
+
+        if not self.training:
+            best_mode = probability.argmax(dim=-1)
+            output_trajectory = trajectory[torch.arange(bs), best_mode]
+            angle = torch.atan2(output_trajectory[..., 3], output_trajectory[..., 2])
+            out["output_trajectory"] = torch.cat(
+                [output_trajectory[..., :2], angle.unsqueeze(-1)], dim=-1
+            )
+
+        return out
+
+    
 
     def forward_teacher_enforcing(self, data):
         bs, A = data["agent"]["heading"].shape[0:2]
@@ -1263,7 +1309,7 @@ class PlanningModel(TorchModuleWrapper):
         return out
     
     
-    def embed(self, data, include_future=False, training=False):
+    def embed(self, data, include_future=False, training=False, substitue_ego=True):
         """
             Extract the features of the map and the agents, and then embed them into the latent space. 
             Instead of using the embedding of ego history trajectory, we use ego velocity token. 
@@ -1327,7 +1373,10 @@ class PlanningModel(TorchModuleWrapper):
         agent_embedding_emb = reduce(agent_embedding_emb, 'b a t c -> b a c', 'max')
         agent_embedding_emb = agent_embedding_emb + rearrange(agent_pos_emb, '(b a) c -> b a c', b=bs, a=A)
 
-        x = torch.cat([ego_vel_token, agent_embedding_emb[:, 1:], lane_embedding_pos], dim=1) # drop the ego history token here
+        if substitue_ego: 
+            x = torch.cat([ego_vel_token, agent_embedding_emb[:, 1:], lane_embedding_pos], dim=1) # drop the ego history token here
+        else: 
+            x = torch.cat([agent_embedding_emb, lane_embedding_pos], dim=1)
         # key padding masks
         # key_padding_mask = torch.cat([torch.zeros(ego_vel_token.shape[0:2], device=agent_key_padding.device, dtype=torch.bool), agent_key_padding, polygon_key_padding], dim=-1)
         

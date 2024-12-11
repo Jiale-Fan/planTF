@@ -87,17 +87,21 @@ class LightningTrainer(pl.LightningModule):
 
         metrics = None
 
-        if 'trajectory' in res and 'probability' in res:
-        # if they are present, this suggests that the model is not in pretrain mode
-            planning_loss = self._compute_objectives(res, features["feature"].data)
-            if res["trajectory"].dim() == 5:
-                res = {key: res[key][:, 0] for key in res.keys()}
-            metrics = self._compute_metrics(res, features["feature"].data, prefix)
-            res.update(planning_loss) 
 
-        else:
-        # the model should be in pretrain mode, loss has already been calculated
-            assert 'loss' in res
+        if self.model.model_type =="baseline":
+            res = self._compute_objectives_baseline(res, features["feature"].data)
+        elif self.model.model_type == "ours":
+            if 'trajectory' in res and 'probability' in res:
+            # if they are present, this suggests that the model is not in pretrain mode
+                planning_loss = self._compute_objectives(res, features["feature"].data)
+                if res["trajectory"].dim() == 5:
+                    res = {key: res[key][:, 0] for key in res.keys()}
+                metrics = self._compute_metrics(res, features["feature"].data, prefix)
+                res.update(planning_loss) 
+
+            else:
+            # the model should be in pretrain mode, loss has already been calculated
+                assert 'loss' in res
 
         opts = self.optimizers()
         schs = self.lr_schedulers()
@@ -219,6 +223,53 @@ class LightningTrainer(pl.LightningModule):
         ego_reg_loss = F.smooth_l1_loss(best_traj, ego_target, reduction='none').mean((1, 2))
 
         return best_mode, ego_reg_loss # [bs]
+    
+    def _compute_objectives_baseline(self, res, data) -> Dict[str, torch.Tensor]:
+
+        loss_dict = {}
+        # target preparation
+        targets = data["agent"]["target"]
+        valid_mask = data["agent"]["valid_mask"][:, :, -self.model.future_steps :]
+
+        ego_target_pos, ego_target_heading = targets[:, 0, :, :2], targets[:, 0, :, 2]
+        ego_target = torch.cat(
+            [
+                ego_target_pos,
+                torch.stack(
+                    [ego_target_heading.cos(), ego_target_heading.sin()], dim=-1
+                ),
+            ],
+            dim=-1,
+        )
+        agent_target, agent_mask = targets[:, 1:], valid_mask[:, 1:]
+
+        # loss calculation
+
+        if "loss" in res:
+            loss_dict["pre_loss"] = res["loss"]
+
+        if "trajectory" in res and "probability" in res:
+            trajectory, probability = res["trajectory"], res["probability"]
+
+            best_mode, ego_reg_loss = self._winner_take_all_loss(trajectory, ego_target)
+            ego_cls_loss = F.cross_entropy(probability, best_mode.detach())
+
+            loss_dict["ego_cls_loss"] = ego_cls_loss
+            loss_dict["ego_reg_loss"] = ego_reg_loss.mean()
+
+        if "prediction" in res:
+            agent_reg_loss = F.smooth_l1_loss(
+                        res["prediction"][agent_mask], agent_target[agent_mask][:, :2]
+                    )
+            loss_dict["agent_reg_loss"] = agent_reg_loss
+            
+
+        loss_mat = torch.stack(list(loss_dict.values()), dim=-1)
+        loss = loss_mat.mean()
+        loss_dict["loss"] = loss 
+
+        return loss_dict
+
 
     def _compute_objectives(self, res, data) -> Dict[str, torch.Tensor]:
         trajectory, probability, prediction= (
@@ -602,7 +653,7 @@ class LightningTrainer(pl.LightningModule):
             optimizer=optimizer_finetune_f,
             lr=[self.lr],
             min_lr=1e-6,
-            starting_epoch=self.model.pretrain_epoch_stages[1:],
+            starting_epoch=self.model.pretrain_epoch_stages, # [1:]
             epochs=self.epochs,
             warmup_epochs=self.warmup_epochs,
         )
