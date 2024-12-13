@@ -364,8 +364,16 @@ class PlanningModel(TorchModuleWrapper):
 
     def forward(self, data, current_epoch=None):
         if self.model_type == "baseline": 
-            # return self.forward_planTF(data)
-            return self.forward_CME_pretrain(data)
+            if current_epoch is None: # when inference
+                # return self.forward_pretrain_separate(data)
+                return self.forward_planTF(data)
+                # return self.forward_antagonistic_mask_finetune(data, current_epoch)
+            else:
+                if self.training and current_epoch <= 10:
+                    return self.forward_CME_pretrain(data)
+                else:
+                    return self.forward_planTF(data)
+            # return self.forward_CME_pretrain(data)
         elif self.model_type == "ours": 
             if current_epoch is None: # when inference
                 # return self.forward_pretrain_separate(data)
@@ -506,9 +514,23 @@ class PlanningModel(TorchModuleWrapper):
                     
         return new_point_position_feature, new_valid_mask, new_poly_property
 
- 
+    def extract_agent_critical_points(self, data):
+        # B 4
+        attraction_point = torch.cat([data["agent"]["position"][:, 0, self.history_steps+self.waypoints_number-1], 
+                                    torch.stack([data["agent"]["heading"][:, 0, self.history_steps+self.waypoints_number-1].cos(), 
+                                                data["agent"]["heading"][:, 0, self.history_steps+self.waypoints_number-1].sin()], dim=-1),], dim=-1).clone()
+        # B 4
+        horizon_point = torch.cat([data["agent"]["position"][:, 0, -1],
+                                    torch.stack([data["agent"]["heading"][:, 0, -1].cos(),
+                                                data["agent"]["heading"][:, 0, -1].sin()], dim=-1),], dim=-1).clone()
+        # B, 20, 4
+        waypoints_gt = torch.cat([data["agent"]["position"][:, 0, self.history_steps:self.history_steps+self.waypoints_number], 
+                                    torch.stack([data["agent"]["heading"][:, 0, self.history_steps:self.history_steps+self.waypoints_number].cos(), 
+                                                data["agent"]["heading"][:, 0, self.history_steps:self.history_steps+self.waypoints_number].sin()], dim=-1),], dim=-1).clone()
+        return [attraction_point, horizon_point, waypoints_gt]
 
-    def extract_agent_feature(self, data, include_future=False, get_critical_points=False):
+
+    def extract_agent_feature(self, data, include_future=False):
 
         steps = self.history_steps if not include_future else self.history_steps + self.future_steps
 
@@ -547,28 +569,6 @@ class PlanningModel(TorchModuleWrapper):
         # feature = torch.cat([frame_feature, category_rep], dim=-1)
 
         ret = [agent_feature, category, valid_mask_vec, agent_key_padding, ego_state]
-
-        if get_critical_points:
-             # B 4
-            attraction_point = torch.cat([data["agent"]["position"][:, 0, self.history_steps+self.waypoints_number-1], 
-                                        torch.stack([data["agent"]["heading"][:, 0, self.history_steps+self.waypoints_number-1].cos(), 
-                                                    data["agent"]["heading"][:, 0, self.history_steps+self.waypoints_number-1].sin()], dim=-1),], dim=-1).clone()
-            
-            # B 4
-            horizon_point = torch.cat([data["agent"]["position"][:, 0, -1],
-                                        torch.stack([data["agent"]["heading"][:, 0, -1].cos(),
-                                                    data["agent"]["heading"][:, 0, -1].sin()], dim=-1),], dim=-1).clone()
-
-            # B, 20, 4
-            waypoints_gt = torch.cat([data["agent"]["position"][:, 0, self.history_steps:self.history_steps+self.waypoints_number], 
-                                        torch.stack([data["agent"]["heading"][:, 0, self.history_steps:self.history_steps+self.waypoints_number].cos(), 
-                                                    data["agent"]["heading"][:, 0, self.history_steps:self.history_steps+self.waypoints_number].sin()], dim=-1),], dim=-1).clone()
-
-
-
-
-            ret.extend([attraction_point, horizon_point, waypoints_gt])
-
         return ret
         
 
@@ -845,7 +845,12 @@ class PlanningModel(TorchModuleWrapper):
     def forward_CME_pretrain(self, data):
         bs, A = data["agent"]["heading"].shape[0:2]
         # x_orig, key_padding_mask = self.embed(data, torch.cat((self.plan_seed, self.rep_seed)))
-        h_agent, h_map = self.pretrain_embed(data)
+        ego_vel_token, agent_embedding_emb, lane_embedding_pos, agent_key_padding, polygon_key_padding, route_kp_mask = \
+            self.embed(data, include_future=False)
+        agent_local_map_token = self.local_map_collection_embed(data, agent_embedding_emb, lane_embedding_pos) # [B, A, D]
+
+        h_agent = rearrange(agent_embedding_emb, 'b a c -> (b a) c')
+        h_map = rearrange(agent_local_map_token, 'b a c -> (b a) c')
 
         z_motion = self.cme_motion_mlp(h_agent)
         z_env = self.cme_env_mlp(h_map)
@@ -872,9 +877,12 @@ class PlanningModel(TorchModuleWrapper):
 
         bs, A = data["agent"]["heading"].shape[0:2]
 
-        x_orig, key_padding_mask, route_key_padding_mask = self.embed(data, training=False, substitue_ego=True)
+        ego_vel_token, agent_embedding_emb, lane_embedding_pos, agent_key_padding, polygon_key_padding, route_kp_mask = \
+            self.embed(data, include_future=False)
+        agent_local_map_token = self.local_map_collection_embed(data, agent_embedding_emb, lane_embedding_pos) # [B, A, D]
 
-        x = x_orig
+        x = torch.cat([ego_vel_token, agent_local_map_token[:, 1:], lane_embedding_pos], dim=1) 
+        key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding], dim=-1)
 
         for blk in self.SpaNet:
             x = blk(x, key_padding_mask=key_padding_mask)
@@ -1317,9 +1325,37 @@ class PlanningModel(TorchModuleWrapper):
             self.inference_counter += 1
 
         return out
+
+
+    def embed_agent(self, data, include_future = False):
+        # agent embedding (not dropping frames out )
+        agent_features, agent_category, frame_valid_mask, agent_key_padding, ego_state = self.extract_agent_feature(data, include_future=include_future)
+
+        bs, A = agent_features.shape[0:2]
+        agent_embedding = self.agent_projector(agent_features)+self.agent_type_emb(agent_category)[:,:,None,:] # B A D
+
+        # # if agent frames should be masked here?
+        # 1. if not, use following code
+
+        # (agent_masked_tokens, frame_pred_mask) = self.trajectory_random_masking(agent_embedding, self.trajectory_mask_ratio, frame_valid_mask)
+        agent_embedding[~frame_valid_mask] = self.TempoNet_frame_seed
+        agent_embedding_ft = rearrange(agent_embedding.clone(), 'b a t d -> (b a) t d')
+        # agent_tempo_key_padding = rearrange(~frame_valid_mask, 'b a t -> (b a) t')
+        
+        agent_embedding_ft = self.pe(agent_embedding_ft)
+        # agent_embedding_ft, agent_pos_emb = self.tempo_net(agent_embedding_ft, agent_tempo_key_padding) # if key_padding_mask should be used here? this causes nan values in loss and needs investigation
+        agent_embedding_emb, agent_pos_emb = self.tempo_net(agent_embedding_ft)
+
+        agent_embedding_emb = rearrange(agent_embedding_emb, '(b a) t c -> b a t c', b=bs, a=A)
+        agent_embedding_emb = reduce(agent_embedding_emb, 'b a t c -> b a c', 'max')
+        agent_embedding_emb = agent_embedding_emb + rearrange(agent_pos_emb, '(b a) c -> b a c', b=bs, a=A)
+
+        ego_vel_token = self.vel_token_projector(ego_state[:, 3:4]).unsqueeze(1) # B 1 D
+
+        return agent_embedding_emb, agent_key_padding, ego_vel_token
     
     
-    def embed(self, data, include_future=False, training=False, substitue_ego=True):
+    def embed(self, data, include_future=False):
         """
             Extract the features of the map and the agents, and then embed them into the latent space. 
             Instead of using the embedding of ego history trajectory, we use ego velocity token. 
@@ -1343,81 +1379,43 @@ class PlanningModel(TorchModuleWrapper):
         lane_embedding, lane_pos_emb = self.map_encoder(polygon_pos, polypon_prop, polygon_mask)
         lane_embedding_pos = lane_embedding + lane_pos_emb
 
-        # agent embedding (not dropping frames out )
-        if training:    
-            agent_features, agent_category, frame_valid_mask, agent_key_padding, ego_state,\
-                attraction_point, horizon_point, waypoints_gt = self.extract_agent_feature(data, include_future=False, get_critical_points=True)
-        else:
-            agent_features, agent_category, frame_valid_mask, agent_key_padding, ego_state = self.extract_agent_feature(data, include_future=False)
-
-        # ego state embedding (currently only velocity)
-        ego_vel_token = self.vel_token_projector(ego_state[:, 3:4]).unsqueeze(1) # B 1 D
-
-        bs, A = agent_features.shape[0:2]
-        agent_embedding = self.agent_projector(agent_features)+self.agent_type_emb(agent_category)[:,:,None,:] # B A D
-
-        # # if agent frames should be masked here?
-        # 1. if not, use following code
-
-        # (agent_masked_tokens, frame_pred_mask) = self.trajectory_random_masking(agent_embedding, self.trajectory_mask_ratio, frame_valid_mask)
-        agent_embedding[~frame_valid_mask] = self.TempoNet_frame_seed
-        agent_embedding_ft = rearrange(agent_embedding.clone(), 'b a t d -> (b a) t d')
-        # agent_tempo_key_padding = rearrange(~frame_valid_mask, 'b a t -> (b a) t')
-        
-        agent_embedding_ft = self.pe(agent_embedding_ft)
-        # agent_embedding_ft, agent_pos_emb = self.tempo_net(agent_embedding_ft, agent_tempo_key_padding) # if key_padding_mask should be used here? this causes nan values in loss and needs investigation
-        agent_embedding_emb, agent_pos_emb = self.tempo_net(agent_embedding_ft)
-
-        # 2. if yes, use following code
-
-        # (agent_masked_tokens, frame_pred_mask) = self.trajectory_random_masking(agent_embedding, self.trajectory_mask_ratio, frame_valid_mask)
-        # agent_masked_tokens_ = rearrange(agent_masked_tokens, 'b a t d -> (b a) t d').clone()
-        # agent_masked_tokens_pos_embeded = self.pe(agent_masked_tokens_)
-        # agent_tempo_key_padding = rearrange(~frame_valid_mask, 'b a t -> (b a) t') 
-        # # y, _ = self.tempo_net(agent_masked_tokens_pos_embeded, agent_tempo_key_padding) 
-        # agent_embedding_emb, agent_pos_emb = self.tempo_net(agent_masked_tokens_pos_embeded)
-
-        #############
-
-        agent_embedding_emb = rearrange(agent_embedding_emb, '(b a) t c -> b a t c', b=bs, a=A)
-        agent_embedding_emb = reduce(agent_embedding_emb, 'b a t c -> b a c', 'max')
-        agent_embedding_emb = agent_embedding_emb + rearrange(agent_pos_emb, '(b a) c -> b a c', b=bs, a=A)
-
-        if substitue_ego: 
-            x = torch.cat([ego_vel_token, agent_embedding_emb[:, 1:], lane_embedding_pos], dim=1) # drop the ego history token here
-        else: 
-            x = torch.cat([agent_embedding_emb, lane_embedding_pos], dim=1)
+        agent_embedding_emb, agent_key_padding, ego_vel_token = self.embed_agent(data, include_future)
         # key padding masks
         # key_padding_mask = torch.cat([torch.zeros(ego_vel_token.shape[0:2], device=agent_key_padding.device, dtype=torch.bool), agent_key_padding, polygon_key_padding], dim=-1)
-        
-        key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding], dim=-1)
 
-        res = [x, key_padding_mask, route_kp_mask]
+        res = [ego_vel_token, agent_embedding_emb, lane_embedding_pos, agent_key_padding, polygon_key_padding, route_kp_mask]
+        return res
 
-        if training:
+    def embed_progressive(self, data):
+        res = self.embed(data)
+        polygon_pos, polygon_ori, polypon_prop, polygon_mask, polygon_key_padding= self.extract_map_feature(data)
 
-            polygon_pos_and_ori = torch.cat([polygon_pos[..., :2], polygon_ori.cos(), polygon_ori.sin()], dim=-1)
-            # lane_intention_target 2s
-            dist = torch.norm( polygon_pos_and_ori - attraction_point[:, None, None, :], dim=-1) # [B, M, S]
-            ori_diff_2s = torch.norm(polygon_pos_and_ori[..., 2:] - attraction_point[:, None, None, 2:], dim=-1) # [B, M]
-            diff_above_threshold = ori_diff_2s > self.ori_threshold
-            dist[polygon_key_padding] = torch.inf
-            dist[diff_above_threshold] = torch.inf
-            lane_intention_2s = dist.min(dim=-1)[0].argmin(dim=-1) # B
-            # lane_intention_target 8s
-            dist = torch.norm(polygon_pos_and_ori - horizon_point[:, None, None, :], dim=-1) # [B, M, S]
-            ori_diff_8s = torch.norm(polygon_pos_and_ori[..., 2:] - horizon_point[:, None, None, 2:], dim=-1) # [B, M]
-            diff_above_threshold = ori_diff_8s > self.ori_threshold
-            dist[polygon_key_padding] = torch.inf
-            dist[diff_above_threshold] = torch.inf
-            lane_intention_8s = dist.min(dim=-1)[0].argmin(dim=-1) # B
+        attraction_point, horizon_point, waypoints_gt = self.extract_agent_critical_points(data)
 
-            res.extend([lane_intention_2s, lane_intention_8s, waypoints_gt])
+        polygon_pos_and_ori = torch.cat([polygon_pos[..., :2], polygon_ori.cos(), polygon_ori.sin()], dim=-1)
+        # lane_intention_target 2s
+        dist = torch.norm( polygon_pos_and_ori - attraction_point[:, None, None, :], dim=-1) # [B, M, S]
+        ori_diff_2s = torch.norm(polygon_pos_and_ori[..., 2:] - attraction_point[:, None, None, 2:], dim=-1) # [B, M]
+        diff_above_threshold = ori_diff_2s > self.ori_threshold
+        dist[polygon_key_padding] = torch.inf
+        dist[diff_above_threshold] = torch.inf
+        lane_intention_2s = dist.min(dim=-1)[0].argmin(dim=-1) # B
+        # lane_intention_target 8s
+        dist = torch.norm(polygon_pos_and_ori - horizon_point[:, None, None, :], dim=-1) # [B, M, S]
+        ori_diff_8s = torch.norm(polygon_pos_and_ori[..., 2:] - horizon_point[:, None, None, 2:], dim=-1) # [B, M]
+        diff_above_threshold = ori_diff_8s > self.ori_threshold
+        dist[polygon_key_padding] = torch.inf
+        dist[diff_above_threshold] = torch.inf
+        lane_intention_8s = dist.min(dim=-1)[0].argmin(dim=-1) # B
+
+        res.extend([lane_intention_2s, lane_intention_8s, waypoints_gt])
         
         return res
 
-    def pretrain_embed(self, data,):
+    def pretrain_embed(self, data, lane_embedding_pos):
         """
+            !!! unmaintained
+
             Extract the features of the map and the agents, and then embed them into the latent space. 
             For the purpose of pretrain using VICReg loss, we do local map element colloection for each of the k nearest neighboring agents in each scenario. 
             Then, an average pooling is applied for each set of lane segments. 
@@ -1432,10 +1430,6 @@ class PlanningModel(TorchModuleWrapper):
         """
         
         polygon_pos, polygon_ori, polypon_prop, polygon_mask, polygon_key_padding, route_kp_mask = self.extract_map_feature(data, need_route_kpmask=True)
-    
-        # lane embedding
-        lane_embedding, lane_pos_emb = self.map_encoder(polygon_pos, polypon_prop, polygon_mask)
-        lane_embedding_pos = lane_embedding + lane_pos_emb
 
         # agent embedding (not dropping frames out )
         agent_features, agent_category, frame_valid_mask, agent_key_padding, ego_state,\
@@ -1488,6 +1482,47 @@ class PlanningModel(TorchModuleWrapper):
             _x = block(query = _x, key_value = lane_embedding_expanded, key_padding_mask = ~map_element_inclusion_mask)
 
         return valid_agent_token, _x.squeeze(1)
+
+
+    def local_map_collection_embed(self, data, agent_embedding_emb, lane_embedding_pos):
+        """
+            Extract the features of the map and the agents, and then embed them into the latent space. 
+            For the purpose of pretrain using VICReg loss, we do local map element colloection for each of the k nearest neighboring agents in each scenario. 
+            Then, an average pooling is applied for each set of lane segments. 
+
+            inputs:
+                sdata: dict
+
+            returns: 
+                agent_local_map_tokens: tensor [B, A, D]
+
+        """
+        
+        polygon_pos, polygon_ori, polypon_prop, polygon_mask, polygon_key_padding, route_kp_mask = self.extract_map_feature(data, need_route_kpmask=True)
+
+        # agent embedding (not dropping frames out )
+        agent_features, agent_category, frame_valid_mask, agent_key_padding, ego_state = self.extract_agent_feature(data, include_future=False)
+
+        B, A, P_a, C_a = agent_features.shape
+        valid_agent_traj = agent_features[..., :2].view(B*A, P_a, 2) # [B*A, num_step, 2]
+
+        local_map_set = polygon_pos.tile((A,1,1,1)) # [B*A, M, 20, 2]
+
+        dist_step_to_map_point = torch.norm(valid_agent_traj[:,None,:,None,:] - local_map_set[:,:,None,:,:], dim=-1) # [B_k, M, num_step, 20]
+        dist_agent_to_map_element = torch.min(torch.min(dist_step_to_map_point, dim=-1).values, dim=-1).values # [B_k, M]
+        map_element_inclusion_mask = (dist_agent_to_map_element<self.map_collection_threshold) & (~polygon_key_padding.tile((A, 1))) # [B_k, M] bool
+
+        lane_embedding_expanded = lane_embedding_pos.tile((A, 1, 1)) # [B_k, M, D]
+        # lane_embedding_pooled = batch_average_pooling(lane_embedding_expanded, map_element_inclusion_mask) # [B_k, D]
+
+        D = agent_embedding_emb.shape[-1]
+        _x = agent_embedding_emb.reshape(B*A, 1, D)
+        for block in self.local_map_tf:
+            _x = block(query = _x, key_value = lane_embedding_expanded, key_padding_mask = ~map_element_inclusion_mask)
+
+        agent_local_map_tokens = _x.reshape(B, A, D)
+
+        return agent_local_map_tokens
 
 
 
