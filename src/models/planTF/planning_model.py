@@ -261,6 +261,16 @@ class PlanningModel(TorchModuleWrapper):
         # self.trajectory_mlp = build_mlp(dim, [512, future_steps * out_channels], norm=None)
         # self.score_mlp = build_mlp(dim, [512, 1], norm=None)
 
+        self.local_map_tf = nn.ModuleList(
+                CrossAttender(
+                dim=dim,
+                num_heads=num_heads,
+                mlp_ratio=mlp_ratio,
+                qkv_bias=qkv_bias,
+            )
+            for i in range(1) # TODO
+        )
+
         # coarse to fine planning
         self.goal_mlp = build_mlp(dim, [512, out_channels], norm=None)
         self.score_mlp = nn.Sequential(
@@ -318,7 +328,7 @@ class PlanningModel(TorchModuleWrapper):
         return [self.pos_emb, self.tempo_net, self.TempoNet_frame_seed, self.agent_projector, self.MRM_seed,
                 self.map_encoder, self.lane_pred, self.agent_frame_predictor,  self.agent_tail_predictor, 
                 # JointMotion CME 
-                self.cme_motion_mlp, self.cme_env_mlp]
+                self.cme_motion_mlp, self.cme_env_mlp, self.local_map_tf]
 
     def get_finetune_modules(self):
         return [self.ego_seed, self.waypoint_decoder, self.far_future_traj_decoder, self.FFNet, self.goal_mlp,
@@ -354,8 +364,8 @@ class PlanningModel(TorchModuleWrapper):
 
     def forward(self, data, current_epoch=None):
         if self.model_type == "baseline": 
-            return self.forward_planTF(data)
-            # return self.forward_CME_pretrain(data)
+            # return self.forward_planTF(data)
+            return self.forward_CME_pretrain(data)
         elif self.model_type == "ours": 
             if current_epoch is None: # when inference
                 # return self.forward_pretrain_separate(data)
@@ -1471,9 +1481,13 @@ class PlanningModel(TorchModuleWrapper):
         map_element_inclusion_mask = (dist_agent_to_map_element<self.map_collection_threshold) & (~polygon_key_padding.unsqueeze(1).repeat(1, A, 1)[valid_agent]) # [B_k, M] bool
 
         lane_embedding_expanded = lane_embedding_pos.unsqueeze(1).repeat(1,A,1,1)[valid_agent] # [B_k, M, D]
-        lane_embedding_pooled = batch_average_pooling(lane_embedding_expanded, map_element_inclusion_mask) # [B_k, D]
+        # lane_embedding_pooled = batch_average_pooling(lane_embedding_expanded, map_element_inclusion_mask) # [B_k, D]
 
-        return valid_agent_token, lane_embedding_pooled
+        _x = valid_agent_token.unsqueeze(1)
+        for block in self.local_map_tf:
+            _x = block(query = _x, key_value = lane_embedding_expanded, key_padding_mask = ~map_element_inclusion_mask)
+
+        return valid_agent_token, _x.squeeze(1)
 
 
 

@@ -132,7 +132,6 @@ class CrossAttender(nn.Module):
         qkv_bias=False,
         drop=0.0,
         attn_drop=0.0,
-        drop_path=0.0,
         act_layer=nn.GELU,
         norm_layer=nn.LayerNorm,
         post_norm=False,
@@ -149,7 +148,6 @@ class CrossAttender(nn.Module):
             dropout=attn_drop,
             batch_first=True,
         )
-        self.drop_path1 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
 
         self.norm2 = norm_layer(dim)
         self.mlp = Mlp(
@@ -158,7 +156,6 @@ class CrossAttender(nn.Module):
             act_layer=act_layer,
             drop=drop,
         )
-        self.drop_path2 = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.attn_mat = None
 
     def forward(
@@ -179,7 +176,6 @@ class CrossAttender(nn.Module):
             need_weights=True,
         )
         self.attn_mat = attn_mat
-        query = query + self.drop_path1(src2)
-        query = query + self.drop_path2(self.mlp(self.norm2(query)))
-        return query
+        query_next = self.mlp(self.norm2(src2))
+        return query_next
 
