@@ -150,6 +150,8 @@ class LightningTrainer(pl.LightningModule):
         # type_count = torch.bincount(features["feature"].data["scenario_type"].flatten().to(torch.int64), minlength=SCENARIO_TYPE_NUM).to('cpu')
         # self.scenario_type_count = self.scenario_type_count + (type_count)
 
+        assert ~res['loss'].isnan()
+
         return res["loss"]
     
 

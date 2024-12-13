@@ -155,7 +155,7 @@ class PlanningModel(TorchModuleWrapper):
             now_timestep=history_steps-2, # -1 for the difference vector, -1 for the zero-based index
         )
         
-
+        self.default_agent_local_map_emb = nn.Parameter(torch.randn(dim), requires_grad=False)
         self.TempoNet_frame_seed = nn.Parameter(torch.randn(dim))
         self.MRM_seed = nn.Parameter(torch.randn(dim))
         # self.multimodal_seed = nn.Parameter(torch.randn(num_modes, dim))
@@ -369,9 +369,9 @@ class PlanningModel(TorchModuleWrapper):
                 return self.forward_planTF(data)
                 # return self.forward_antagonistic_mask_finetune(data, current_epoch)
             else:
-                if self.training and current_epoch <= 10:
-                    return self.forward_CME_pretrain(data)
-                else:
+                # if self.training and current_epoch <= 10:
+                #     return self.forward_CME_pretrain(data)
+                # else:
                     return self.forward_planTF(data)
             # return self.forward_CME_pretrain(data)
         elif self.model_type == "ours": 
@@ -847,10 +847,10 @@ class PlanningModel(TorchModuleWrapper):
         # x_orig, key_padding_mask = self.embed(data, torch.cat((self.plan_seed, self.rep_seed)))
         ego_vel_token, agent_embedding_emb, lane_embedding_pos, agent_key_padding, polygon_key_padding, route_kp_mask = \
             self.embed(data, include_future=False)
-        agent_local_map_token = self.local_map_collection_embed(data, agent_embedding_emb, lane_embedding_pos) # [B, A, D]
+        agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask = self.local_map_collection_embed(data, agent_embedding_emb, lane_embedding_pos) # [B, A, D]
 
-        h_agent = rearrange(agent_embedding_emb, 'b a c -> (b a) c')
-        h_map = rearrange(agent_local_map_token, 'b a c -> (b a) c')
+        h_agent = agent_embedding_emb[~valid_vehicle_padding_mask]
+        h_map = agent_local_map_tokens[~valid_vehicle_padding_mask]
 
         z_motion = self.cme_motion_mlp(h_agent)
         z_env = self.cme_env_mlp(h_map)
@@ -879,10 +879,10 @@ class PlanningModel(TorchModuleWrapper):
 
         ego_vel_token, agent_embedding_emb, lane_embedding_pos, agent_key_padding, polygon_key_padding, route_kp_mask = \
             self.embed(data, include_future=False)
-        agent_local_map_token = self.local_map_collection_embed(data, agent_embedding_emb, lane_embedding_pos) # [B, A, D]
+        agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask = self.local_map_collection_embed(data, agent_embedding_emb, lane_embedding_pos) # [B, A, D]
 
-        x = torch.cat([ego_vel_token, agent_local_map_token[:, 1:], lane_embedding_pos], dim=1) 
-        key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding], dim=-1)
+        x = torch.cat([ego_vel_token, agent_local_map_tokens[:, 1:], agent_embedding_emb, lane_embedding_pos], dim=1) 
+        key_padding_mask = torch.cat([valid_vehicle_padding_mask, valid_other_agents_padding_mask, polygon_key_padding], dim=-1)
 
         for blk in self.SpaNet:
             x = blk(x, key_padding_mask=key_padding_mask)
@@ -1512,6 +1512,14 @@ class PlanningModel(TorchModuleWrapper):
         dist_agent_to_map_element = torch.min(torch.min(dist_step_to_map_point, dim=-1).values, dim=-1).values # [B_k, M]
         map_element_inclusion_mask = (dist_agent_to_map_element<self.map_collection_threshold) & (~polygon_key_padding.tile((A, 1))) # [B_k, M] bool
 
+        valid_vehicle = ((agent_category == 0) | (agent_category == 1)) # 0: ego, 1: vehicle, 2: pedestrain, 3: bicycle
+        valid_vehicle_padding_mask = ~(valid_vehicle & (~agent_key_padding))
+        valid_other_agent = ((agent_category == 2) | (agent_category == 3))
+        valid_other_agents_padding_mask = ~(valid_other_agent & (~agent_key_padding))
+
+        # assert that the local map set is not empty for every valid agent
+        needs_subs_mask = (~(map_element_inclusion_mask.view(B,A,-1).any(-1))) & (~agent_key_padding)
+
         lane_embedding_expanded = lane_embedding_pos.tile((A, 1, 1)) # [B_k, M, D]
         # lane_embedding_pooled = batch_average_pooling(lane_embedding_expanded, map_element_inclusion_mask) # [B_k, D]
 
@@ -1521,8 +1529,11 @@ class PlanningModel(TorchModuleWrapper):
             _x = block(query = _x, key_value = lane_embedding_expanded, key_padding_mask = ~map_element_inclusion_mask)
 
         agent_local_map_tokens = _x.reshape(B, A, D)
+        agent_local_map_tokens[needs_subs_mask] = self.default_agent_local_map_emb
 
-        return agent_local_map_tokens
+        assert agent_local_map_tokens[~valid_vehicle_padding_mask].isnan().any() == False
+
+        return agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask
 
 
 
