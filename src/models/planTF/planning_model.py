@@ -369,9 +369,9 @@ class PlanningModel(TorchModuleWrapper):
                 return self.forward_planTF(data)
                 # return self.forward_antagonistic_mask_finetune(data, current_epoch)
             else:
-                # if self.training and current_epoch <= 10:
-                #     return self.forward_CME_pretrain(data)
-                # else:
+                if self.training and current_epoch <= 10:
+                    return self.forward_CME_pretrain(data)
+                else:
                     return self.forward_planTF(data)
             # return self.forward_CME_pretrain(data)
         elif self.model_type == "ours": 
@@ -1412,7 +1412,7 @@ class PlanningModel(TorchModuleWrapper):
         
         return res
 
-    def pretrain_embed(self, data, lane_embedding_pos):
+    # def pretrain_embed(self, data, lane_embedding_pos):
         """
             !!! unmaintained
 
@@ -1513,26 +1513,37 @@ class PlanningModel(TorchModuleWrapper):
         map_element_inclusion_mask = (dist_agent_to_map_element<self.map_collection_threshold) & (~polygon_key_padding.tile((A, 1))) # [B_k, M] bool
 
         valid_vehicle = ((agent_category == 0) | (agent_category == 1)) # 0: ego, 1: vehicle, 2: pedestrain, 3: bicycle
-        valid_vehicle_padding_mask = ~(valid_vehicle & (~agent_key_padding))
+        valid_vehicle_mask = (valid_vehicle & (~agent_key_padding))
         valid_other_agent = ((agent_category == 2) | (agent_category == 3))
         valid_other_agents_padding_mask = ~(valid_other_agent & (~agent_key_padding))
 
         # assert that the local map set is not empty for every valid agent
-        needs_subs_mask = (~(map_element_inclusion_mask.view(B,A,-1).any(-1))) & (~agent_key_padding)
+        valid_local_mask = ((map_element_inclusion_mask.view(B,A,-1).any(-1))) & valid_vehicle_mask
+        needs_subs_mask = (~(map_element_inclusion_mask.view(B,A,-1).any(-1))) & valid_vehicle_mask
+        valid_vehicle_with_local_mask_flatten = (valid_local_mask & valid_vehicle_mask).flatten()
 
         lane_embedding_expanded = lane_embedding_pos.tile((A, 1, 1)) # [B_k, M, D]
         # lane_embedding_pooled = batch_average_pooling(lane_embedding_expanded, map_element_inclusion_mask) # [B_k, D]
 
         D = agent_embedding_emb.shape[-1]
-        _x = agent_embedding_emb.reshape(B*A, 1, D)
-        for block in self.local_map_tf:
-            _x = block(query = _x, key_value = lane_embedding_expanded, key_padding_mask = ~map_element_inclusion_mask)
+        _x_orig = agent_embedding_emb.reshape(B*A, 1, D)
+        _x_out = _x_orig.new_zeros(_x_orig.shape)
 
-        agent_local_map_tokens = _x.reshape(B, A, D)
+        _x_input = _x_orig[valid_vehicle_with_local_mask_flatten] # [B_k, 1, D]
+        lane_embedding_expanded_input = lane_embedding_expanded[valid_vehicle_with_local_mask_flatten]
+        key_padding_mask_input = ~map_element_inclusion_mask[valid_vehicle_with_local_mask_flatten]
+
+        _x = _x_input
+        for block in self.local_map_tf:
+            _x = block(query = _x_input, key_value = lane_embedding_expanded_input, key_padding_mask = key_padding_mask_input)
+        _x_out[valid_vehicle_with_local_mask_flatten] = _x
+
+        agent_local_map_tokens = _x_out.reshape(B, A, D)
         agent_local_map_tokens[needs_subs_mask] = self.default_agent_local_map_emb
 
-        assert agent_local_map_tokens[~valid_vehicle_padding_mask].isnan().any() == False
-
+        assert agent_local_map_tokens.isnan().any() == False
+        # valid_vehicle_padding_mask = valid_vehicle_with_local_mask_flatten.view(B, A)
+        valid_vehicle_padding_mask = ~valid_vehicle_mask
         return agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask
 
 
