@@ -105,6 +105,7 @@ class PlanningModel(TorchModuleWrapper):
         map_collection_threshold = 10,
         agent_cme_displacement_threshold = 5, 
         model_type = "baseline", # "baseline" for planTF like simple tf encoder architecture, and "ours" for progressive trajectory planning framework
+        lamb = 5e-3,
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
     ) -> None:
         super().__init__(
@@ -140,6 +141,7 @@ class PlanningModel(TorchModuleWrapper):
         self.map_collection_threshold = map_collection_threshold
         self.agent_cme_displacement_threshold = agent_cme_displacement_threshold
         self.model_type = model_type
+        self.lamb = lamb
 
         assert model_type in ["baseline", "ours"]
 
@@ -215,14 +217,14 @@ class PlanningModel(TorchModuleWrapper):
 
         # self.flag_teacher_init = False
 
-        # self.distortor = InfoDistortor(
-        #     dt=0.1,
-        #     hist_len=21,
-        #     low=[-1.0, -0.75, -0.35, -1, -0.5, -0.2, -0.1],
-        #     high=[1.0, 0.75, 0.35, 1, 0.5, 0.2, 0.1],
-        #     augment_prob=0.5,
-        #     normalize=True,
-        # )
+        self.distortor = InfoDistortor(
+            dt=0.1,
+            hist_len=21,
+            low=[-1.0, -0.75, -0.35, -1, -0.5, -0.2, -0.1],
+            high=[1.0, 0.75, 0.35, 1, 0.5, 0.2, 0.1],
+            augment_prob=0.5,
+            normalize=True,
+        )
         
 
         self.waypoint_decoder = SinglemodalTrajectoryDecoder(
@@ -294,8 +296,8 @@ class PlanningModel(TorchModuleWrapper):
         self.attraction_point_projector = Projector(to_dim=dim, in_channels=4)
         self.vel_token_projector = Projector(to_dim=dim, in_channels=1)
 
-        self.cme_motion_mlp = build_mlp(dim, [2048, 256], norm="ln")
-        self.cme_env_mlp = build_mlp(dim, [2048, 256], norm="ln")
+        self.pretrain_proj_mlp_1 = build_mlp(dim, [2048, 256], norm="ln")
+        self.pretrain_proj_mlp_2 = build_mlp(dim, [2048, 256], norm="ln")
 
         self.plantf_traj_decoder = MultimodalTrajectoryDecoder(
             embed_dim=dim,
@@ -328,7 +330,7 @@ class PlanningModel(TorchModuleWrapper):
         return [self.pos_emb, self.tempo_net, self.TempoNet_frame_seed, self.agent_projector, self.MRM_seed,
                 self.map_encoder, self.lane_pred, self.agent_frame_predictor,  self.agent_tail_predictor, 
                 # JointMotion CME 
-                self.cme_motion_mlp, self.cme_env_mlp, self.local_map_tf]
+                self.pretrain_proj_mlp_1, self.pretrain_proj_mlp_2, self.local_map_tf]
 
     def get_finetune_modules(self):
         return [self.ego_seed, self.waypoint_decoder, self.far_future_traj_decoder, self.FFNet, self.goal_mlp,
@@ -370,7 +372,8 @@ class PlanningModel(TorchModuleWrapper):
                 # return self.forward_antagonistic_mask_finetune(data, current_epoch)
             else:
                 if self.training and current_epoch <= 10:
-                    return self.forward_CME_pretrain(data)
+                    # return self.forward_CME_pretrain(data)
+                    return self.forward_inv_con_pretrain(data)
                 else:
                     return self.forward_planTF(data)
             # return self.forward_CME_pretrain(data)
@@ -572,7 +575,7 @@ class PlanningModel(TorchModuleWrapper):
         return ret
         
 
-    def lane_random_masking(self, lane_embedding, future_mask_ratio, key_padding_mask):
+    # def lane_random_masking(self, lane_embedding, future_mask_ratio, key_padding_mask):
         '''
         x: (B, N, D). In the dimension D, the first two elements indicate the start point of the lane segment
         future_mask_ratio: float
@@ -601,6 +604,29 @@ class PlanningModel(TorchModuleWrapper):
 
         return new_lane_embedding, ids_keep_list
 
+    def agent_random_masking(self, future_mask_ratio, agent_key_padding_mask):
+        '''
+        Args:
+            agent_key_padding_mask: (B, N).
+            future_mask_ratio: float
+        Returns:
+            new_key_padding_mask: (B, N), with future_mask_ratio of the valid tokens masked out
+        '''
+        num_tokens = (~agent_key_padding_mask).sum(1)  # (B, )
+        len_keeps = torch.ceil(num_tokens * (1 - future_mask_ratio)).int()
+
+        new_key_padding_mask = agent_key_padding_mask.clone().detach()
+
+        for i, (num_token, len_keep) in enumerate(zip(num_tokens, len_keeps)):
+            noise = torch.rand(num_token, device=agent_key_padding_mask.device)
+            ids_shuffle = torch.argsort(noise)
+
+            # ids_keep = ids_shuffle[:len_keep]
+            ids_masked = ids_shuffle[len_keep:]
+
+            new_key_padding_mask[i, ids_masked] = True 
+
+        return new_key_padding_mask
 
     def trajectory_random_masking(self, x, future_mask_ratio, frame_valid_mask):
         '''
@@ -852,8 +878,8 @@ class PlanningModel(TorchModuleWrapper):
         h_agent = agent_embedding_emb[~valid_vehicle_padding_mask]
         h_map = agent_local_map_tokens[~valid_vehicle_padding_mask]
 
-        z_motion = self.cme_motion_mlp(h_agent)
-        z_env = self.cme_env_mlp(h_map)
+        z_motion = self.pretrain_proj_mlp_1(h_agent)
+        z_env = self.pretrain_proj_mlp_2(h_map)
 
         v_loss_motion = self.variance_loss(z_motion)
         v_loss_env = self.variance_loss(z_env)
@@ -872,6 +898,90 @@ class PlanningModel(TorchModuleWrapper):
         }
 
         return out
+
+    def barlow_twins_loss(self, z1, z2, inverse_correlation=False):
+        """
+            Calculate the barlow twins loss.
+            args:
+                z1: tensor [B, D]
+                z2: tensor [B, D]
+                inverse_correlation: bool, if True, pull all the diagonal elements to -1 instead of 1.
+        """
+        B, D = z1.shape
+        z1_normed = (z1 - torch.mean(z1, dim=0, keepdim=True))/(torch.std(z1, dim=0, keepdim=True)+1e-6)
+        z2_normed = (z2 - torch.mean(z2, dim=0, keepdim=True))/(torch.std(z2, dim=0, keepdim=True)+1e-6)
+        cov = torch.sum(torch.matmul(rearrange(z1_normed, 'b d -> b d 1'), rearrange(z2_normed, 'b d -> b 1 d')), dim=0)/D # D D
+        # invariance loss term
+        if not inverse_correlation: 
+            inv_loss = torch.sum(torch.pow(torch.diag(cov) - cov.new_ones(D), 2))
+        else:
+            inv_loss = torch.sum(torch.pow(torch.diag(cov) + cov.new_ones(D), 2))
+        # redundency reduction loss term
+        rr_loss = torch.sum(torch.pow(cov - torch.diag(torch.diag(cov)), 2))
+        loss = inv_loss + self.lamb*rr_loss
+        return loss, inv_loss, rr_loss
+        
+
+    
+    def forward_inv_con_pretrain(self, data):
+
+        bs, A = data["agent"]["heading"].shape[0:2]
+
+        # branch A
+
+        ego_vel_token, agent_embedding_emb, lane_embedding_pos, agent_key_padding, polygon_key_padding, route_kp_mask = \
+            self.embed(data, include_future=False)
+
+        x = torch.cat([ego_vel_token, agent_embedding_emb[:, 1:], lane_embedding_pos], dim=1) 
+        key_padding_mask = torch.cat([torch.zeros((bs, 1), dtype=torch.bool, device=x.device), 
+                                       agent_key_padding[:, 1:], polygon_key_padding], dim=-1)
+
+        for blk in self.SpaNet:
+            x = blk(x, key_padding_mask=key_padding_mask)
+        x = self.norm_spa(x)
+
+        h_1 = x[:, 0]
+
+        # branch B
+
+        # 1. distort the data
+        data_distorted = self.distortor.augment(data)
+
+        ego_vel_token, agent_embedding_emb, lane_embedding_pos, agent_key_padding, polygon_key_padding, route_kp_mask = \
+            self.embed(data_distorted, include_future=False)
+        # 2. randomly drop some of the agents
+        masked_agent_key_padding = self.agent_random_masking(0.5, agent_key_padding)
+
+        x = torch.cat([ego_vel_token, agent_embedding_emb[:, 1:], lane_embedding_pos], dim=1) 
+        key_padding_mask = torch.cat([torch.zeros((bs, 1), dtype=torch.bool, device=x.device), 
+                                       masked_agent_key_padding[:, 1:], polygon_key_padding], dim=-1)
+
+        for blk in self.SpaNet:
+            x = blk(x, key_padding_mask=key_padding_mask)
+        x = self.norm_spa(x)
+
+        h_2 = x[:, 0]
+
+        # calculate the losses
+        z1_pc = self.pretrain_proj_mlp_1(h_1)
+        z2_pc = self.pretrain_proj_mlp_1(h_2)
+        z1_ic = self.pretrain_proj_mlp_2(h_1)
+        z2_ic = self.pretrain_proj_mlp_2(h_2)
+
+        loss_pc, inv_loss_pc, rr_loss_pc = self.barlow_twins_loss(z1_pc, z2_pc, inverse_correlation=False)
+        loss_ic, inv_loss_ic, rr_loss_ic = self.barlow_twins_loss(z1_ic, z2_ic, inverse_correlation=True)
+
+        out = {
+            "loss": 0.1*(loss_pc + loss_ic), # scaled down by 0.1, so that the loss is in the same order of magnitude as the finetune stage
+            "loss_pc": loss_pc,
+            "loss_ic": loss_ic,
+            "inv_loss_pc": inv_loss_pc,
+            "rr_loss_pc": rr_loss_pc,
+            "inv_loss_ic": inv_loss_ic,
+            "rr_loss_ic": rr_loss_ic,
+        }   
+
+        return out
     
     def forward_planTF(self, data):
 
@@ -879,10 +989,10 @@ class PlanningModel(TorchModuleWrapper):
 
         ego_vel_token, agent_embedding_emb, lane_embedding_pos, agent_key_padding, polygon_key_padding, route_kp_mask = \
             self.embed(data, include_future=False)
-        agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask = self.local_map_collection_embed(data, agent_embedding_emb, lane_embedding_pos) # [B, A, D]
 
-        x = torch.cat([ego_vel_token, agent_embedding_emb, agent_local_map_tokens[:, 1:], lane_embedding_pos], dim=1) 
-        key_padding_mask = torch.cat([agent_key_padding, valid_vehicle_padding_mask, polygon_key_padding], dim=-1)
+        x = torch.cat([ego_vel_token, agent_embedding_emb[:, 1:], lane_embedding_pos], dim=1) 
+        key_padding_mask = torch.cat([torch.zeros((bs, 1), dtype=torch.bool, device=x.device), 
+                                       agent_key_padding[:, 1:], polygon_key_padding], dim=-1)
 
         for blk in self.SpaNet:
             x = blk(x, key_padding_mask=key_padding_mask)

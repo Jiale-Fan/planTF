@@ -152,9 +152,9 @@ python run_training.py \
   worker=single_machine_thread_pool worker.max_workers=24 \
   scenario_builder=nuplan cache.cache_path=/home/jiale/Documents/exp/cache_new  cache.use_cache_without_dataset=true \
   data_loader.params.batch_size=64 data_loader.params.num_workers=24 \
-  lr=1e-3 epochs=35 warmup_epochs=3 weight_decay=0.0001 \
+  lr=1e-3 epochs=25 warmup_epochs=3 weight_decay=0.0001 \
   lightning.trainer.params.check_val_every_n_epoch=2 \
-  wandb.mode=online wandb.project=nuplan wandb.name=2211_1.3_n \
+  wandb.mode=online wandb.project=nuplan wandb.name=1112_1.1_n \
   seed=10
   '''  
 

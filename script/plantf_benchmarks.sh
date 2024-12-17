@@ -13,10 +13,10 @@ for challenge in $CHALLENGES; do
         planner=$PLANNER \
         scenario_builder=nuplan_challenge \
         scenario_filter=$SPLIT \
-        worker.threads_per_node=16 \
+        worker.threads_per_node=30 \
         experiment_uid=$SPLIT/$planner \
         verbose=true \
-        planner.imitation_planner.planner_ckpt="/home/jiale/Documents/checkpoints/1112_1.0.ckpt"
+        planner.imitation_planner.planner_ckpt="/home/jiale/Documents/checkpoints/1712_1.0.ckpt"
 done
 
 
