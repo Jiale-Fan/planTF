@@ -102,9 +102,10 @@ class PlanningModel(TorchModuleWrapper):
         waypoints_number = 20,
         whether_split_lane = False,
         ori_threshold = 0.7653,
-        map_collection_threshold = 10,
+        map_collection_threshold = 2,
         agent_cme_displacement_threshold = 5, 
-        model_type = "baseline", # "baseline" for planTF like simple tf encoder architecture, and "ours" for progressive trajectory planning framework
+        model_type = "ours", # "baseline" for planTF like simple tf encoder architecture, and "ours" for progressive trajectory planning framework
+        lamb = 5e-4,
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
     ) -> None:
         super().__init__(
@@ -140,6 +141,7 @@ class PlanningModel(TorchModuleWrapper):
         self.map_collection_threshold = map_collection_threshold
         self.agent_cme_displacement_threshold = agent_cme_displacement_threshold
         self.model_type = model_type
+        self.lamb = lamb
 
         assert model_type in ["baseline", "ours"]
 
@@ -360,7 +362,7 @@ class PlanningModel(TorchModuleWrapper):
                 # return self.forward_antagonistic_mask_finetune(data, current_epoch)
             else:
                 if self.training and current_epoch <= 10:
-                    return self.forward_CME_pretrain(data)
+                    return self.forward_CME_pretrain_VICReg(data)
                 else:
                     return self.forward_planTF(data)
             # return self.forward_CME_pretrain(data)
@@ -371,7 +373,7 @@ class PlanningModel(TorchModuleWrapper):
                 # return self.forward_antagonistic_mask_finetune(data, current_epoch)
             else:
                 if self.training and current_epoch <= 10:
-                    return self.forward_CME_pretrain(data)
+                    return self.forward_CME_pretrain_VICReg(data)
                 elif self.training and current_epoch <= 30:
                     return self.forward_teacher_enforcing(data)
                 elif self.training and current_epoch > 30:
@@ -840,7 +842,47 @@ class PlanningModel(TorchModuleWrapper):
         
         return mask_pair
 
-    def forward_CME_pretrain(self, data):
+    def barlow_twins_loss(self, z1, z2, inverse_correlation=False):
+        """
+            Calculate the barlow twins loss.
+            args:
+                z1: tensor [B, D]
+                z2: tensor [B, D]
+                inverse_correlation: bool, if True, pull all the diagonal elements to -1 instead of 1.
+        """
+        B, D = z1.shape
+        z1_normed = (z1 - torch.mean(z1, dim=0, keepdim=True))/(torch.std(z1, dim=0, keepdim=True)+1e-6)
+        z2_normed = (z2 - torch.mean(z2, dim=0, keepdim=True))/(torch.std(z2, dim=0, keepdim=True)+1e-6)
+        cov = torch.sum(torch.matmul(rearrange(z1_normed, 'b d -> b d 1'), rearrange(z2_normed, 'b d -> b 1 d')), dim=0)/D # D D
+        # invariance loss term
+        if not inverse_correlation: 
+            inv_loss = torch.sum(torch.pow(torch.diag(cov) - cov.new_ones(D), 2))
+        else:
+            inv_loss = torch.sum(torch.pow(torch.diag(cov) + cov.new_ones(D), 2))
+        # redundency reduction loss term
+        rr_loss = torch.sum(torch.pow(cov - torch.diag(torch.diag(cov)), 2))
+        loss = inv_loss + self.lamb*rr_loss
+        return loss, inv_loss, rr_loss
+    
+
+    def forward_CME_pretrain_barlow_twins(self, data):
+        bs, A = data["agent"]["heading"].shape[0:2]
+        h_agent, h_map = self.pretrain_embed(data)
+
+        z_motion = self.cme_motion_mlp(h_agent)
+        z_env = self.cme_env_mlp(h_map)
+
+        loss, inv_loss, rr_loss = self.barlow_twins_loss(z_motion, z_env)
+
+        out = {
+            "loss": loss, 
+            "inv_loss": inv_loss,
+            "rr_loss": rr_loss,
+        }
+
+        return out
+
+    def forward_CME_pretrain_VICReg(self, data):
         bs, A = data["agent"]["heading"].shape[0:2]
         # x_orig, key_padding_mask = self.embed(data, torch.cat((self.plan_seed, self.rep_seed)))
         h_agent, h_map = self.pretrain_embed(data)
