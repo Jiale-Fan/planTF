@@ -330,7 +330,7 @@ class PlanningModel(TorchModuleWrapper):
         return [self.pos_emb, self.tempo_net, self.TempoNet_frame_seed, self.agent_projector, self.MRM_seed,
                 self.map_encoder, self.lane_pred, self.agent_frame_predictor,  self.agent_tail_predictor, 
                 # JointMotion CME 
-                self.pretrain_proj_mlp_1, self.pretrain_proj_mlp_2, self.local_map_tf]
+                self.pretrain_proj_mlp_1, self.pretrain_proj_mlp_2, self.local_map_tf, self.SpaNet]
 
     def get_finetune_modules(self):
         return [self.ego_seed, self.waypoint_decoder, self.far_future_traj_decoder, self.FFNet, self.goal_mlp,
@@ -338,7 +338,7 @@ class PlanningModel(TorchModuleWrapper):
                 self.lane_intention_8s_predictor, 
                 self.vel_token_projector, self.WpNet, self.norm_wp, self.norm_ff, 
                 self.lane_emb_wp_2s_mlp, self.lane_emb_ff_2s_mlp, self.lane_emb_wp_8s_mlp, self.lane_emb_ff_8s_mlp, self.score_mlp, 
-                self.waypoints_embedder, self.SpaNet, self.norm_spa, self.plantf_traj_decoder]
+                self.waypoints_embedder, self.norm_spa, self.plantf_traj_decoder]
 
 
     def get_stage(self, current_epoch):
@@ -965,20 +965,20 @@ class PlanningModel(TorchModuleWrapper):
         # calculate the losses
         z1_pc = self.pretrain_proj_mlp_1(h_1)
         z2_pc = self.pretrain_proj_mlp_1(h_2)
-        z1_ic = self.pretrain_proj_mlp_2(h_1)
-        z2_ic = self.pretrain_proj_mlp_2(h_2)
+        # z1_ic = self.pretrain_proj_mlp_2(h_1)
+        # z2_ic = self.pretrain_proj_mlp_2(h_2)
 
         loss_pc, inv_loss_pc, rr_loss_pc = self.barlow_twins_loss(z1_pc, z2_pc, inverse_correlation=False)
-        loss_ic, inv_loss_ic, rr_loss_ic = self.barlow_twins_loss(z1_ic, z2_ic, inverse_correlation=True)
+        # loss_ic, inv_loss_ic, rr_loss_ic = self.barlow_twins_loss(z1_ic, z2_ic, inverse_correlation=True)
 
         out = {
-            "loss": 0.1*(loss_pc + loss_ic), # scaled down by 0.1, so that the loss is in the same order of magnitude as the finetune stage
-            "loss_pc": loss_pc,
-            "loss_ic": loss_ic,
+            "loss": 0.1*loss_pc, # scaled down by 0.1, so that the loss is in the same order of magnitude as the finetune stage
             "inv_loss_pc": inv_loss_pc,
             "rr_loss_pc": rr_loss_pc,
-            "inv_loss_ic": inv_loss_ic,
-            "rr_loss_ic": rr_loss_ic,
+            "loss_pc": loss_pc,
+            # "loss_ic": loss_ic,
+            # "inv_loss_ic": inv_loss_ic,
+            # "rr_loss_ic": rr_loss_ic,
         }   
 
         return out
