@@ -275,11 +275,11 @@ class LightningTrainer(pl.LightningModule):
 
 
     def _compute_objectives(self, res, data) -> Dict[str, torch.Tensor]:
-        trajectory, probability, prediction= (
-            res["trajectory"], # [bs, N_mask*n_mode, n_steps, 4]
-            res["probability"], # [bs, N_mask*n_mode]
-            res["prediction"], # [bs, n_agents, n_steps, 2]
-        )
+        # trajectory, probability, prediction= (
+        #     res["trajectory"], # [bs, N_mask*n_mode, n_steps, 4]
+        #     res["probability"], # [bs, N_mask*n_mode]
+        #     res["prediction"], # [bs, n_agents, n_steps, 2]
+        # )
 
 
 
@@ -290,7 +290,7 @@ class LightningTrainer(pl.LightningModule):
         rel_prediction = res["rel_prediction"] # [bs, n_agents-1, n_waypoints, 2]
         
         targets = data["agent"]["target"]
-        valid_mask = data["agent"]["valid_mask"][:, :, -prediction.shape[-2] :]
+        valid_mask = data["agent"]["valid_mask"][:, :, -self.model.future_steps:]
 
         agent_target, agent_mask = targets[:, 1:], valid_mask[:, 1:]
         # agent_target, agent_mask = targets, valid_mask
@@ -308,11 +308,12 @@ class LightningTrainer(pl.LightningModule):
         )
 
         # 1. absolute agent prediction
-        deno = agent_mask.sum((1, 2))
-        deno[deno == 0] = 1
-        agent_reg_loss = F.smooth_l1_loss(
-            prediction*(agent_mask[..., None]), (agent_target*(agent_mask[..., None]))[..., :2], reduction='none'
-        ).sum((1, 2, 3))/deno
+
+        # deno = agent_mask.sum((1, 2))
+        # deno[deno == 0] = 1
+        # agent_reg_loss = F.smooth_l1_loss(
+        #     prediction*(agent_mask[..., None]), (agent_target*(agent_mask[..., None]))[..., :2], reduction='none'
+        # ).sum((1, 2, 3))/deno
 
         # agent_reg_loss = F.smooth_l1_loss(
         #     prediction[agent_mask], agent_target[agent_mask][..., :2], reduction='none'
@@ -370,12 +371,12 @@ class LightningTrainer(pl.LightningModule):
         #     lane_intention_dict = {k: res[k] for k in res.keys() if k.startswith("lane_intention")}
         
         else:
-            lane_intention_loss = torch.zeros(bs, device=agent_reg_loss.device)
+            lane_intention_loss = torch.zeros(bs, device=waypoints.device)
             lane_intention_dict = {}
 
         # ego_loss_dict = self._cal_ego_loss_term(trajectory, probability, ego_target)
         ret_dict_batch = {
-            "agent_reg_loss": agent_reg_loss,
+            # "agent_reg_loss": agent_reg_loss,
             "rel_agent_pos_loss": loss_rel_agent,
             "lane_intention_loss": lane_intention_loss,
             "waypoint_loss": waypoint_loss,
