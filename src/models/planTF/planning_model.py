@@ -164,7 +164,8 @@ class PlanningModel(TorchModuleWrapper):
         self.ego_seed = nn.Parameter(torch.randn(dim))
 
         self.agent_projector = Projector(to_dim=dim, in_channels=11) # NOTE: make consistent to state_channel
-        self.agent_type_emb = nn.Embedding(4, dim)
+        # self.agent_type_emb = nn.Embedding(4, dim)
+        self.agent_type_emb = nn.Parameter(torch.randn(4, dim))
         # self.map_encoder = Projector(dim=dim, in_channels=self.no_lane_segment_points*2+5) # NOTE: make consistent to polygon_channel
         self.map_encoder = MapEncoder(
             dim=dim,
@@ -301,7 +302,8 @@ class PlanningModel(TorchModuleWrapper):
 
     def _init_weights(self, m):
         if isinstance(m, nn.Linear):
-            torch.nn.init.xavier_uniform_(m.weight)
+            # torch.nn.init.xavier_uniform_(m.weight)
+            torch.nn.init.kaiming_uniform_(m.weight)
             if isinstance(m, nn.Linear) and m.bias is not None:
                 nn.init.constant_(m.bias, 0)
         elif isinstance(m, nn.LayerNorm):
@@ -372,11 +374,11 @@ class PlanningModel(TorchModuleWrapper):
                 return self.forward_inference(data)
                 # return self.forward_antagonistic_mask_finetune(data, current_epoch)
             else:
-                if self.training and current_epoch <= 10:
+                if self.training and current_epoch <= 5:
                     return self.forward_CME_pretrain_VICReg(data)
-                elif self.training and current_epoch <= 30:
+                elif self.training and current_epoch <= 25:
                     return self.forward_teacher_enforcing(data)
-                elif self.training and current_epoch > 30:
+                elif self.training and current_epoch > 25:
                     return self.forward_multimodal_finetune(data)
                 else:
                     return self.forward_inference(data)
