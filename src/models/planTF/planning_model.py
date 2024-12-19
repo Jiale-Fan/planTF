@@ -676,7 +676,8 @@ class PlanningModel(TorchModuleWrapper):
 
         agent_features, agent_category, frame_valid_mask, agent_key_padding, ego_state = self.extract_agent_feature(data, include_future=True)
 
-        agent_embedding = self.agent_projector(agent_features)+self.agent_type_emb(agent_category)[:,:,None,:] # B A D
+        agent_type_embedded = F.embedding(agent_category, self.agent_type_emb)
+        agent_embedding = self.agent_projector(agent_features) + agent_type_embedded[:, :, None, :] # B A D
         (agent_masked_tokens, frame_pred_mask) = self.trajectory_random_masking(agent_embedding, self.trajectory_mask_ratio, frame_valid_mask)
 
         agent_masked_tokens_ = rearrange(agent_masked_tokens, 'b a t d -> (b a) t d').clone()
@@ -1396,7 +1397,9 @@ class PlanningModel(TorchModuleWrapper):
         ego_vel_token = self.vel_token_projector(ego_state[:, 3:4]).unsqueeze(1) # B 1 D
 
         bs, A = agent_features.shape[0:2]
-        agent_embedding = self.agent_projector(agent_features)+self.agent_type_emb(agent_category)[:,:,None,:] # B A D
+
+        agent_type_embedded = F.embedding(agent_category, self.agent_type_emb)
+        agent_embedding = self.agent_projector(agent_features) + agent_type_embedded[:, :, None, :] # B A D
 
         # # if agent frames should be masked here?
         # 1. if not, use following code
@@ -1485,7 +1488,8 @@ class PlanningModel(TorchModuleWrapper):
 
 
         bs, A = agent_features.shape[0:2]
-        agent_embedding = self.agent_projector(agent_features)+self.agent_type_emb(agent_category)[:,:,None,:] # B A D
+        agent_type_embedded = F.embedding(agent_category, self.agent_type_emb)
+        agent_embedding = self.agent_projector(agent_features) + agent_type_embedded[:, :, None, :] # B A D
 
         # # if agent frames should be masked here?
         # 1. if not, use following code
