@@ -304,6 +304,8 @@ class PlanningModel(TorchModuleWrapper):
             out_channels=4,
         )
 
+        self.bilinear_W = nn.Parameter(torch.randn(256, 256))
+
         self.apply(self._init_weights)
 
 
@@ -328,7 +330,7 @@ class PlanningModel(TorchModuleWrapper):
         return [self.pos_emb, self.tempo_net, self.TempoNet_frame_seed, self.agent_projector, self.MRM_seed,
                 self.map_encoder, self.lane_pred, self.agent_frame_predictor,  self.agent_tail_predictor, 
                 # JointMotion CME 
-                self.cme_motion_mlp, self.cme_env_mlp, self.local_map_tf]
+                self.cme_motion_mlp, self.cme_env_mlp, self.local_map_tf, self.bilinear_W]
 
     def get_finetune_modules(self):
         return [self.ego_seed, self.waypoint_decoder, self.far_future_traj_decoder, self.FFNet, self.goal_mlp,
@@ -859,27 +861,36 @@ class PlanningModel(TorchModuleWrapper):
         h_agent = agent_embedding_emb_fut[~valid_vehicle_padding_mask]
         h_map = agent_local_map_tokens[~valid_vehicle_padding_mask]
 
-        z_motion = self.cme_motion_mlp(h_agent)
-        z_env = self.cme_env_mlp(h_map)
+        z_motion = self.cme_motion_mlp(h_agent) # [B, d]
+        z_env = self.cme_env_mlp(h_map) # [B, d]
 
         # VICReg loss
 
-        v_loss_motion = self.variance_loss(z_motion)
-        v_loss_env = self.variance_loss(z_env)
-        c_loss_motion = self.covariance_loss(z_motion)
-        c_loss_env = self.covariance_loss(z_env)
-        inv_loss = self.invariance_loss(z_motion, z_env)
+        # v_loss_motion = self.variance_loss(z_motion)
+        # v_loss_env = self.variance_loss(z_env)
+        # c_loss_motion = self.covariance_loss(z_motion)
+        # c_loss_env = self.covariance_loss(z_env)
+        # inv_loss = self.invariance_loss(z_motion, z_env)
 
-        v_loss = v_loss_motion + v_loss_env
-        c_loss = c_loss_motion + c_loss_env
+        # v_loss = v_loss_motion + v_loss_env
+        # c_loss = c_loss_motion + c_loss_env
+
+        # out = {
+        #     "loss": 10*v_loss + 100*c_loss + 2.5*inv_loss, # NOTE: tuned down c_loss by 8x to make it the same as previous experiment
+        #     "v_loss": v_loss,
+        #     "c_loss": c_loss,
+        #     "inv_loss": inv_loss,
+        # }
 
         # try curl contrastive loss?
+        projected_z_motion = torch.matmul(self.bilinear_W, z_motion.T)
+        logits = torch.matmul(z_env, projected_z_motion) # [B, B]
+        logits = logits - torch.max(logits, dim=-1, keepdim=True).values
+        labels = torch.arange(logits.shape[0], device=logits.device)
+        loss = F.cross_entropy(logits, labels)
 
         out = {
-            "loss": 10*v_loss + 100*c_loss + 2.5*inv_loss, # NOTE: tuned down c_loss by 8x to make it the same as previous experiment
-            "v_loss": v_loss,
-            "c_loss": c_loss,
-            "inv_loss": inv_loss,
+            "loss": 0.1*loss,
         }
 
         return out
