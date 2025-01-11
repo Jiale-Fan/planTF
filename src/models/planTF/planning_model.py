@@ -934,6 +934,8 @@ class PlanningModel(TorchModuleWrapper):
                 [output_trajectory[..., :2], angle.unsqueeze(-1)], dim=-1
             )
 
+            out["output_trajectory"][:, 20:] = out["output_trajectory"][:, 19:20]
+
         return out
 
     
