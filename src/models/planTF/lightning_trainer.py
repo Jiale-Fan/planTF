@@ -256,7 +256,8 @@ class LightningTrainer(pl.LightningModule):
         if "trajectory" in res and "probability" in res:
             trajectory, probability = res["trajectory"], res["probability"]
 
-            best_mode, ego_reg_loss = self._winner_take_all_loss(trajectory[:, :, :20, :], ego_target[:, :20, :])
+            best_mode, ego_reg_loss = self._winner_take_all_loss(trajectory, ego_target)
+            # best_mode, ego_reg_loss = self._winner_take_all_loss(trajectory[:, :, :20, :], ego_target[:, :20, :])
             ego_cls_loss = F.cross_entropy(probability, best_mode.detach())
 
             loss_dict["ego_cls_loss"] = ego_cls_loss
