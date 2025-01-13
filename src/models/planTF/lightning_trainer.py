@@ -278,13 +278,10 @@ class LightningTrainer(pl.LightningModule):
 
 
     def _compute_objectives(self, res, data) -> Dict[str, torch.Tensor]:
-        trajectory, probability, prediction= (
+        trajectory, probability = (
             res["trajectory"], # [bs, N_mask*n_mode, n_steps, 4]
             res["probability"], # [bs, N_mask*n_mode]
-            res["prediction"], # [bs, n_agents, n_steps, 2]
         )
-
-
 
         waypoints = res["waypoints"] # [bs, m, 20, 4]
         n_wp = self.model.waypoints_number
@@ -293,7 +290,7 @@ class LightningTrainer(pl.LightningModule):
         rel_prediction = res["rel_prediction"] # [bs, n_agents-1, n_waypoints, 2]
         
         targets = data["agent"]["target"]
-        valid_mask = data["agent"]["valid_mask"][:, :, -prediction.shape[-2] :]
+        valid_mask = data["agent"]["valid_mask"][:, :, -trajectory.shape[-2]:]
 
         agent_target, agent_mask = targets[:, 1:], valid_mask[:, 1:]
         # agent_target, agent_mask = targets, valid_mask
@@ -311,25 +308,22 @@ class LightningTrainer(pl.LightningModule):
         )
 
         # 1. absolute agent prediction
-        deno = agent_mask.sum((1, 2))
-        deno[deno == 0] = 1
-        agent_reg_loss = F.smooth_l1_loss(
-            prediction*(agent_mask[..., None]), (agent_target*(agent_mask[..., None]))[..., :2], reduction='none'
-        ).sum((1, 2, 3))/deno
+
+        # deno = agent_mask.sum((1, 2))
+        # deno[deno == 0] = 1
+        # agent_reg_loss = F.smooth_l1_loss(
+        #     prediction*(agent_mask[..., None]), (agent_target*(agent_mask[..., None]))[..., :2], reduction='none'
+        # ).sum((1, 2, 3))/deno
 
         # agent_reg_loss = F.smooth_l1_loss(
         #     prediction[agent_mask], agent_target[agent_mask][..., :2], reduction='none'
         # ).mean()
 
-
-
-        
-
         if waypoints.dim() == 4:
             # 3. waypoint loss
             best_mode_wp, waypoint_loss = self._winner_take_all_loss(waypoints, ego_target[:, :n_wp])
             # 4. far future loss
-            best_mode_ff, far_future_loss = self._winner_take_all_loss(far_future_traj[torch.arange(bs), best_mode_wp], ego_target[:, n_wp:])
+            far_future_loss = F.smooth_l1_loss(far_future_traj[torch.arange(bs), best_mode_wp], ego_target[:, n_wp:], reduction='none').mean((1, 2))
             # 5. relative agent prediction
             rel_agent_pos_gt = (targets[:, 1:, :n_wp, :2] - ego_target_pos[:, None, :n_wp, :]) # [bs, n_agents-1, n_waypoints, 2]
             loss_rel_agent_unweighted = F.smooth_l1_loss(rel_prediction[torch.arange(bs), best_mode_wp], rel_agent_pos_gt, reduction='none').mean((-1)) # [bs, n_agents-1, n_waypoints]
@@ -373,12 +367,12 @@ class LightningTrainer(pl.LightningModule):
         #     lane_intention_dict = {k: res[k] for k in res.keys() if k.startswith("lane_intention")}
         
         else:
-            lane_intention_loss = torch.zeros(bs, device=agent_reg_loss.device)
+            lane_intention_loss = torch.zeros(bs, device=waypoint_loss.device)
             lane_intention_dict = {}
 
         # ego_loss_dict = self._cal_ego_loss_term(trajectory, probability, ego_target)
         ret_dict_batch = {
-            "agent_reg_loss": agent_reg_loss,
+            # "agent_reg_loss": agent_reg_loss,
             "rel_agent_pos_loss": loss_rel_agent,
             "lane_intention_loss": lane_intention_loss,
             "waypoint_loss": waypoint_loss,
