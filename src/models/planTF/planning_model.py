@@ -305,6 +305,7 @@ class PlanningModel(TorchModuleWrapper):
         )
 
         self.bilinear_W = nn.Parameter(torch.randn(256, 256))
+        self.alma_freezed = False
 
         self.apply(self._init_weights)
 
@@ -387,6 +388,9 @@ class PlanningModel(TorchModuleWrapper):
                 if self.training and current_epoch <= 10:
                     return self.forward_CME_pretrain(data)
                 if self.training and current_epoch <= 30:
+                    if self.alma_freezed == False:
+                        self.freeze_ALMA_and_representation()
+                        self.alma_freezed = True
                     return self.forward_teacher_enforcing(data)
                 elif self.training and current_epoch > 30:
                     return self.forward_multimodal_finetune(data)
@@ -406,6 +410,11 @@ class PlanningModel(TorchModuleWrapper):
                 #     return self.forward_antagonistic_mask_finetune(data, current_epoch)
                 # else:
                 #     raise NotImplementedError(f"Stage {stage} is not implemented.")
+
+    def freeze_ALMA_and_representation(self):
+        for module in [self.local_map_tf, self.agent_projector, self.tempo_net, self.map_encoder]:
+            for p in module.parameters():
+                p.requires_grad = False
 
     def extract_map_feature(self, data, need_route_kpmask=False):
         # NOTE: put property to one-hot?
@@ -1597,6 +1606,7 @@ class PlanningModel(TorchModuleWrapper):
         assert agent_local_map_tokens.isnan().any() == False
         # valid_vehicle_padding_mask = valid_vehicle_with_local_mask_flatten.view(B, A)
         valid_vehicle_padding_mask = ~valid_vehicle_mask
+        valid_vehicle_padding_mask[:, 0] = True # the ego agent is always invalid
         return agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask
 
 
