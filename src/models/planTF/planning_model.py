@@ -903,7 +903,9 @@ class PlanningModel(TorchModuleWrapper):
             self.embed(data, embed_future=False)
         agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask = self.local_map_collection_embed(data, agent_embedding_emb, lane_embedding_pos) # [B, A, D]
 
-        x = torch.cat([ego_vel_token, agent_embedding_emb[:, 1:],
+        agent_tokens = agent_embedding_emb + agent_local_map_tokens*(~valid_vehicle_padding_mask.unsqueeze(-1))
+
+        x = torch.cat([ego_vel_token, agent_tokens[:, 1:],
                          lane_embedding_pos], dim=1) 
         key_padding_mask = torch.cat([agent_key_padding,
                                       polygon_key_padding], dim=-1)
