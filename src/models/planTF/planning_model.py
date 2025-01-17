@@ -169,6 +169,7 @@ class PlanningModel(TorchModuleWrapper):
         )
         self.lane_pred = build_mlp(dim, [512, self.no_lane_segment_points*2])
         self.agent_frame_predictor = build_mlp(dim, [512, 4])
+        self.ego_history_predictor = build_mlp(dim, [512, self.history_steps*4], activation="gelu")
 
         dpr = [x.item() for x in torch.linspace(0, drop_path, encoder_depth)]
 
@@ -338,7 +339,7 @@ class PlanningModel(TorchModuleWrapper):
                 self.lane_intention_8s_predictor, 
                 self.vel_token_projector, self.WpNet, self.norm_wp, self.norm_ff, 
                 self.lane_emb_wp_2s_mlp, self.lane_emb_ff_2s_mlp, self.lane_emb_wp_8s_mlp, self.lane_emb_ff_8s_mlp, self.score_mlp, 
-                self.waypoints_embedder, self.SpaNet, self.norm_spa, self.plantf_traj_decoder]
+                self.waypoints_embedder, self.SpaNet, self.norm_spa, self.plantf_traj_decoder, self.ego_history_predictor]
 
 
     def get_stage(self, current_epoch):
@@ -922,10 +923,15 @@ class PlanningModel(TorchModuleWrapper):
         trajectory, probability = self.plantf_traj_decoder(x[:, 0])
         prediction = self.abs_agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2)
 
+        # newly added: estimate the perturbation offset
+        ego_history_p = self.ego_history_predictor(x[:, 0]).view(bs, self.history_steps, 4) # [B, 3]
+        ego_history_loss = self.ego_history_prediction_loss(data, ego_history_p)
+
         out = {
             "trajectory": trajectory,
             "probability": probability,
             "prediction": prediction,
+            "ego_history_loss": ego_history_loss,
         }
 
         if not self.training:
@@ -939,6 +945,24 @@ class PlanningModel(TorchModuleWrapper):
             # out["output_trajectory"][:, 20:] = out["output_trajectory"][:, 19:20]
 
         return out
+
+    def ego_history_prediction_loss(self, data, ego_history_p):
+
+        ego_history_pose_gt = data["agent"]["position"][:, 0, :self.history_steps] # [B, 20, 2]
+        ego_target_heading = data["agent"]["heading"][:, 0, :self.history_steps] # [B, 1]
+
+        ego_history_target = torch.cat(
+            [
+                ego_history_pose_gt,
+                torch.stack(
+                    [ego_target_heading.cos(), ego_target_heading.sin()], dim=-1
+                ),
+            ],
+            dim=-1,
+        )
+        ego_history_loss = F.smooth_l1_loss(ego_history_p, ego_history_target)  
+
+        return ego_history_loss
 
     
 
@@ -1520,8 +1544,6 @@ class PlanningModel(TorchModuleWrapper):
     def local_map_collection_embed(self, data, agent_embedding_emb, lane_embedding_pos):
         """
             Extract the features of the map and the agents, and then embed them into the latent space. 
-            For the purpose of pretrain using VICReg loss, we do local map element colloection for each of the k nearest neighboring agents in each scenario. 
-            Then, an average pooling is applied for each set of lane segments. 
 
             inputs:
                 data: dict

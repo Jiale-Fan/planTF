@@ -268,7 +268,10 @@ class LightningTrainer(pl.LightningModule):
                         res["prediction"][agent_mask], agent_target[agent_mask][:, :2]
                     )
             loss_dict["agent_reg_loss"] = agent_reg_loss
-            
+
+        if "ego_history_loss" in res:
+            ego_history_loss = res["ego_history_loss"]
+            loss_dict["ego_history_loss"] = ego_history_loss            
 
         loss_mat = torch.stack(list(loss_dict.values()), dim=-1)
         loss = loss_mat.mean()

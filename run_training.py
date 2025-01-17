@@ -110,7 +110,7 @@ if __name__ == "__main__":
  python run_training.py \
     py_func=cache +training=train_planTF \
     scenario_builder=nuplan \
-    cache.cache_path=/home/jiale/Documents/exp/cache_new \
+    cache.cache_path=/home/jiale/Documents/exp/cache_jan \
     cache.cleanup_cache=true \
     scenario_filter=training_scenarios_100k \
     worker.threads_per_node=24
