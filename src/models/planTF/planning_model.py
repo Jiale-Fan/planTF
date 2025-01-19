@@ -387,13 +387,13 @@ class PlanningModel(TorchModuleWrapper):
             else:
                 if self.training and current_epoch <= 10:
                     return self.forward_CME_pretrain(data)
-                if self.training and current_epoch <= 30:
+                if self.training and current_epoch <= 40:
                     if self.alma_freezed == False:
-                        self.freeze_ALMA_and_representation()
+                        # self.freeze_ALMA_and_representation()
                         self.alma_freezed = True
                     return self.forward_teacher_enforcing(data)
-                elif self.training and current_epoch > 30:
-                    return self.forward_multimodal_finetune(data)
+                # elif self.training and current_epoch > 30:
+                #     return self.forward_multimodal_finetune(data)
                 else:
                     return self.forward_inference(data)
                 # stage = self.get_stage(current_epoch)
@@ -953,10 +953,10 @@ class PlanningModel(TorchModuleWrapper):
         
         agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask = self.local_map_collection_embed(data, agent_embedding_emb, lane_embedding_pos) # [B, A, D]
 
-        x_orig = torch.cat([ego_vel_token, agent_embedding_emb[:, 1:],
-                agent_local_map_tokens, lane_embedding_pos], dim=1) # [B, A+A+M, D]
-        key_padding_mask = torch.cat([agent_key_padding,
-                                valid_vehicle_padding_mask, polygon_key_padding], dim=-1) # [B, A+A+M, D]
+        agent_tokens = agent_embedding_emb + agent_local_map_tokens*valid_vehicle_padding_mask.unsqueeze(-1)
+
+        x_orig = torch.cat([ego_vel_token, agent_tokens[:, 1:], lane_embedding_pos], dim=1) # [B, A+A+M, D]
+        key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding], dim=-1) # [B, A+A+M, D]
 
         x = x_orig 
         for blk in self.SpaNet:
@@ -966,12 +966,12 @@ class PlanningModel(TorchModuleWrapper):
         # abs_prediction = self.abs_agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2)
 
         # lane intention prediction
-        lane_intention_2s = self.lane_intention_2s_predictor(x[:, 2*A:]).squeeze(-1) # B M
-        lane_intention_2s[key_padding_mask[:, 2*A:]] = -torch.inf # except the route, all the other map elements are set to -inf # lane_intention[key_padding_mask[:, A:]] = -torch.inf # invalide map elements are set to -inf. non-route lane segments remain possible to be selected, # since after disable route correction, the density of route lane segments gets lower
+        lane_intention_2s = self.lane_intention_2s_predictor(x[:, A:]).squeeze(-1) # B M
+        lane_intention_2s[key_padding_mask[:, A:]] = -torch.inf # except the route, all the other map elements are set to -inf # lane_intention[key_padding_mask[:, A:]] = -torch.inf # invalide map elements are set to -inf. non-route lane segments remain possible to be selected, # since after disable route correction, the density of route lane segments gets lower
         lane_intention_2s_prob = F.softmax(lane_intention_2s, dim=-1)
 
-        lane_intention_8s = self.lane_intention_8s_predictor(x[:, 2*A:]).squeeze(-1) # B M
-        lane_intention_8s[key_padding_mask[:, 2*A:]] = -torch.inf # except the route, all the other map elements are set to -inf
+        lane_intention_8s = self.lane_intention_8s_predictor(x[:, A:]).squeeze(-1) # B M
+        lane_intention_8s[key_padding_mask[:, A:]] = -torch.inf # except the route, all the other map elements are set to -inf
         lane_intention_8s_prob = F.softmax(lane_intention_8s, dim=-1)
 
         loss_lane_intention_2s = F.cross_entropy(lane_intention_2s_prob, lane_intention_2s_gt, reduction="none")
@@ -991,8 +991,8 @@ class PlanningModel(TorchModuleWrapper):
         # intention_lane_seg = x[:, A:][torch.arange(bs), lane_intention_max]
         # assert route_key_padding_mask[torch.arange(bs), lane_intention_max].any() == False # assert the selected lane segment is on the route
 
-        intention_lane_seg_2s = x_orig[:, 2*A:][torch.arange(bs), lane_intention_2s_gt]
-        intention_lane_seg_8s = x_orig[:, 2*A:][torch.arange(bs), lane_intention_8s_gt]
+        intention_lane_seg_2s = x_orig[:, A:][torch.arange(bs), lane_intention_2s_gt]
+        intention_lane_seg_8s = x_orig[:, A:][torch.arange(bs), lane_intention_8s_gt]
         # assert route_key_padding_mask[torch.arange(bs), lane_intention_targets].any() == False # assert the selected lane segment is on the route
         # The above assertion would cause error, probably because there are scenarios where no route lane is known
 
@@ -1086,11 +1086,11 @@ class PlanningModel(TorchModuleWrapper):
         x = self.norm_spa(x)
 
         # abs_prediction = self.abs_agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2)
-        lane_intention_2s = self.lane_intention_2s_predictor(x[:, 2*A:]).squeeze(-1) # B M
-        lane_intention_2s[key_padding_mask[:, 2*A:]] = -torch.inf # except the route, all the other map elements are set to -inf # lane_intention[key_padding_mask[:, A:]] = -torch.inf # invalide map elements are set to -inf. non-route lane segments remain possible to be selected, # since after disable route correction, the density of route lane segments gets lower
+        lane_intention_2s = self.lane_intention_2s_predictor(x[:, A:]).squeeze(-1) # B M
+        lane_intention_2s[key_padding_mask[:, A:]] = -torch.inf # except the route, all the other map elements are set to -inf # lane_intention[key_padding_mask[:, A:]] = -torch.inf # invalide map elements are set to -inf. non-route lane segments remain possible to be selected, # since after disable route correction, the density of route lane segments gets lower
 
-        lane_intention_8s = self.lane_intention_8s_predictor(x[:, 2*A:]).squeeze(-1) # B M
-        lane_intention_8s[key_padding_mask[:, 2*A:]] = -torch.inf # except the route, all the other map elements are set to -inf
+        lane_intention_8s = self.lane_intention_8s_predictor(x[:, A:]).squeeze(-1) # B M
+        lane_intention_8s[key_padding_mask[:, A:]] = -torch.inf # except the route, all the other map elements are set to -inf
 
         lane_intention_2s_prob = F.softmax(lane_intention_2s, dim=-1)
         lane_intention_8s_prob = F.softmax(lane_intention_8s, dim=-1)
@@ -1105,8 +1105,8 @@ class PlanningModel(TorchModuleWrapper):
         # for i in range(self.num_modes):
         for i in range(self.num_modes):
             for k in range(self.num_modes): 
-                intention_lane_seg_2s = x_orig[:, 2*A:][torch.arange(bs), lane_intention_topk_2s[:, i]]
-                intention_lane_seg_8s = x_orig[:, 2*A:][torch.arange(bs), lane_intention_topk_8s[:, k]]
+                intention_lane_seg_2s = x_orig[:, A:][torch.arange(bs), lane_intention_topk_2s[:, i]]
+                intention_lane_seg_8s = x_orig[:, A:][torch.arange(bs), lane_intention_topk_8s[:, k]]
 
                 x_wpnet = torch.cat([self.lane_emb_wp_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
                                 self.lane_emb_wp_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
@@ -1125,7 +1125,7 @@ class PlanningModel(TorchModuleWrapper):
 
                 ################ FFNet ################
             
-                intention_lane_seg_8s = x_orig[:, 2*A:][torch.arange(bs), lane_intention_topk_8s[:, k]]
+                intention_lane_seg_8s = x_orig[:, A:][torch.arange(bs), lane_intention_topk_8s[:, k]]
 
                 x_ffnet = torch.cat([
                 # self.lane_emb_ff_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
@@ -1213,11 +1213,11 @@ class PlanningModel(TorchModuleWrapper):
         x = self.norm_spa(x)
 
         # abs_prediction = self.abs_agent_predictor(x[:, 1:A]).view(bs, -1, self.future_steps, 2)
-        lane_intention_2s = self.lane_intention_2s_predictor(x[:, 2*A:]).squeeze(-1) # B M
-        lane_intention_2s[key_padding_mask[:, 2*A:]] = -torch.inf # except the route, all the other map elements are set to -inf # lane_intention[key_padding_mask[:, A:]] = -torch.inf # invalide map elements are set to -inf. non-route lane segments remain possible to be selected, # since after disable route correction, the density of route lane segments gets lower
+        lane_intention_2s = self.lane_intention_2s_predictor(x[:, A:]).squeeze(-1) # B M
+        lane_intention_2s[key_padding_mask[:, A:]] = -torch.inf # except the route, all the other map elements are set to -inf # lane_intention[key_padding_mask[:, A:]] = -torch.inf # invalide map elements are set to -inf. non-route lane segments remain possible to be selected, # since after disable route correction, the density of route lane segments gets lower
 
-        lane_intention_8s = self.lane_intention_8s_predictor(x[:, 2*A:]).squeeze(-1) # B M
-        lane_intention_8s[key_padding_mask[:, 2*A:]] = -torch.inf # except the route, all the other map elements are set to -inf
+        lane_intention_8s = self.lane_intention_8s_predictor(x[:, A:]).squeeze(-1) # B M
+        lane_intention_8s[key_padding_mask[:, A:]] = -torch.inf # except the route, all the other map elements are set to -inf
 
         lane_intention_prob_2s = F.softmax(lane_intention_2s, dim=-1)
         lane_intention_prob_8s = F.softmax(lane_intention_8s, dim=-1)
@@ -1229,8 +1229,8 @@ class PlanningModel(TorchModuleWrapper):
         # Ensure indices are within bounds
         # assert lane_intention_max.max() < x[:, A:].shape[1], "Index out of bounds in lane_intention_max"
 
-        intention_lane_seg_2s = x_orig[:, 2*A:][torch.arange(bs), lane_intention_max_2s]
-        intention_lane_seg_8s = x_orig[:, 2*A:][torch.arange(bs), lane_intention_max_8s]
+        intention_lane_seg_2s = x_orig[:, A:][torch.arange(bs), lane_intention_max_2s]
+        intention_lane_seg_8s = x_orig[:, A:][torch.arange(bs), lane_intention_max_8s]
         # assert route_key_padding_mask[torch.arange(bs), lane_intention_max].any() == False # assert the selected lane segment is on the route
 
         ################ WpNet ################ 
