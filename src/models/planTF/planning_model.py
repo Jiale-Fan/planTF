@@ -953,7 +953,7 @@ class PlanningModel(TorchModuleWrapper):
         
         agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask = self.local_map_collection_embed(data, agent_embedding_emb, lane_embedding_pos) # [B, A, D]
 
-        agent_tokens = agent_embedding_emb + agent_local_map_tokens*valid_vehicle_padding_mask.unsqueeze(-1)
+        agent_tokens = agent_embedding_emb + agent_local_map_tokens*(~valid_vehicle_padding_mask).unsqueeze(-1)
 
         x_orig = torch.cat([ego_vel_token, agent_tokens[:, 1:], lane_embedding_pos], dim=1) # [B, A+A+M, D]
         key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding], dim=-1) # [B, A+A+M, D]
@@ -1198,14 +1198,15 @@ class PlanningModel(TorchModuleWrapper):
     def forward_inference(self, data):
         bs, A = data["agent"]["heading"].shape[0:2]
 
-        ego_vel_token, agent_embedding_emb, lane_embedding_pos, agent_key_padding, polygon_key_padding, route_kp_mask = \
-            self.embed(data, embed_future=False)
+        # get feature embeddings
+        ego_vel_token, agent_embedding_emb, lane_embedding_pos, agent_key_padding, polygon_key_padding, route_kp_mask, lane_intention_2s_gt, lane_intention_8s_gt, waypoints_gt = self.embed_progressive(data)
+        
         agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask = self.local_map_collection_embed(data, agent_embedding_emb, lane_embedding_pos) # [B, A, D]
 
-        x_orig = torch.cat([ego_vel_token, agent_embedding_emb[:, 1:],
-                        agent_local_map_tokens, lane_embedding_pos], dim=1) 
-        key_padding_mask = torch.cat([agent_key_padding,
-                                     valid_vehicle_padding_mask, polygon_key_padding], dim=-1)
+        agent_tokens = agent_embedding_emb + agent_local_map_tokens*(~valid_vehicle_padding_mask).unsqueeze(-1)
+
+        x_orig = torch.cat([ego_vel_token, agent_tokens[:, 1:], lane_embedding_pos], dim=1) # [B, A+A+M, D]
+        key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding], dim=-1) # [B, A+A+M, D]
 
         x = x_orig 
         for blk in self.SpaNet:
