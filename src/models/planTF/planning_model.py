@@ -388,9 +388,9 @@ class PlanningModel(TorchModuleWrapper):
                 if self.training and current_epoch <= 10:
                     return self.forward_CME_pretrain(data)
                 if self.training and current_epoch <= 40:
-                    if self.alma_freezed == False:
-                        # self.freeze_ALMA_and_representation()
-                        self.alma_freezed = True
+                    # if self.alma_freezed == False:
+                    #     # self.freeze_ALMA_and_representation()
+                    #     self.alma_freezed = True
                     return self.forward_teacher_enforcing(data)
                 # elif self.training and current_epoch > 30:
                 #     return self.forward_multimodal_finetune(data)
@@ -1199,7 +1199,8 @@ class PlanningModel(TorchModuleWrapper):
         bs, A = data["agent"]["heading"].shape[0:2]
 
         # get feature embeddings
-        ego_vel_token, agent_embedding_emb, lane_embedding_pos, agent_key_padding, polygon_key_padding, route_kp_mask, lane_intention_2s_gt, lane_intention_8s_gt, waypoints_gt = self.embed_progressive(data)
+        ego_vel_token, agent_embedding_emb, lane_embedding_pos, agent_key_padding, polygon_key_padding, route_kp_mask = \
+            self.embed(data, embed_future=False)
         
         agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask = self.local_map_collection_embed(data, agent_embedding_emb, lane_embedding_pos) # [B, A, D]
 
