@@ -308,16 +308,17 @@ class LightningTrainer(pl.LightningModule):
         )
 
         # 1. absolute agent prediction
+        prediction = res["prediction"] 
 
-        # deno = agent_mask.sum((1, 2))
-        # deno[deno == 0] = 1
-        # agent_reg_loss = F.smooth_l1_loss(
-        #     prediction*(agent_mask[..., None]), (agent_target*(agent_mask[..., None]))[..., :2], reduction='none'
-        # ).sum((1, 2, 3))/deno
+        deno = agent_mask.sum((1, 2))
+        deno[deno == 0] = 1
+        agent_reg_loss = F.smooth_l1_loss(
+            prediction*(agent_mask[..., None]), (agent_target*(agent_mask[..., None]))[..., :2], reduction='none'
+        ).sum((1, 2, 3))/deno
 
-        # agent_reg_loss = F.smooth_l1_loss(
-        #     prediction[agent_mask], agent_target[agent_mask][..., :2], reduction='none'
-        # ).mean()
+        agent_reg_loss = F.smooth_l1_loss(
+            prediction[agent_mask], agent_target[agent_mask][..., :2], reduction='none'
+        ).mean()
 
         if waypoints.dim() == 4:
             # 3. waypoint loss
@@ -372,7 +373,7 @@ class LightningTrainer(pl.LightningModule):
 
         # ego_loss_dict = self._cal_ego_loss_term(trajectory, probability, ego_target)
         ret_dict_batch = {
-            # "agent_reg_loss": agent_reg_loss,
+            "agent_reg_loss": agent_reg_loss,
             "rel_agent_pos_loss": loss_rel_agent,
             "lane_intention_loss": lane_intention_loss,
             "waypoint_loss": waypoint_loss,
