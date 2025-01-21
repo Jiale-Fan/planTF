@@ -316,10 +316,6 @@ class LightningTrainer(pl.LightningModule):
             prediction*(agent_mask[..., None]), (agent_target*(agent_mask[..., None]))[..., :2], reduction='none'
         ).sum((1, 2, 3))/deno
 
-        agent_reg_loss = F.smooth_l1_loss(
-            prediction[agent_mask], agent_target[agent_mask][..., :2], reduction='none'
-        ).mean()
-
         if waypoints.dim() == 4:
             # 3. waypoint loss
             best_mode_wp, waypoint_loss = self._winner_take_all_loss(waypoints, ego_target[:, :n_wp])
