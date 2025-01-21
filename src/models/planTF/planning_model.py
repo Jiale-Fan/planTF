@@ -387,7 +387,7 @@ class PlanningModel(TorchModuleWrapper):
             else:
                 if self.training and current_epoch <= 10:
                     return self.forward_CME_pretrain(data)
-                if self.training and current_epoch <= 30:
+                elif self.training and current_epoch <= 30:
                     # if self.alma_freezed == False:
                     #     self.freeze_ALMA_and_representation()
                     #     self.alma_freezed = True
