@@ -385,14 +385,14 @@ class PlanningModel(TorchModuleWrapper):
                 return self.forward_inference(data)
                 # return self.forward_antagonistic_mask_finetune(data, current_epoch)
             else:
-                if self.training and current_epoch <= 10:
+                if self.training and current_epoch <= 5:
                     return self.forward_CME_pretrain(data)
-                elif self.training and current_epoch <= 30:
+                elif self.training and current_epoch <= 25:
                     # if self.alma_freezed == False:
                     #     self.freeze_ALMA_and_representation()
                     #     self.alma_freezed = True
                     return self.forward_teacher_enforcing(data)
-                elif self.training and current_epoch > 30:
+                elif self.training and current_epoch > 25:
                     return self.forward_multimodal_finetune(data)
                 else:
                     return self.forward_inference(data)

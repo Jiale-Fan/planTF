@@ -10,6 +10,7 @@ def sort_predictions(predictions, probability, k=6):
         torch.Tensor: The sorted predictions [b, k', t, 2].
     """
     indices = torch.argsort(probability, dim=-1, descending=True)
+    assert indices.max() < predictions.size(1), "max indice "+indices.max()+" exceeds the plan number of modes"+predictions.size(1)
     sorted_prob = probability[torch.arange(probability.size(0))[:, None], indices]
     sorted_predictions = predictions[
         torch.arange(predictions.size(0))[:, None], indices
