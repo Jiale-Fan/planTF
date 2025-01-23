@@ -1583,12 +1583,13 @@ class PlanningModel(TorchModuleWrapper):
 
         B, A, P_a, C_a = agent_features.shape
         valid_agent_traj = agent_features[..., :2].view(B*A, P_a, 2) # [B*A, num_step, 2]
+        B, M, P_m, C_m = polygon_pos.shape
+        local_map_set = polygon_pos.unsqueeze(1).repeat(1,A,1,1,1).view(B*A, M, P_m, C_m) # [B*A, M, 20, 2]
 
-        local_map_set = polygon_pos.tile((A,1,1,1)) # [B*A, M, 20, 2]
-
-        dist_step_to_map_point = torch.norm(valid_agent_traj[:,None,:,None,:] - local_map_set[:,:,None,:,:], dim=-1) # [B_k, M, num_step, 20]
-        dist_agent_to_map_element = torch.min(torch.min(dist_step_to_map_point, dim=-1).values, dim=-1).values # [B_k, M]
-        map_element_inclusion_mask = (dist_agent_to_map_element<self.map_collection_threshold) & (~polygon_key_padding.tile((A, 1))) # [B_k, M] bool
+        dist_step_to_map_point = torch.norm(valid_agent_traj[:,None,:,None,:] - local_map_set[:,:,None,:,:], dim=-1) # [B*A, M, num_step, 20]
+        dist_agent_to_map_element = torch.min(torch.min(dist_step_to_map_point, dim=-1).values, dim=-1).values # [B*A, M]
+        polygon_valid_mask_expand = ~polygon_key_padding.unsqueeze(1).repeat(1, A, 1).view(B*A, M) # [B*A, M]
+        map_element_inclusion_mask = (dist_agent_to_map_element<self.map_collection_threshold) & polygon_valid_mask_expand # [B*A, M] bool
 
         valid_vehicle = ((agent_category == 0) | (agent_category == 1)) # 0: ego, 1: vehicle, 2: pedestrain, 3: bicycle
         valid_vehicle_mask = (valid_vehicle & (~agent_key_padding))
@@ -1598,12 +1599,13 @@ class PlanningModel(TorchModuleWrapper):
         # assert that the local map set is not empty for every valid agent
         valid_local_mask = ((map_element_inclusion_mask.view(B,A,-1).any(-1))) & valid_vehicle_mask
         needs_subs_mask = (~(map_element_inclusion_mask.view(B,A,-1).any(-1))) & valid_vehicle_mask
-        valid_vehicle_with_local_mask_flatten = (valid_local_mask & valid_vehicle_mask).flatten()
+        valid_vehicle_with_local_mask_flatten = (valid_local_mask & valid_vehicle_mask).flatten() # [B*A,]
 
-        lane_embedding_expanded = lane_embedding_pos.tile((A, 1, 1)) # [B_k, M, D]
+
+        D = self.dim
+        lane_embedding_expanded = lane_embedding_pos.unsqueeze(1).repeat(1,A,1,1).view(B*A, M, self.dim) # [B*A, M, D]
         # lane_embedding_pooled = batch_average_pooling(lane_embedding_expanded, map_element_inclusion_mask) # [B_k, D]
 
-        D = agent_embedding_emb.shape[-1]
         _x_orig = agent_embedding_emb.reshape(B*A, 1, D)
         _x_out = _x_orig.new_zeros(_x_orig.shape)
 
@@ -1613,7 +1615,7 @@ class PlanningModel(TorchModuleWrapper):
 
         _x = _x_input
         for block in self.local_map_tf:
-            _x = block(query = _x_input, key_value = lane_embedding_expanded_input, key_padding_mask = key_padding_mask_input)
+            _x = block(query = _x, key_value = lane_embedding_expanded_input, key_padding_mask = key_padding_mask_input)
         _x_out[valid_vehicle_with_local_mask_flatten] = _x
 
         agent_local_map_tokens = _x_out.reshape(B, A, D)
