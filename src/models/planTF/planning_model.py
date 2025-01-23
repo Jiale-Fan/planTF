@@ -373,9 +373,9 @@ class PlanningModel(TorchModuleWrapper):
                 return self.forward_planTF(data)
                 # return self.forward_antagonistic_mask_finetune(data, current_epoch)
             else:
-                if self.training and current_epoch <= 10:
-                    return self.forward_CME_pretrain(data)
-                else:
+                # if self.training and current_epoch <= 10:
+                #     return self.forward_CME_pretrain(data)
+                # else:
                     return self.forward_planTF(data)
             # return self.forward_CME_pretrain(data)
         elif self.model_type == "ours": 
@@ -917,9 +917,10 @@ class PlanningModel(TorchModuleWrapper):
 
         ego_vel_token, agent_embedding_emb, lane_embedding, agent_key_padding, polygon_key_padding, route_kp_mask = \
             self.embed(data, embed_future=False)
-        alma_tokens, alma_valid_masks = self.local_map_collection_embed(data, lane_embedding) # [B, A, D]
+        # alma_tokens, alma_valid_masks = self.local_map_collection_embed(data, lane_embedding) # [B, A, D]
 
-        lane_tokens = lane_embedding + alma_tokens*(alma_valid_masks.unsqueeze(-1))
+        # lane_tokens = lane_embedding + alma_tokens*(alma_valid_masks.unsqueeze(-1))
+        lane_tokens = lane_embedding
 
         x = torch.cat([ego_vel_token, agent_embedding_emb[:, 1:],
                         lane_tokens], dim=1) 
