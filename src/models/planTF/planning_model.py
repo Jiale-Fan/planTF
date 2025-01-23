@@ -15,6 +15,7 @@ from .modules.agent_encoder import AgentEncoder, EgoEncoder, TempoNet
 from .modules.map_encoder import MapEncoder
 from .modules.trajectory_decoder import MultimodalTrajectoryDecoder, SinglemodalTrajectoryDecoder
 import torch.nn.functional as F
+from matplotlib import pyplot as plt
 
 from .modules.transformer_blocks import Block, CrossAttender
 from .pretrain_model import PretrainModel
@@ -866,10 +867,11 @@ class PlanningModel(TorchModuleWrapper):
             self.embed(data, embed_future=False)
         agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask = self.local_map_collection_embed(data, agent_embedding_emb, lane_embedding_pos) # [B, A, D]
 
-        agent_embedding_emb_fut, _, _ = self.embed_agent(data, embed_future=True)
+        agent_embedding_emb_fut, agent_pretrain_valid_mask = self.pretrain_embed_agent(data)
+        pretrain_valid_mask = agent_pretrain_valid_mask & (~valid_vehicle_padding_mask)
 
-        h_agent = agent_embedding_emb_fut[~valid_vehicle_padding_mask]
-        h_map = agent_local_map_tokens[~valid_vehicle_padding_mask]
+        h_agent = agent_embedding_emb_fut[pretrain_valid_mask]
+        h_map = agent_local_map_tokens[pretrain_valid_mask]
 
         z_motion = self.cme_motion_mlp(h_agent) # [B, d]
         z_env = self.cme_env_mlp(h_map) # [B, d]
@@ -1432,6 +1434,15 @@ class PlanningModel(TorchModuleWrapper):
 
         return agent_embedding_emb, agent_key_padding, ego_vel_token
     
+    def pretrain_embed_agent(self, data):
+        agent_embedding_emb_fut, _, _ = self.embed_agent(data, embed_future=True)
+        agent_features, agent_category, frame_valid_mask, agent_key_padding, ego_state = self.extract_agent_feature(data, extract_future=True)
+
+        agent_displacement = torch.norm(agent_features[:, :, -1, :2] - agent_features[:, :, 0, :2], dim=-1) # B A
+        agent_pretrain_valid_mask = (agent_displacement>5.0) & (~agent_key_padding)
+
+        return agent_embedding_emb_fut, agent_pretrain_valid_mask
+
     
     def embed(self, data, embed_future=False):
         """
@@ -1612,6 +1623,30 @@ class PlanningModel(TorchModuleWrapper):
         _x_input = _x_orig[valid_vehicle_with_local_mask_flatten] # [B_k, 1, D]
         lane_embedding_expanded_input = lane_embedding_expanded[valid_vehicle_with_local_mask_flatten]
         key_padding_mask_input = ~map_element_inclusion_mask[valid_vehicle_with_local_mask_flatten]
+
+        def plot_cme(i,s=0.5):
+
+            plt.clf()
+            fig = plt.figure()
+            ax = fig.add_subplot(111)
+            
+            local_map_bk = polygon_pos.unsqueeze(1).repeat(1,A,1,1,1).view(B*A, M, P_m, C_m)
+            local_map_bk_i = local_map_bk[valid_vehicle_with_local_mask_flatten][i][~key_padding_mask_input[i]] # M_k, 20, 2
+            local_map_bk_i = local_map_bk_i.view(-1, 2)
+            
+            frame_valid_mask_bk = frame_valid_mask.view(B*A, P_a)[valid_vehicle_with_local_mask_flatten][i]
+            
+            traj = valid_agent_traj[valid_vehicle_with_local_mask_flatten][i][frame_valid_mask_bk]
+            
+            local_map_bk_i = local_map_bk_i.cpu().numpy()
+            traj = traj.cpu().numpy()
+            
+            ax.scatter(local_map_bk_i[..., 0], local_map_bk_i[..., 1], c='black', s=s)
+            ax.scatter(traj[..., 0], traj[..., 1], c='blue', s=s)
+            ax.axis('equal')
+            plt.savefig("/home/jiale/planTF/debug_files/local_cme_"+str(i)+".png")
+
+        # plot_cme(0)
 
         _x = _x_input
         for block in self.local_map_tf:
