@@ -15,6 +15,8 @@ from .modules.agent_encoder import AgentEncoder, EgoEncoder, TempoNet
 from .modules.map_encoder import MapEncoder
 from .modules.trajectory_decoder import MultimodalTrajectoryDecoder, SinglemodalTrajectoryDecoder
 import torch.nn.functional as F
+from matplotlib import pyplot as plt
+import numpy as np
 
 from .modules.transformer_blocks import Block, CrossAttender
 from .pretrain_model import PretrainModel
@@ -373,9 +375,9 @@ class PlanningModel(TorchModuleWrapper):
                 return self.forward_planTF(data)
                 # return self.forward_antagonistic_mask_finetune(data, current_epoch)
             else:
-                # if self.training and current_epoch <= 10:
-                #     return self.forward_CME_pretrain(data)
-                # else:
+                if self.training and current_epoch <= 10:
+                    return self.forward_CME_pretrain(data)
+                else:
                     return self.forward_planTF(data)
             # return self.forward_CME_pretrain(data)
         elif self.model_type == "ours": 
@@ -654,7 +656,7 @@ class PlanningModel(TorchModuleWrapper):
 
         return masked_x, pred_mask
 
-    def forward_pretrain_separate(self, data):
+    # def forward_pretrain_separate(self, data): 
 
         ## 1. MRM
         polygon_pos, polypon_prop, polygon_mask, polygon_key_padding = self.extract_map_feature(data)
@@ -761,7 +763,7 @@ class PlanningModel(TorchModuleWrapper):
 
         return out
 
-    def plot_lane_intention(self, data, lane_intention_score, output_trajectory, key_padding_mask, agent_score=None, k=0):
+    # def plot_lane_intention(self, data, lane_intention_score, output_trajectory, key_padding_mask, agent_score=None, k=0):
         i = 0
         polygon_pos, _, polypon_prop, polygon_mask, polygon_key_padding = self.extract_map_feature(data)
         agent_features, agent_category, frame_valid_mask, agent_key_padding, ego_state = self.extract_agent_feature(data, extract_future=False)
@@ -801,7 +803,7 @@ class PlanningModel(TorchModuleWrapper):
     #     assert ((~masks).sum(0) == ~key_padding_mask).all()
         
     #     return masks
-    def generate_antagonistic_masks(self, key_padding_mask, random_ratio, score=None):
+    # def generate_antagonistic_masks(self, key_padding_mask, random_ratio, score=None):
         '''
         This function generates 2 antagonistic masks. 
         All the masks belong to one set should sum up to the key_padding_mask corresponding to that scene. 
@@ -870,7 +872,7 @@ class PlanningModel(TorchModuleWrapper):
         agent_embedding_emb_fut, _, _ = self.embed_agent(data, embed_future=True)
         agent_embedding_emb_fut_reshaped = agent_embedding_emb_fut.reshape(-1, agent_embedding_emb_fut.shape[-1]) # [B*A, D]
         alma_valid_masks_expand = alma_valid_masks.unsqueeze(1).expand(-1, A, -1).reshape(-1, alma_valid_masks.shape[-1]) # [B*A, M]
-        agent_token_has_alma = ( alma_valid_masks_expand[agent_on_lane_mask][torch.arange(lane_num.shape[0]), lane_num] == True )  # [B_k,]
+        agent_token_has_alma = (alma_valid_masks_expand[agent_on_lane_mask][torch.arange(lane_num.shape[0]), lane_num] == True )  # [B_k,]
 
         alma_tokens_expanded = alma_tokens.unsqueeze(1).expand(-1, A, -1, -1).reshape(-1, alma_tokens.shape[-2], alma_tokens.shape[-1]) # [B*A, M, D]
 
@@ -917,10 +919,10 @@ class PlanningModel(TorchModuleWrapper):
 
         ego_vel_token, agent_embedding_emb, lane_embedding, agent_key_padding, polygon_key_padding, route_kp_mask = \
             self.embed(data, embed_future=False)
-        # alma_tokens, alma_valid_masks = self.local_map_collection_embed(data, lane_embedding) # [B, A, D]
+        alma_tokens, alma_valid_masks = self.local_map_collection_embed(data, lane_embedding) # [B, A, D]
 
-        # lane_tokens = lane_embedding + alma_tokens*(alma_valid_masks.unsqueeze(-1))
-        lane_tokens = lane_embedding
+        lane_tokens = lane_embedding + alma_tokens*(alma_valid_masks.unsqueeze(-1))
+        # lane_tokens = lane_embedding
 
         x = torch.cat([ego_vel_token, agent_embedding_emb[:, 1:],
                         lane_tokens], dim=1) 
@@ -1589,6 +1591,30 @@ class PlanningModel(TorchModuleWrapper):
             lane_embedding_expanded_input = lane_embeddings.unsqueeze(1).repeat(1,M,1,1).view(B*M, M, D)[map_elem_valid_type_mask]
             key_padding_mask_input = ~map_element_inclusion_mask[map_elem_valid_type_mask]
 
+            def plot_cme(i,s=0.5):
+
+                plt.clf()
+                fig = plt.figure()
+                ax = fig.add_subplot(111)
+                
+                local_map_bk = polygon_pos.unsqueeze(1).repeat(1,M,1,1,1).view(B*M, M, P, C)
+                local_map_bk_i = local_map_bk[map_elem_valid_type_mask][i][~key_padding_mask_input[i]] # M_k, 20, 2
+                local_map_bk_i = local_map_bk_i.view(-1, 2)
+                
+                frame_valid_mask_bk = polygon_mask.view(B*M, P)[map_elem_valid_type_mask][i]
+                
+                traj = polygon_pos.view(B*M, P, C)[map_elem_valid_type_mask][i][frame_valid_mask_bk]
+                
+                local_map_bk_i = local_map_bk_i.cpu().numpy()
+                traj = traj.cpu().numpy()
+                
+                ax.scatter(local_map_bk_i[..., 0], local_map_bk_i[..., 1], c='black', s=s)
+                ax.scatter(traj[..., 0], traj[..., 1], c='blue', s=s)
+                ax.axis('equal')
+                plt.savefig("/home/jiale/planTF/debug_files/local_mm_"+str(i)+".png")
+
+            # plot_cme(0)
+
             _x = _x_input
             for block in self.local_map_tf:
                 _x = block(query = _x, key_value = lane_embedding_expanded_input, key_padding_mask = key_padding_mask_input)
@@ -1619,7 +1645,7 @@ class PlanningModel(TorchModuleWrapper):
 
         B, A, T_a, C_a = agent_features.shape
         agent_current_pos = agent_features[:, :, -1, :2].view(B*A, 2)
-        agent_current_ori = agent_features[:, :, -1, 2].view(B*A)
+        agent_current_ori = torch.arctan2(agent_features[:, :, -1, 3], agent_features[:, :, -1, 2]).view(B*A)
         B, M, P, C = polygon_pos.shape
         local_map_set_pos = polygon_pos.unsqueeze(1).repeat(1,A,1,1,1).view(B*A, M, P, C) # [B*A, M, 20, 2]
         local_map_set_ori = polygon_ori.unsqueeze(1).repeat(1,A,1,1,1).view(B*A, M, P) # [B*A, M, 20]
@@ -1635,7 +1661,33 @@ class PlanningModel(TorchModuleWrapper):
         agents_on_lane_mask = (candidates.any(-1).any(-1)) & (~agent_key_padding.flatten()) # bool [B*A,]
         # [B*A]
 
-        return agents_on_lane_mask, lane_num[agents_on_lane_mask]
+        lane_num_bk = lane_num[agents_on_lane_mask]
+
+        def plot_cme(i,s=0.5):
+
+                plt.clf()
+                fig = plt.figure()
+                ax = fig.add_subplot(111)
+                
+                local_map_bk_i = local_map_set_pos[agents_on_lane_mask][i][lane_num_bk[i]] # M_k, 20, 2
+                
+                frame_valid_mask_bk = frame_valid_mask.view(B*A, T_a)[agents_on_lane_mask][i]
+                traj = agent_features[..., :2].view(B*A, T_a, 2)[agents_on_lane_mask][i][frame_valid_mask_bk]
+                ang_now = agent_current_ori[agents_on_lane_mask][i].cpu().numpy()
+                
+                local_map_bk_i = local_map_bk_i.cpu().numpy()
+                traj = traj.cpu().numpy()
+                
+                ax.scatter(local_map_bk_i[..., 0], local_map_bk_i[..., 1], c='black', s=s)
+                ax.scatter(traj[..., 0], traj[..., 1], c='red', s=s)
+                # plot the agent's current orientation
+                ax.arrow(traj[-1, 0], traj[-1, 1], 4*np.cos(ang_now), 4*np.sin(ang_now), head_width=2, head_length=1, fc='blue', ec='blue')
+                ax.axis('equal')
+                plt.savefig("/home/jiale/planTF/debug_files/local_agent_on_lane_"+str(i)+".png")
+
+        # plot_cme(0)
+
+        return agents_on_lane_mask, lane_num_bk
 
 
     def mask_and_embed(self, data, seeds): # 
