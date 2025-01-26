@@ -955,9 +955,9 @@ class PlanningModel(TorchModuleWrapper):
         # get feature embeddings
         ego_vel_token, agent_embedding_emb, lane_embedding_pos, agent_key_padding, polygon_key_padding, agent_key_padding_local, polygon_key_padding_local, route_kp_mask, lane_intention_2s_gt, lane_intention_8s_gt, waypoints_gt = self.embed_progressive(data)
         
-        agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask = self.local_map_collection_embed(data, agent_embedding_emb, lane_embedding_pos) # [B, A, D]
+        # agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask = self.local_map_collection_embed(data, agent_embedding_emb, lane_embedding_pos) # [B, A, D]
 
-        agent_tokens = torch.cat([ego_vel_token, agent_embedding_emb[:, 1:],], dim=1) + agent_local_map_tokens*(~valid_vehicle_padding_mask[..., None])
+        agent_tokens = torch.cat([ego_vel_token, agent_embedding_emb[:, 1:],], dim=1) # + agent_local_map_tokens*(~valid_vehicle_padding_mask[..., None])
         x_orig = torch.cat([agent_tokens, lane_embedding_pos], dim=1) 
         key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding], dim=-1) 
         
@@ -1205,9 +1205,9 @@ class PlanningModel(TorchModuleWrapper):
 
         ego_vel_token, agent_embedding_emb, lane_embedding_pos, agent_key_padding, polygon_key_padding, agent_key_padding_local, polygon_key_padding_local, route_kp_mask = \
             self.embed_and_get_local_mask(data, embed_future=False)
-        agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask = self.local_map_collection_embed(data, agent_embedding_emb, lane_embedding_pos) # [B, A, D]
+        # agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask = self.local_map_collection_embed(data, agent_embedding_emb, lane_embedding_pos) # [B, A, D]
 
-        agent_tokens = torch.cat([ego_vel_token, agent_embedding_emb[:, 1:],], dim=1) + agent_local_map_tokens*(~valid_vehicle_padding_mask[..., None])
+        agent_tokens = torch.cat([ego_vel_token, agent_embedding_emb[:, 1:],], dim=1) # + agent_local_map_tokens*(~valid_vehicle_padding_mask[..., None])
         x_orig = torch.cat([agent_tokens, lane_embedding_pos], dim=1) 
         key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding], dim=-1) 
 
