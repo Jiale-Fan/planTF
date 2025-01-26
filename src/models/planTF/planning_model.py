@@ -105,6 +105,7 @@ class PlanningModel(TorchModuleWrapper):
         ori_threshold = 0.7653,
         map_collection_threshold = 10,
         agent_cme_displacement_threshold = 5, 
+        wp_net_radius = 30,
         model_type = "ours", # "baseline" for planTF like simple tf encoder architecture, and "ours" for progressive trajectory planning framework
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
     ) -> None:
@@ -141,6 +142,7 @@ class PlanningModel(TorchModuleWrapper):
         self.map_collection_threshold = map_collection_threshold
         self.agent_cme_displacement_threshold = agent_cme_displacement_threshold
         self.model_type = model_type
+        self.wp_net_radius = wp_net_radius
 
         assert model_type in ["baseline", "ours"]
 
@@ -386,9 +388,9 @@ class PlanningModel(TorchModuleWrapper):
                 return self.forward_inference(data)
                 # return self.forward_antagonistic_mask_finetune(data, current_epoch)
             else:
-                if self.training and current_epoch <= 5:
-                    return self.forward_CME_pretrain(data)
-                elif self.training and current_epoch <= 25:
+                # if self.training and current_epoch <= 5:
+                #     return self.forward_CME_pretrain(data)
+                if self.training and current_epoch <= 25:
                     # if self.alma_freezed == False:
                     #     self.freeze_ALMA_and_representation()
                     #     self.alma_freezed = True
@@ -951,13 +953,15 @@ class PlanningModel(TorchModuleWrapper):
         bs, A = data["agent"]["heading"].shape[0:2]
 
         # get feature embeddings
-        ego_vel_token, agent_embedding_emb, lane_embedding_pos, agent_key_padding, polygon_key_padding, route_kp_mask, lane_intention_2s_gt, lane_intention_8s_gt, waypoints_gt = self.embed_progressive(data)
+        ego_vel_token, agent_embedding_emb, lane_embedding_pos, agent_key_padding, polygon_key_padding, agent_key_padding_local, polygon_key_padding_local, route_kp_mask, lane_intention_2s_gt, lane_intention_8s_gt, waypoints_gt = self.embed_progressive(data)
         
         agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask = self.local_map_collection_embed(data, agent_embedding_emb, lane_embedding_pos) # [B, A, D]
 
         agent_tokens = torch.cat([ego_vel_token, agent_embedding_emb[:, 1:],], dim=1) + agent_local_map_tokens*(~valid_vehicle_padding_mask[..., None])
         x_orig = torch.cat([agent_tokens, lane_embedding_pos], dim=1) 
         key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding], dim=-1) 
+        
+        key_padding_mask_local = torch.cat([agent_key_padding_local, polygon_key_padding_local], dim=-1)
 
         x = x_orig 
         for blk in self.SpaNet:
@@ -1004,8 +1008,8 @@ class PlanningModel(TorchModuleWrapper):
                             #  self.lane_emb_wp_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
                               x_orig[:,1:]], dim=1)
         
-        key_padding_mask_wp = torch.cat([torch.zeros((bs, 1), dtype=torch.bool, device=key_padding_mask.device),
-                                          key_padding_mask[:,1:]], dim=1)
+        key_padding_mask_wp = torch.cat([torch.zeros((bs, 1), dtype=torch.bool, device=key_padding_mask_local.device),
+                                          key_padding_mask_local[:,1:]], dim=1)
         for blk in self.WpNet:
             x_wpnet = blk(x_wpnet, key_padding_mask=key_padding_mask_wp)
         x_wpnet = self.norm_wp(x_wpnet)
@@ -1070,13 +1074,15 @@ class PlanningModel(TorchModuleWrapper):
     def forward_multimodal_finetune(self, data):
         bs, A = data["agent"]["heading"].shape[0:2]
 
-        ego_vel_token, agent_embedding_emb, lane_embedding_pos, agent_key_padding, polygon_key_padding, route_kp_mask = \
-            self.embed(data, embed_future=False)
-        agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask = self.local_map_collection_embed(data, agent_embedding_emb, lane_embedding_pos) # [B, A, D]
+        ego_vel_token, agent_embedding_emb, lane_embedding_pos, agent_key_padding, polygon_key_padding, agent_key_padding_local, polygon_key_padding_local, route_kp_mask = \
+            self.embed_and_get_local_mask(data, embed_future=False)
+        # agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask = self.local_map_collection_embed(data, agent_embedding_emb, lane_embedding_pos) # [B, A, D]
 
-        agent_tokens = torch.cat([ego_vel_token, agent_embedding_emb[:, 1:],], dim=1) + agent_local_map_tokens*(~valid_vehicle_padding_mask[..., None])
+        agent_tokens = torch.cat([ego_vel_token, agent_embedding_emb[:, 1:],], dim=1) # + agent_local_map_tokens*(~valid_vehicle_padding_mask[..., None])
         x_orig = torch.cat([agent_tokens, lane_embedding_pos], dim=1) 
         key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding], dim=-1) 
+
+        key_padding_mask_local = torch.cat([agent_key_padding_local, polygon_key_padding_local], dim=-1)
 
         # no need to remove the ego token here. Right?
 
@@ -1110,8 +1116,8 @@ class PlanningModel(TorchModuleWrapper):
 
                 x_wpnet = torch.cat([self.lane_emb_wp_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
                                 x_orig[:, 1:]], dim=1)
-                key_padding_mask_wp = torch.cat([torch.zeros((bs, 1), dtype=torch.bool, device=key_padding_mask.device),
-                                                key_padding_mask[:, 1:]], dim=1)
+                key_padding_mask_wp = torch.cat([torch.zeros((bs, 1), dtype=torch.bool, device=key_padding_mask_local.device),
+                                                key_padding_mask_local[:, 1:]], dim=1)
                 
                 for blk in self.WpNet:
                     x_wpnet = blk(x_wpnet, key_padding_mask=key_padding_mask_wp)
@@ -1197,13 +1203,15 @@ class PlanningModel(TorchModuleWrapper):
     def forward_inference(self, data):
         bs, A = data["agent"]["heading"].shape[0:2]
 
-        ego_vel_token, agent_embedding_emb, lane_embedding_pos, agent_key_padding, polygon_key_padding, route_kp_mask = \
-            self.embed(data, embed_future=False)
+        ego_vel_token, agent_embedding_emb, lane_embedding_pos, agent_key_padding, polygon_key_padding, agent_key_padding_local, polygon_key_padding_local, route_kp_mask = \
+            self.embed_and_get_local_mask(data, embed_future=False)
         agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask = self.local_map_collection_embed(data, agent_embedding_emb, lane_embedding_pos) # [B, A, D]
 
         agent_tokens = torch.cat([ego_vel_token, agent_embedding_emb[:, 1:],], dim=1) + agent_local_map_tokens*(~valid_vehicle_padding_mask[..., None])
         x_orig = torch.cat([agent_tokens, lane_embedding_pos], dim=1) 
         key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding], dim=-1) 
+
+        key_padding_mask_local = torch.cat([agent_key_padding_local, polygon_key_padding_local], dim=-1)
 
         x = x_orig 
         for blk in self.SpaNet:
@@ -1236,8 +1244,8 @@ class PlanningModel(TorchModuleWrapper):
         # q = (self.attraction_point_projector(attraction_point)+self.lane_emb_cr_mlp(intention_lane_seg)).unsqueeze(1)
         x_wpnet = torch.cat([self.lane_emb_wp_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
                                 x_orig[:, 1:]], dim=1)
-        key_padding_mask_wp = torch.cat([torch.zeros((bs, 1), dtype=torch.bool, device=key_padding_mask.device),
-                                                key_padding_mask[:, 1:]], dim=1)
+        key_padding_mask_wp = torch.cat([torch.zeros((bs, 1), dtype=torch.bool, device=key_padding_mask_local.device),
+                                                key_padding_mask_local[:, 1:]], dim=1)
         
         for blk in self.WpNet:
             x_wpnet = blk(x_wpnet, key_padding_mask=key_padding_mask_wp)
@@ -1454,8 +1462,25 @@ class PlanningModel(TorchModuleWrapper):
         res = [ego_vel_token, agent_embedding_emb, lane_embedding_pos, agent_key_padding, polygon_key_padding, route_kp_mask]
         return res
 
+    def embed_and_get_local_mask(self, data, embed_future=False):
+        
+        polygon_pos, polygon_ori, polypon_prop, polygon_mask, polygon_key_padding, route_kp_mask = self.extract_map_feature(data, need_route_kpmask=True)
+    
+        # lane embedding
+        lane_embedding, lane_pos_emb = self.map_encoder(polygon_pos, polypon_prop, polygon_mask)
+        lane_embedding_pos = lane_embedding + lane_pos_emb
+
+        agent_embedding_emb, agent_key_padding, ego_vel_token = self.embed_agent(data, embed_future)
+        # key padding masks
+        # key_padding_mask = torch.cat([torch.zeros(ego_vel_token.shape[0:2], device=agent_key_padding.device, dtype=torch.bool), agent_key_padding, polygon_key_padding], dim=-1)
+
+        agent_key_padding_local, polygon_key_padding_local = self.get_local_mask(data)
+
+        res = [ego_vel_token, agent_embedding_emb, lane_embedding_pos, agent_key_padding, polygon_key_padding, agent_key_padding_local, polygon_key_padding_local, route_kp_mask]
+        return res
+
     def embed_progressive(self, data):
-        res = self.embed(data)
+        res = self.embed_and_get_local_mask(data)
         polygon_pos, polygon_ori, polypon_prop, polygon_mask, polygon_key_padding= self.extract_map_feature(data)
 
         attraction_point, horizon_point, waypoints_gt = self.extract_agent_critical_points(data)
@@ -1641,7 +1666,59 @@ class PlanningModel(TorchModuleWrapper):
         valid_vehicle_padding_mask[:, 0] = True # the ego agent is always invalid
         return agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask
 
+    def get_local_mask(self, data):
+        """
+            Extract the features of the map and the agents, and then embed them into the latent space. 
+            For the purpose of pretrain using VICReg loss, we do local map element colloection for each of the k nearest neighboring agents in each scenario. 
+            Then, an average pooling is applied for each set of lane segments. 
 
+            inputs:
+                data: dict
+
+            returns: 
+                agent_local_map_tokens: tensor [B, A, D]
+
+        """
+        
+        polygon_pos, polygon_ori, polypon_prop, polygon_mask, polygon_key_padding, route_kp_mask = self.extract_map_feature(data, need_route_kpmask=True)
+
+        # agent embedding (not dropping frames out )
+        agent_features, agent_category, frame_valid_mask, agent_key_padding, ego_state = self.extract_agent_feature(data, extract_future=False)
+
+        polygon_pos_clone = polygon_pos.clone()
+        polygon_pos_clone[~polygon_mask] = torch.inf
+        polygon_local_mask = polygon_pos_clone.norm(dim=-1).min(-1).values < self.wp_net_radius
+        polygon_padding_mask_local = ~(polygon_local_mask &(~polygon_key_padding))
+
+        agent_pos_clone = agent_features[..., :2].clone()
+        agent_pos_clone[~frame_valid_mask] = torch.inf
+        agent_local_mask = agent_pos_clone.norm(dim=-1).min(-1).values < self.wp_net_radius
+        agent_padding_mask_local = ~(agent_local_mask & (~agent_key_padding))
+
+        def plot_local(i,s=0.5):
+
+            plt.clf()
+            fig = plt.figure()
+            ax = fig.add_subplot(111)
+            
+            local_map_point = polygon_pos[i][polygon_local_mask[i]].view(-1, 2)
+            local_map_bk_i = local_map_point.cpu().numpy()
+
+            traj_tensor = agent_features[i][agent_local_mask[i]][frame_valid_mask[i][agent_local_mask[i]]][..., :2].view(-1, 2)
+            traj = traj_tensor.cpu().numpy()
+            
+            ax.scatter(local_map_bk_i[..., 0], local_map_bk_i[..., 1], c='black', s=s)
+            ax.scatter(traj[..., 0], traj[..., 1], c='blue', s=s)
+            ax.axis('equal')
+            plt.savefig("/home/jiale/planTF/debug_files/wp_input_vis_"+str(i)+".png")
+
+        # plot_local(0)
+
+        return agent_padding_mask_local, polygon_padding_mask_local
+
+        
+
+        
 
     def mask_and_embed(self, data, seeds): # 
         """
