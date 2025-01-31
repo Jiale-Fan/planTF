@@ -388,8 +388,8 @@ class PlanningModel(TorchModuleWrapper):
                 return self.forward_inference(data)
                 # return self.forward_antagonistic_mask_finetune(data, current_epoch)
             else:
-                if self.training and current_epoch <= 5:
-                    return self.forward_CME_pretrain(data)
+                # if self.training and current_epoch <= 5:
+                #     return self.forward_CME_pretrain(data)
                 if self.training and current_epoch <= 25:
                     # if self.alma_freezed == False:
                     #     self.freeze_ALMA_and_representation()
@@ -1043,7 +1043,10 @@ class PlanningModel(TorchModuleWrapper):
 
         assert trajectory.isnan().any() == False
 
+        alma_loss = self.forward_CME_pretrain(data)["loss"]
+
         out = {
+            "alma_loss" : alma_loss,
             "trajectory": trajectory,
             "probability": probability,
             "prediction": abs_prediction,
@@ -1164,7 +1167,10 @@ class PlanningModel(TorchModuleWrapper):
 
         probability[:, 0] = 1.0
 
+        alma_loss = self.forward_CME_pretrain(data)["loss"]
+
         out = {
+            "alma_loss" : alma_loss,
             "trajectory": trajectory,
             "probability": probability,
             "prediction": abs_prediction,
@@ -1277,7 +1283,9 @@ class PlanningModel(TorchModuleWrapper):
         trajectory = torch.cat([waypoints, far_future_traj], dim=1).unsqueeze(1) # B 1 T 4
         probability = torch.ones(bs, 1, device=trajectory.device) # B 1 
 
+        alma_loss = self.forward_CME_pretrain(data)["loss"]
         out = {
+            "alma_loss" : alma_loss, 
             "trajectory": trajectory,
             "probability": probability,
             "prediction": abs_prediction,
