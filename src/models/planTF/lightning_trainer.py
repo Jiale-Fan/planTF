@@ -385,7 +385,10 @@ class LightningTrainer(pl.LightningModule):
             loss = loss_mat.mean()
 
         ret_dict_mean = {key: value.mean() for key, value in ret_dict_batch.items()}
-        ret_dict_mean["loss"] = loss + res["alma_loss"]
+        if "alma_loss" in res:
+            ret_dict_mean["loss"] = loss + res["alma_loss"]
+        else:
+            ret_dict_mean["loss"] = loss
         ret_dict_mean.update(lane_intention_dict)
 
         return ret_dict_mean
