@@ -150,7 +150,15 @@ class PlanningModel(TorchModuleWrapper):
         self.pe = PositionalEncoding(dim, dropout=0.1, max_len=1000)
         self.pos_emb = build_mlp(4, [dim] * 2)
 
-        self.tempo_net = TempoNet(
+        self.tempo_net_hist = TempoNet(
+            state_channel=state_channel,
+            depth=3,
+            num_head=8,
+            dim_head=dim,
+            now_timestep=history_steps-2, # -1 for the difference vector, -1 for the zero-based index
+        )
+
+        self.tempo_net_future = TempoNet(
             state_channel=state_channel,
             depth=3,
             num_head=8,
@@ -291,6 +299,7 @@ class PlanningModel(TorchModuleWrapper):
         self.lane_emb_wp_8s_mlp = build_mlp(dim, [dim * 2 , dim], norm="ln")
         self.lane_emb_ff_8s_mlp = build_mlp(dim, [dim * 2 , dim], norm="ln")
         self.waypoints_embedder = build_mlp(self.waypoints_number * 4, [dim*2, dim], norm=None)
+        self.alma_pos_emb = build_mlp(2, [dim, dim])
 
         self.lane_intention_2s_predictor = Projector(to_dim=1, in_channels=dim)
         self.lane_intention_8s_predictor = Projector(to_dim=1, in_channels=dim)
@@ -331,10 +340,10 @@ class PlanningModel(TorchModuleWrapper):
         # targeted_list = [self.pos_emb, self.tempo_net, self.agent_seed, self.agent_projector, 
         #         self.map_projector, self.lane_pred, self.agent_frame_pred, self.blocks, self.norm]
         # module_list = [[name, module] for name, module in self.named_modules() if module in targeted_list]
-        return [self.pos_emb, self.tempo_net, self.TempoNet_frame_seed, self.agent_projector, self.MRM_seed,
+        return [self.pos_emb, self.tempo_net_hist, self.TempoNet_frame_seed, self.agent_projector, self.MRM_seed,
                 self.map_encoder, self.lane_pred, self.agent_frame_predictor,  self.agent_tail_predictor, 
                 # JointMotion CME 
-                self.cme_motion_mlp, self.cme_env_mlp, self.local_map_tf, self.bilinear_W]
+                self.cme_motion_mlp, self.cme_env_mlp, self.local_map_tf, self.bilinear_W, self.tempo_net_future, self.alma_pos_emb]
 
     def get_finetune_modules(self):
         return [self.ego_seed, self.waypoint_decoder, self.far_future_traj_decoder, self.FFNet, self.goal_mlp,
@@ -415,7 +424,7 @@ class PlanningModel(TorchModuleWrapper):
                 #     raise NotImplementedError(f"Stage {stage} is not implemented.")
 
     def freeze_ALMA_and_representation(self):
-        for module in [self.local_map_tf, self.agent_projector, self.tempo_net, self.map_encoder]:
+        for module in [self.local_map_tf, self.agent_projector, self.tempo_net_hist, self.map_encoder]:
             for p in module.parameters():
                 p.requires_grad = False
 
@@ -592,7 +601,7 @@ class PlanningModel(TorchModuleWrapper):
         return ret
         
 
-    def lane_random_masking(self, lane_embedding, future_mask_ratio, key_padding_mask):
+    # def lane_random_masking(self, lane_embedding, future_mask_ratio, key_padding_mask):
         '''
         x: (B, N, D). In the dimension D, the first two elements indicate the start point of the lane segment
         future_mask_ratio: float
@@ -657,7 +666,7 @@ class PlanningModel(TorchModuleWrapper):
 
         return masked_x, pred_mask
 
-    def forward_pretrain_separate(self, data):
+    # def forward_pretrain_separate(self, data):
 
         ## 1. MRM
         polygon_pos, polypon_prop, polygon_mask, polygon_key_padding = self.extract_map_feature(data)
@@ -701,7 +710,7 @@ class PlanningModel(TorchModuleWrapper):
         agent_masked_tokens_pos_embeded = self.pe(agent_masked_tokens_)
         agent_tempo_key_padding = rearrange(~frame_valid_mask, 'b a t -> (b a) t') 
         # y, _ = self.tempo_net(agent_masked_tokens_pos_embeded, agent_tempo_key_padding) 
-        y, _ = self.tempo_net(agent_masked_tokens_pos_embeded)
+        y, _ = self.tempo_net_hist(agent_masked_tokens_pos_embeded)
 
         y[y.isnan()] = 0.0
 
@@ -718,7 +727,7 @@ class PlanningModel(TorchModuleWrapper):
         agent_embedding_tp = rearrange(agent_embedding[:,:,:self.history_steps].clone(), 'b a t d -> (b a) t d')
         agent_tempo_key_padding_tp = agent_tempo_key_padding[:,:self.history_steps].clone()
         # agent_embedding_tp, agent_pos_emb = self.tempo_net(agent_embedding_tp, agent_tempo_key_padding_tp) # if key_padding_mask should be used here? this causes nan values in loss and needs investigation
-        agent_embedding_tp, agent_pos_emb = self.tempo_net(agent_embedding_tp)
+        agent_embedding_tp, agent_pos_emb = self.tempo_net_hist(agent_embedding_tp)
         
         agent_embedding_tp = rearrange(agent_embedding_tp, '(b a) t c -> b a t c', b=bs, a=A)
         agent_embedding_tp = reduce(agent_embedding_tp, 'b a t c -> b a c', 'max')
@@ -804,70 +813,72 @@ class PlanningModel(TorchModuleWrapper):
     #     assert ((~masks).sum(0) == ~key_padding_mask).all()
         
     #     return masks
-    def generate_antagonistic_masks(self, key_padding_mask, random_ratio, score=None):
-        '''
-        This function generates 2 antagonistic masks. 
-        All the masks belong to one set should sum up to the key_padding_mask corresponding to that scene. 
-        Each of the mask in one set contains roughly the same number of preserved values.
 
-        key_padding_mask: (B, N, M)
-        '''
+    
+    # def generate_antagonistic_masks(self, key_padding_mask, random_ratio, score=None):
+    #     '''
+    #     This function generates 2 antagonistic masks. 
+    #     All the masks belong to one set should sum up to the key_padding_mask corresponding to that scene. 
+    #     Each of the mask in one set contains roughly the same number of preserved values.
 
-        # if random_ratio == 1.0:
-        #     rand_score = torch.rand(key_padding_mask.shape, device=key_padding_mask.device) # range: [0, 1)
-        #     rand_score[key_padding_mask] = -2 # later when sorting, the masked values will be put at the end
-        # else:
-        #     assert score.shape == key_padding_mask.shape
-        #     score[key_padding_mask] = -2 # score's range is (-1, 1). later when sorting, the masked values will be put at the end
+    #     key_padding_mask: (B, N, M)
+    #     '''
 
-        # firstly, generate a mask with random_ratio preserved values randomly
+    #     # if random_ratio == 1.0:
+    #     #     rand_score = torch.rand(key_padding_mask.shape, device=key_padding_mask.device) # range: [0, 1)
+    #     #     rand_score[key_padding_mask] = -2 # later when sorting, the masked values will be put at the end
+    #     # else:
+    #     #     assert score.shape == key_padding_mask.shape
+    #     #     score[key_padding_mask] = -2 # score's range is (-1, 1). later when sorting, the masked values will be put at the end
 
-        rand_score = torch.rand(key_padding_mask.shape, device=key_padding_mask.device) # range: [0, 1)
-        rand_score[key_padding_mask] = -2 # later when sorting, the masked values will be put at the end
+    #     # firstly, generate a mask with random_ratio preserved values randomly
 
-        valid_num = (~key_padding_mask).sum(-1)
-        random_elem_num = torch.floor(valid_num * random_ratio * 0.5).to(torch.int)
-        score_based_elem_num = torch.floor(valid_num * 0.5).to(torch.int) - random_elem_num
+    #     rand_score = torch.rand(key_padding_mask.shape, device=key_padding_mask.device) # range: [0, 1)
+    #     rand_score[key_padding_mask] = -2 # later when sorting, the masked values will be put at the end
+
+    #     valid_num = (~key_padding_mask).sum(-1)
+    #     random_elem_num = torch.floor(valid_num * random_ratio * 0.5).to(torch.int)
+    #     score_based_elem_num = torch.floor(valid_num * 0.5).to(torch.int) - random_elem_num
         
-        randidx = torch.argsort(rand_score, dim=-1, descending=True) # from high score to low score
+    #     randidx = torch.argsort(rand_score, dim=-1, descending=True) # from high score to low score
 
-        random_mask = torch.ones((key_padding_mask.shape[0], key_padding_mask.shape[1]), device=key_padding_mask.device, dtype=torch.bool)
+    #     random_mask = torch.ones((key_padding_mask.shape[0], key_padding_mask.shape[1]), device=key_padding_mask.device, dtype=torch.bool)
 
-        for i in range(key_padding_mask.shape[0]):
-            random_mask[i, randidx[i, :random_elem_num[i]]] = False
+    #     for i in range(key_padding_mask.shape[0]):
+    #         random_mask[i, randidx[i, :random_elem_num[i]]] = False
 
-        remaining_valid_padding_mask = ~((~key_padding_mask) & random_mask)
-        score[remaining_valid_padding_mask] = -2 # score's range is (-1, 1). later when sorting, the masked values will be put at the end
-        score_ranked_idx = torch.argsort(score, dim=-1, descending=True) # from high score to low score
+    #     remaining_valid_padding_mask = ~((~key_padding_mask) & random_mask)
+    #     score[remaining_valid_padding_mask] = -2 # score's range is (-1, 1). later when sorting, the masked values will be put at the end
+    #     score_ranked_idx = torch.argsort(score, dim=-1, descending=True) # from high score to low score
 
-        score_mask = torch.ones((key_padding_mask.shape[0], key_padding_mask.shape[1]), device=key_padding_mask.device, dtype=torch.bool)
-        for i in range(key_padding_mask.shape[0]):
-            score_mask[i, score_ranked_idx[i, :score_based_elem_num[i]]] = False
+    #     score_mask = torch.ones((key_padding_mask.shape[0], key_padding_mask.shape[1]), device=key_padding_mask.device, dtype=torch.bool)
+    #     for i in range(key_padding_mask.shape[0]):
+    #         score_mask[i, score_ranked_idx[i, :score_based_elem_num[i]]] = False
 
-        mask_0 = random_mask & score_mask
-        mask_1 = ~((~key_padding_mask) & mask_0)
+    #     mask_0 = random_mask & score_mask
+    #     mask_1 = ~((~key_padding_mask) & mask_0)
 
-        mask_pair = torch.stack([mask_0, mask_1], dim=1)
+    #     mask_pair = torch.stack([mask_0, mask_1], dim=1)
             
-        # masks[:,:,0] = False # keep the ego query always
-        assert ((~mask_pair).sum(1) == ~key_padding_mask).all() # all sum up to 1
+    #     # masks[:,:,0] = False # keep the ego query always
+    #     assert ((~mask_pair).sum(1) == ~key_padding_mask).all() # all sum up to 1
 
-        # the following part will cause CUDA assert error and is not necessary in principle
-        # if not (~masks).sum(-1).all():
-        #     print('There exists a mask that does not contain any preserved value')
-        #     problem_pos = torch.nonzero((~masks).sum(-1)==0)
-        #     for i in problem_pos.shape[0]:
-        #         masks[problem_pos[i]] = key_padding_mask_sliced[problem_pos[i,-1]] # keep the original key_padding_mask
-        #     print('Successfully dealt')
+    #     # the following part will cause CUDA assert error and is not necessary in principle
+    #     # if not (~masks).sum(-1).all():
+    #     #     print('There exists a mask that does not contain any preserved value')
+    #     #     problem_pos = torch.nonzero((~masks).sum(-1)==0)
+    #     #     for i in problem_pos.shape[0]:
+    #     #         masks[problem_pos[i]] = key_padding_mask_sliced[problem_pos[i,-1]] # keep the original key_padding_mask
+    #     #     print('Successfully dealt')
         
-        return mask_pair
+    #     return mask_pair
 
     def forward_CME_pretrain(self, data):
         bs, A = data["agent"]["heading"].shape[0:2]
         # x_orig, key_padding_mask = self.embed(data, torch.cat((self.plan_seed, self.rep_seed)))
-        ego_vel_token, agent_embedding_emb, lane_embedding_pos, agent_key_padding, polygon_key_padding, route_kp_mask = \
+        ego_vel_token, agent_embedding_emb, lane_embedding, lane_pos_emb, agent_key_padding, polygon_key_padding, route_kp_mask = \
             self.embed(data, embed_future=False)
-        agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask = self.local_map_collection_embed(data, agent_embedding_emb, lane_embedding_pos) # [B, A, D]
+        agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask = self.local_map_collection_embed(data, agent_embedding_emb, lane_embedding) # [B, A, D]
 
         agent_embedding_emb_fut, agent_pretrain_valid_mask = self.pretrain_embed_agent(data)
         pretrain_valid_mask = agent_pretrain_valid_mask & (~valid_vehicle_padding_mask)
@@ -913,9 +924,11 @@ class PlanningModel(TorchModuleWrapper):
 
         bs, A = data["agent"]["heading"].shape[0:2]
 
-        ego_vel_token, agent_embedding_emb, lane_embedding_pos, agent_key_padding, polygon_key_padding, route_kp_mask = \
+        ego_vel_token, agent_embedding_emb, lane_embedding, lane_pos_emb, agent_key_padding, polygon_key_padding, route_kp_mask = \
             self.embed(data, embed_future=False)
         agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask = self.local_map_collection_embed(data, agent_embedding_emb, lane_embedding_pos) # [B, A, D]
+
+        lane_embedding_pos = lane_embedding + lane_pos_emb
 
         x = torch.cat([ego_vel_token, agent_embedding_emb[:, 1:],
                         agent_local_map_tokens, lane_embedding_pos], dim=1) 
@@ -958,7 +971,7 @@ class PlanningModel(TorchModuleWrapper):
         agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask = self.local_map_collection_embed(data, agent_embedding_emb, lane_embedding_pos) # [B, A, D]
 
         agent_tokens = torch.cat([ego_vel_token, agent_embedding_emb[:, 1:],], dim=1) # + agent_local_map_tokens*(~valid_vehicle_padding_mask[..., None])
-        agent_tokens_alma = agent_embedding_emb + agent_local_map_tokens*(~valid_vehicle_padding_mask[..., None])
+        agent_tokens_alma = agent_tokens + agent_local_map_tokens*(~valid_vehicle_padding_mask[..., None]) # 3101: ego alma and ego history are both absent here!
         x_orig = torch.cat([agent_tokens, lane_embedding_pos], dim=1) 
         x_orig_alma = torch.cat([agent_tokens_alma, lane_embedding_pos], dim=1)
         key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding], dim=-1) 
@@ -1008,7 +1021,7 @@ class PlanningModel(TorchModuleWrapper):
         # q = (self.attraction_point_projector(attraction_point)+self.lane_emb_cr_mlp(intention_lane_seg)).unsqueeze(1)
         x_wpnet = torch.cat([self.lane_emb_wp_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
                             #  self.lane_emb_wp_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
-                              x_orig[:,1:]], dim=1)
+                              x_orig_alma[:,1:]], dim=1)
         
         key_padding_mask_wp = torch.cat([torch.zeros((bs, 1), dtype=torch.bool, device=key_padding_mask_local.device),
                                           key_padding_mask_local[:,1:]], dim=1)
@@ -1084,7 +1097,7 @@ class PlanningModel(TorchModuleWrapper):
         agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask = self.local_map_collection_embed(data, agent_embedding_emb, lane_embedding_pos) # [B, A, D]
 
         agent_tokens = torch.cat([ego_vel_token, agent_embedding_emb[:, 1:],], dim=1) # + agent_local_map_tokens*(~valid_vehicle_padding_mask[..., None])
-        agent_tokens_alma = agent_embedding_emb + agent_local_map_tokens*(~valid_vehicle_padding_mask[..., None])
+        agent_tokens_alma = agent_tokens + agent_local_map_tokens*(~valid_vehicle_padding_mask[..., None])
         x_orig = torch.cat([agent_tokens, lane_embedding_pos], dim=1) 
         x_orig_alma = torch.cat([agent_tokens_alma, lane_embedding_pos], dim=1)
         key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding], dim=-1) 
@@ -1122,7 +1135,7 @@ class PlanningModel(TorchModuleWrapper):
                 intention_lane_seg_8s = x_orig[:, A:][torch.arange(bs), lane_intention_topk_8s[:, k]]
 
                 x_wpnet = torch.cat([self.lane_emb_wp_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
-                                x_orig[:, 1:]], dim=1)
+                                x_orig_alma[:, 1:]], dim=1)
                 key_padding_mask_wp = torch.cat([torch.zeros((bs, 1), dtype=torch.bool, device=key_padding_mask_local.device),
                                                 key_padding_mask_local[:, 1:]], dim=1)
                 
@@ -1218,7 +1231,7 @@ class PlanningModel(TorchModuleWrapper):
         agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask = self.local_map_collection_embed(data, agent_embedding_emb, lane_embedding_pos) # [B, A, D]
 
         agent_tokens = torch.cat([ego_vel_token, agent_embedding_emb[:, 1:],], dim=1) # + agent_local_map_tokens*(~valid_vehicle_padding_mask[..., None])
-        agent_tokens_alma = agent_embedding_emb + agent_local_map_tokens*(~valid_vehicle_padding_mask[..., None])
+        agent_tokens_alma = agent_tokens + agent_local_map_tokens*(~valid_vehicle_padding_mask[..., None])
         x_orig = torch.cat([agent_tokens, lane_embedding_pos], dim=1) 
         x_orig_alma = torch.cat([agent_tokens_alma, lane_embedding_pos], dim=1)
         key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding], dim=-1) 
@@ -1255,7 +1268,7 @@ class PlanningModel(TorchModuleWrapper):
         # attraction_point = attraction_point_gt
         # q = (self.attraction_point_projector(attraction_point)+self.lane_emb_cr_mlp(intention_lane_seg)).unsqueeze(1)
         x_wpnet = torch.cat([self.lane_emb_wp_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
-                                x_orig[:, 1:]], dim=1)
+                                x_orig_alma[:, 1:]], dim=1)
         key_padding_mask_wp = torch.cat([torch.zeros((bs, 1), dtype=torch.bool, device=key_padding_mask_local.device),
                                                 key_padding_mask_local[:, 1:]], dim=1)
         
@@ -1322,7 +1335,7 @@ class PlanningModel(TorchModuleWrapper):
         return out
 
 
-    def forward_antagonistic_mask_finetune(self, data, current_epoch=None):
+    # def forward_antagonistic_mask_finetune(self, data, current_epoch=None):
 
         if current_epoch is None: 
             random_ratio = 0.0
@@ -1425,7 +1438,10 @@ class PlanningModel(TorchModuleWrapper):
         
         agent_embedding_ft = self.pe(agent_embedding_ft)
         # agent_embedding_ft, agent_pos_emb = self.tempo_net(agent_embedding_ft, agent_tempo_key_padding) # if key_padding_mask should be used here? this causes nan values in loss and needs investigation
-        agent_embedding_emb, agent_pos_emb = self.tempo_net(agent_embedding_ft)
+        if not embed_future:
+            agent_embedding_emb, agent_pos_emb = self.tempo_net_hist(agent_embedding_ft)
+        else:
+            agent_embedding_emb, agent_pos_emb = self.tempo_net_future(agent_embedding_ft)
 
         agent_embedding_emb = rearrange(agent_embedding_emb, '(b a) t c -> b a t c', b=bs, a=A)
         agent_embedding_emb = reduce(agent_embedding_emb, 'b a t c -> b a c', 'max')
@@ -1467,13 +1483,13 @@ class PlanningModel(TorchModuleWrapper):
     
         # lane embedding
         lane_embedding, lane_pos_emb = self.map_encoder(polygon_pos, polypon_prop, polygon_mask)
-        lane_embedding_pos = lane_embedding + lane_pos_emb
+        # lane_embedding_pos = lane_embedding + lane_pos_emb
 
         agent_embedding_emb, agent_key_padding, ego_vel_token = self.embed_agent(data, embed_future)
         # key padding masks
         # key_padding_mask = torch.cat([torch.zeros(ego_vel_token.shape[0:2], device=agent_key_padding.device, dtype=torch.bool), agent_key_padding, polygon_key_padding], dim=-1)
 
-        res = [ego_vel_token, agent_embedding_emb, lane_embedding_pos, agent_key_padding, polygon_key_padding, route_kp_mask]
+        res = [ego_vel_token, agent_embedding_emb, lane_embedding, lane_pos_emb, agent_key_padding, polygon_key_padding, route_kp_mask]
         return res
 
     def embed_and_get_local_mask(self, data, embed_future=False):
@@ -1556,7 +1572,7 @@ class PlanningModel(TorchModuleWrapper):
         
         agent_embedding_ft = self.pe(agent_embedding_ft)
         # agent_embedding_ft, agent_pos_emb = self.tempo_net(agent_embedding_ft, agent_tempo_key_padding) # if key_padding_mask should be used here? this causes nan values in loss and needs investigation
-        agent_embedding_emb, agent_pos_emb = self.tempo_net(agent_embedding_ft)
+        agent_embedding_emb, agent_pos_emb = self.tempo_net_hist(agent_embedding_ft)
 
         agent_embedding_emb = rearrange(agent_embedding_emb, '(b a) t c -> b a t c', b=bs, a=A)
         agent_embedding_emb = reduce(agent_embedding_emb, 'b a t c -> b a c', 'max')
@@ -1630,9 +1646,11 @@ class PlanningModel(TorchModuleWrapper):
         needs_subs_mask = (~(map_element_inclusion_mask.view(B,A,-1).any(-1))) & valid_vehicle_mask
         valid_vehicle_with_local_mask_flatten = (valid_local_mask & valid_vehicle_mask).flatten() # [B*A,]
 
+        map_elem_rel_pos = local_map_set[:, :, 0, :] - valid_agent_traj[:, None, -1, :] # [B*A, M, 2]
+        map_elem_rel_pos_emb = self.alma_pos_emb(map_elem_rel_pos) # [B*A, M, D]
 
         D = self.dim
-        lane_embedding_expanded = lane_embedding_pos.unsqueeze(1).repeat(1,A,1,1).view(B*A, M, self.dim) # [B*A, M, D]
+        lane_embedding_expanded = lane_embedding_pos.unsqueeze(1).repeat(1,A,1,1).view(B*A, M, self.dim) + map_elem_rel_pos_emb # [B*A, M, D]
         # lane_embedding_pooled = batch_average_pooling(lane_embedding_expanded, map_element_inclusion_mask) # [B_k, D]
 
         _x_orig = agent_embedding_emb.reshape(B*A, 1, D)
@@ -1734,7 +1752,7 @@ class PlanningModel(TorchModuleWrapper):
 
         
 
-    def mask_and_embed(self, data, seeds): # 
+    # def mask_and_embed(self, data, seeds): # 
         """
             IMPORTANT: unmaintained, unusable now
             data: dict
@@ -1769,7 +1787,7 @@ class PlanningModel(TorchModuleWrapper):
         agent_masked_tokens_pos_embeded = self.pe(agent_masked_tokens_)
         # agent_tempo_key_padding = rearrange(~agent_mask, 'b a t -> (b a) t')
 
-        x_agent = self.tempo_net(agent_masked_tokens_pos_embeded)
+        x_agent = self.tempo_net_hist(agent_masked_tokens_pos_embeded)
         x_agent_ = rearrange(x_agent, '(b a) t c -> b a t c', b=b, a=a)
         x_agent_ = reduce(x_agent_, 'b a t c -> b a c', 'max')
 
@@ -1782,7 +1800,7 @@ class PlanningModel(TorchModuleWrapper):
 
         return x, key_padding_mask
 
-    def forward_pretrain_representation(self, data):
+    # def forward_pretrain_representation(self, data):
         data_distorted = self.distortor.augment(data)
         x_stu, x_stu_key_padding_mask = self.mask_and_embed(data_distorted, self.rep_seed)
 
