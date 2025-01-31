@@ -1296,9 +1296,8 @@ class PlanningModel(TorchModuleWrapper):
         trajectory = torch.cat([waypoints, far_future_traj], dim=1).unsqueeze(1) # B 1 T 4
         probability = torch.ones(bs, 1, device=trajectory.device) # B 1 
 
-        alma_loss = self.forward_CME_pretrain(data)["loss"]
         out = {
-            "alma_loss" : alma_loss, 
+            # "alma_loss" : alma_loss, # can not include alma_loss during inference since no future is available
             "trajectory": trajectory,
             "probability": probability,
             "prediction": abs_prediction,
