@@ -150,11 +150,11 @@ export CUDA_VISIBLE_DEVICES=0,2
 python run_training.py \
   py_func=train +training=train_planTF \
   worker=single_machine_thread_pool worker.max_workers=24 \
-  scenario_builder=nuplan cache.cache_path=/home/jiale/Documents/exp/cache_new  cache.use_cache_without_dataset=true \
+  scenario_builder=nuplan cache.cache_path=/media/jiale/Jiale_SSD1/cache_1M  cache.use_cache_without_dataset=true \
   data_loader.params.batch_size=64 data_loader.params.num_workers=24 \
   lr=1e-3 epochs=35 warmup_epochs=3 weight_decay=0.0001 \
   lightning.trainer.params.check_val_every_n_epoch=5 \
-  wandb.mode=online wandb.project=nuplan wandb.name=1301_4.2_n \
+  wandb.mode=online wandb.project=nuplan wandb.name=3101_1.0_1M \
   seed=10
   '''  
 
