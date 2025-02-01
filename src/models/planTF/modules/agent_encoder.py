@@ -32,14 +32,15 @@ class TempoNet(nn.Module):
         self.pos_emb = build_mlp(4, [dim_head] * 2)
 
 
-    def forward(self, x_orig, key_padding_mask=None):
+    def forward(self, x_orig, pos_now, key_padding_mask=None):
         # x = self.projector(x)
         x = x_orig.clone()
         for block in self.blocks:
             x = block(x, key_padding_mask=key_padding_mask)
         x = self.norm(x)
 
-        pos_emb = self.pos_emb(x_orig[:, self.now_timestep, :4])
+        # pos_now : [bs, 4]
+        pos_emb = self.pos_emb(pos_now)
 
         return x, pos_emb
 
