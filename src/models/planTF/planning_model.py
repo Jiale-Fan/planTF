@@ -969,12 +969,12 @@ class PlanningModel(TorchModuleWrapper):
         # get feature embeddings
         ego_vel_token, agent_embedding_emb, lane_embedding_pos, agent_key_padding, polygon_key_padding, agent_key_padding_local, polygon_key_padding_local, route_kp_mask, lane_intention_2s_gt, lane_intention_8s_gt, waypoints_gt = self.embed_progressive(data)
         
-        agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask = self.local_map_collection_embed(data, agent_embedding_emb, lane_embedding_pos) # [B, A, D]
+        # agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask = self.local_map_collection_embed(data, agent_embedding_emb, lane_embedding_pos) # [B, A, D]
 
         agent_tokens = torch.cat([ego_vel_token, agent_embedding_emb[:, 1:],], dim=1) # + agent_local_map_tokens*(~valid_vehicle_padding_mask[..., None])
-        agent_tokens_alma = agent_tokens + agent_local_map_tokens*(~valid_vehicle_padding_mask[..., None]) # 3101: ego alma and ego history are both absent here!
+        # agent_tokens_alma = agent_tokens + agent_local_map_tokens*(~valid_vehicle_padding_mask[..., None]) # 3101: ego alma and ego history are both absent here!
         x_orig = torch.cat([agent_tokens, lane_embedding_pos], dim=1) 
-        x_orig_alma = torch.cat([agent_tokens_alma, lane_embedding_pos], dim=1)
+        # x_orig_alma = torch.cat([agent_tokens_alma, lane_embedding_pos], dim=1)
         key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding], dim=-1) 
         
         # key_padding_mask_local = torch.cat([agent_key_padding_local, polygon_key_padding_local], dim=-1)
@@ -1022,7 +1022,7 @@ class PlanningModel(TorchModuleWrapper):
         # q = (self.attraction_point_projector(attraction_point)+self.lane_emb_cr_mlp(intention_lane_seg)).unsqueeze(1)
         x_wpnet = torch.cat([self.lane_emb_wp_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
                             #  self.lane_emb_wp_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
-                              x_orig_alma[:,1:]], dim=1)
+                              x_orig[:,1:]], dim=1)
         
         key_padding_mask_wp = torch.cat([torch.zeros((bs, 1), dtype=torch.bool, device=key_padding_mask.device),
                                           key_padding_mask[:,1:]], dim=1)
@@ -1037,7 +1037,7 @@ class PlanningModel(TorchModuleWrapper):
             # self.lane_emb_ff_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
                             self.lane_emb_ff_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
                             self.waypoints_embedder(waypoints_gt.view(bs, -1)).unsqueeze(1),
-                            x_orig_alma], dim=1)
+                            x_orig], dim=1)
         
         key_padding_mask_ff = torch.cat([torch.zeros((bs, 2), dtype=torch.bool, device=key_padding_mask.device),
                                           key_padding_mask], dim=1)
@@ -1057,10 +1057,10 @@ class PlanningModel(TorchModuleWrapper):
 
         assert trajectory.isnan().any() == False
 
-        alma_loss = self.forward_CME_pretrain(data)["loss"]
+        # alma_loss = self.forward_CME_pretrain(data)["loss"]
 
         out = {
-            "alma_loss" : alma_loss,
+            # "alma_loss" : alma_loss,
             "trajectory": trajectory,
             "probability": probability,
             "prediction": abs_prediction,
@@ -1095,12 +1095,12 @@ class PlanningModel(TorchModuleWrapper):
 
         ego_vel_token, agent_embedding_emb, lane_embedding_pos, agent_key_padding, polygon_key_padding, agent_key_padding_local, polygon_key_padding_local, route_kp_mask = \
             self.embed_and_get_local_mask(data, embed_future=False)
-        agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask = self.local_map_collection_embed(data, agent_embedding_emb, lane_embedding_pos) # [B, A, D]
+        # agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask = self.local_map_collection_embed(data, agent_embedding_emb, lane_embedding_pos) # [B, A, D]
 
         agent_tokens = torch.cat([ego_vel_token, agent_embedding_emb[:, 1:],], dim=1) # + agent_local_map_tokens*(~valid_vehicle_padding_mask[..., None])
-        agent_tokens_alma = agent_tokens + agent_local_map_tokens*(~valid_vehicle_padding_mask[..., None])
+        # agent_tokens_alma = agent_tokens + agent_local_map_tokens*(~valid_vehicle_padding_mask[..., None])
         x_orig = torch.cat([agent_tokens, lane_embedding_pos], dim=1) 
-        x_orig_alma = torch.cat([agent_tokens_alma, lane_embedding_pos], dim=1)
+        # x_orig_alma = torch.cat([agent_tokens_alma, lane_embedding_pos], dim=1)
         key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding], dim=-1) 
 
         # key_padding_mask_local = torch.cat([agent_key_padding_local, polygon_key_padding_local], dim=-1)
@@ -1136,7 +1136,7 @@ class PlanningModel(TorchModuleWrapper):
                 intention_lane_seg_8s = x_orig[:, A:][torch.arange(bs), lane_intention_topk_8s[:, k]]
 
                 x_wpnet = torch.cat([self.lane_emb_wp_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
-                                x_orig_alma[:, 1:]], dim=1)
+                                x_orig[:, 1:]], dim=1)
                 key_padding_mask_wp = torch.cat([torch.zeros((bs, 1), dtype=torch.bool, device=key_padding_mask.device),
                                                 key_padding_mask[:, 1:]], dim=1)
                 
@@ -1157,7 +1157,7 @@ class PlanningModel(TorchModuleWrapper):
                 # self.lane_emb_ff_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
                             self.lane_emb_ff_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
                             self.waypoints_embedder(waypoints.detach().clone().view(bs, -1)).unsqueeze(1),
-                            x_orig_alma], dim=1)
+                            x_orig], dim=1)
         
                 key_padding_mask_ff = torch.cat([torch.zeros((bs, 2), dtype=torch.bool, device=key_padding_mask.device),
                                                 key_padding_mask], dim=1)
@@ -1181,10 +1181,10 @@ class PlanningModel(TorchModuleWrapper):
 
         probability[:, 0] = 1.0
 
-        alma_loss = self.forward_CME_pretrain(data)["loss"]
+        # alma_loss = self.forward_CME_pretrain(data)["loss"]
 
         out = {
-            "alma_loss" : alma_loss,
+            # "alma_loss" : alma_loss,
             "trajectory": trajectory,
             "probability": probability,
             "prediction": abs_prediction,
@@ -1229,12 +1229,12 @@ class PlanningModel(TorchModuleWrapper):
 
         ego_vel_token, agent_embedding_emb, lane_embedding_pos, agent_key_padding, polygon_key_padding, agent_key_padding_local, polygon_key_padding_local, route_kp_mask = \
             self.embed_and_get_local_mask(data, embed_future=False)
-        agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask = self.local_map_collection_embed(data, agent_embedding_emb, lane_embedding_pos) # [B, A, D]
+        # agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask = self.local_map_collection_embed(data, agent_embedding_emb, lane_embedding_pos) # [B, A, D]
 
         agent_tokens = torch.cat([ego_vel_token, agent_embedding_emb[:, 1:],], dim=1) # + agent_local_map_tokens*(~valid_vehicle_padding_mask[..., None])
-        agent_tokens_alma = agent_tokens + agent_local_map_tokens*(~valid_vehicle_padding_mask[..., None])
+        # agent_tokens_alma = agent_tokens + agent_local_map_tokens*(~valid_vehicle_padding_mask[..., None])
         x_orig = torch.cat([agent_tokens, lane_embedding_pos], dim=1) 
-        x_orig_alma = torch.cat([agent_tokens_alma, lane_embedding_pos], dim=1)
+        # x_orig_alma = torch.cat([agent_tokens_alma, lane_embedding_pos], dim=1)
         key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding], dim=-1) 
 
         # key_padding_mask_local = torch.cat([agent_key_padding_local, polygon_key_padding_local], dim=-1)
@@ -1269,7 +1269,7 @@ class PlanningModel(TorchModuleWrapper):
         # attraction_point = attraction_point_gt
         # q = (self.attraction_point_projector(attraction_point)+self.lane_emb_cr_mlp(intention_lane_seg)).unsqueeze(1)
         x_wpnet = torch.cat([self.lane_emb_wp_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
-                                x_orig_alma[:, 1:]], dim=1)
+                                x_orig[:, 1:]], dim=1)
         key_padding_mask_wp = torch.cat([torch.zeros((bs, 1), dtype=torch.bool, device=key_padding_mask.device),
                                                 key_padding_mask[:, 1:]], dim=1)
         
@@ -1284,7 +1284,7 @@ class PlanningModel(TorchModuleWrapper):
                 # self.lane_emb_ff_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
                             self.lane_emb_ff_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
                             self.waypoints_embedder(waypoints.detach().clone().view(bs, -1)).unsqueeze(1),
-                            x_orig_alma], dim=1)
+                            x_orig], dim=1)
         
         key_padding_mask_ff = torch.cat([torch.zeros((bs, 2), dtype=torch.bool, device=key_padding_mask.device),
                                                 key_padding_mask], dim=1)
