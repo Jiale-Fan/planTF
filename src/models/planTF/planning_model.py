@@ -1700,7 +1700,7 @@ class PlanningModel(TorchModuleWrapper):
         assert agent_local_map_tokens.isnan().any() == False
         # valid_vehicle_padding_mask = valid_vehicle_with_local_mask_flatten.view(B, A)
         valid_vehicle_padding_mask = ~valid_vehicle_mask
-        valid_vehicle_padding_mask[:, 0] = False # the ego agent is always invalid
+        valid_vehicle_padding_mask[:, 0] = False # the ego agent is always valid
         return agent_local_map_tokens, valid_vehicle_padding_mask, valid_other_agents_padding_mask
 
     def get_local_mask(self, data):
