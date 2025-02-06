@@ -1267,7 +1267,7 @@ class PlanningModel(TorchModuleWrapper):
         return out
     
     
-    def embed(self, data, include_future=False, training=False):
+    def embed(self, data, training=False):
         """
             Extract the features of the map and the agents, and then embed them into the latent space. 
             Instead of using the embedding of ego history trajectory, we use ego velocity token. 
@@ -1314,7 +1314,7 @@ class PlanningModel(TorchModuleWrapper):
         
         agent_embedding_ft = self.pe(agent_embedding_ft)
         # agent_embedding_ft, agent_pos_emb = self.tempo_net(agent_embedding_ft, agent_tempo_key_padding) # if key_padding_mask should be used here? this causes nan values in loss and needs investigation
-        agent_embedding_emb, agent_pos_emb = self.tempo_net(agent_embedding_ft)
+        agent_embedding_emb, agent_pos_emb = self.tempo_net(agent_embedding_ft, agent_features[:, :, -1, :4].view(bs*A, 4))
 
         # 2. if yes, use following code
 
