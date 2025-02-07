@@ -154,8 +154,8 @@ class PlanningModel(TorchModuleWrapper):
         # self.multimodal_seed = nn.Parameter(torch.randn(num_modes, dim))
         self.ego_seed = nn.Parameter(torch.randn(dim))
 
-        self.seed_2s = nn.Parameter(torch.randn(1, dim)*0.3)
-        self.seed_8s = nn.Parameter(torch.randn(1, dim)*0.3)
+        self.seed_2s = nn.Parameter(torch.zeros(1, dim))
+        self.seed_8s = nn.Parameter(torch.zeros(1, dim))
 
         self.agent_projector = Projector(to_dim=dim, in_channels=11) # NOTE: make consistent to state_channel
         self.agent_type_emb = nn.Embedding(4, dim)
