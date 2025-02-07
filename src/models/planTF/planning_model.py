@@ -283,6 +283,8 @@ class PlanningModel(TorchModuleWrapper):
         self.cme_motion_mlp = build_mlp(dim, [2048, 256], norm="ln")
         self.cme_env_mlp = build_mlp(dim, [2048, 256], norm="ln")
 
+        self.bilinear_W = nn.Parameter(torch.randn(256, 256))
+
         self.apply(self._init_weights)
 
 
@@ -307,7 +309,7 @@ class PlanningModel(TorchModuleWrapper):
         return [self.pos_emb, self.tempo_net, self.TempoNet_frame_seed, self.agent_projector, self.MRM_seed,
                 self.map_encoder, self.lane_pred, self.agent_frame_predictor, self.SpaNet, self.norm_spa, self.agent_tail_predictor, 
                 # JointMotion CME 
-                self.cme_motion_mlp, self.cme_env_mlp, self.seed_2s, self.seed_8s]
+                self.cme_motion_mlp, self.cme_env_mlp, self.seed_2s, self.seed_8s, self.bilinear_W]
 
     def get_finetune_modules(self):
         return [self.ego_seed, self.waypoint_decoder, self.far_future_traj_decoder, self.FFNet, self.goal_mlp,
@@ -348,8 +350,8 @@ class PlanningModel(TorchModuleWrapper):
             return self.forward_inference(data)
             # return self.forward_antagonistic_mask_finetune(data, current_epoch)
         else:
-            # if self.training and current_epoch <= 10:
-            #     return self.forward_CME_pretrain(data)
+            if self.training and current_epoch <= 5:
+                return self.forward_CME_pretrain(data)
             if self.training and current_epoch <= 20:
                 return self.forward_teacher_enforcing(data)
             elif self.training and current_epoch > 20:
@@ -822,28 +824,41 @@ class PlanningModel(TorchModuleWrapper):
         bs, A = data["agent"]["heading"].shape[0:2]
         # x_orig, key_padding_mask = self.embed(data, torch.cat((self.plan_seed, self.rep_seed)))
         x_orig, key_padding_mask, route_key_padding_mask, lane_intention_2s_gt, lane_intention_8s_gt, waypoints_gt = self.embed(data, training=True)
-        x_agent = x_orig[:, :A]
+        x_agent = x_orig[:, 1:A]
         x_map = x_orig[:, A:]
-        h_agent = torch.mean(x_agent*(~key_padding_mask[:,:A,None]), dim=1)
-        h_map = torch.mean(x_map*(~key_padding_mask[:,A:,None]), dim=1)
+        h_agent = torch.max(x_agent*(~key_padding_mask[:,1:A,None]), dim=1)[0]
+        h_map = torch.max(x_map*(~key_padding_mask[:,A:,None]), dim=1)[0]
 
-        z_motion = self.cme_motion_mlp(h_agent)
-        z_env = self.cme_env_mlp(h_map)
+        z_motion = self.cme_motion_mlp(h_agent) # [B, d]
+        z_env = self.cme_env_mlp(h_map) # [B, d]
 
-        v_loss_motion = self.variance_loss(z_motion)
-        v_loss_env = self.variance_loss(z_env)
-        c_loss_motion = self.covariance_loss(z_motion)
-        c_loss_env = self.covariance_loss(z_env)
-        inv_loss = self.invariance_loss(z_motion, z_env)
+        # VICReg loss
 
-        v_loss = v_loss_motion + v_loss_env
-        c_loss = c_loss_motion + c_loss_env
+        # v_loss_motion = self.variance_loss(z_motion)
+        # v_loss_env = self.variance_loss(z_env)
+        # c_loss_motion = self.covariance_loss(z_motion)
+        # c_loss_env = self.covariance_loss(z_env)
+        # inv_loss = self.invariance_loss(z_motion, z_env)
+
+        # v_loss = v_loss_motion + v_loss_env
+        # c_loss = c_loss_motion + c_loss_env
+
+        # out = {
+        #     "loss": 10*v_loss + 100*c_loss + 2.5*inv_loss, # NOTE: tuned down c_loss by 8x to make it the same as previous experiment
+        #     "v_loss": v_loss,
+        #     "c_loss": c_loss,
+        #     "inv_loss": inv_loss,
+        # }
+
+        # try curl contrastive loss?
+        projected_z_motion = torch.matmul(self.bilinear_W, z_motion.T)
+        logits = torch.matmul(z_env, projected_z_motion) # [B, B]
+        logits = logits - torch.max(logits, dim=-1, keepdim=True).values
+        labels = torch.arange(logits.shape[0], device=logits.device)
+        loss = F.cross_entropy(logits, labels)
 
         out = {
-            "loss": 10*v_loss + 0.5*c_loss + 2.5*inv_loss,
-            "v_loss": v_loss,
-            "c_loss": c_loss,
-            "inv_loss": inv_loss,
+            "loss": 0.1*loss,
         }
 
         return out
