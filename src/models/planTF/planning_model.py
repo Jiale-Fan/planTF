@@ -32,6 +32,34 @@ from .info_distortor import InfoDistortor
 # no meaning, required by nuplan
 trajectory_sampling = TrajectorySampling(num_poses=8, time_horizon=8, interval_length=1)
 
+class BarlowTwinsLoss(nn.Module):
+    """Ref Src: https://lightning.ai/docs/pytorch/stable/notebooks/lightning_examples/barlow-twins.html"""
+
+    def __init__(self, lambda_coeff=5e-3):
+        super().__init__()
+        self.lambda_coeff = lambda_coeff
+
+    def off_diagonal_ele(self, x):
+        # taken from: https://github.com/facebookresearch/barlowtwins/blob/main/main.py
+        # return a flattened view of the off-diagonal elements of a square matrix
+        n, m = x.shape
+        assert n == m
+        return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
+
+    def forward(self, z1, z2):
+        bs = z1.size(0)
+        # N x D, where N is the batch size and D is output dim of projection head
+        z1_norm = (z1 - torch.mean(z1, dim=0)) / torch.std(z1, dim=0)
+        z2_norm = (z2 - torch.mean(z2, dim=0)) / torch.std(z2, dim=0)
+
+        cross_corr = torch.matmul(z1_norm.T, z2_norm) / bs
+
+        on_diag = torch.diagonal(cross_corr).add_(-1).pow_(2).sum()
+        off_diag = self.off_diagonal_ele(cross_corr).pow_(2).sum()
+
+        return on_diag + self.lambda_coeff * off_diag
+
+
 def to_vector(feat, valid_mask):
     vec_mask = valid_mask[..., :-1] & valid_mask[..., 1:]
 
@@ -191,6 +219,8 @@ class PlanningModel(TorchModuleWrapper):
             for i in range(encoder_depth)
         )
         self.norm_wp = nn.LayerNorm(dim)
+
+        self.barlow_twin_loss = BarlowTwinsLoss()
 
         # self.expander = nn.Linear(dim*num_seeds, expanded_dim)
 
@@ -832,30 +862,14 @@ class PlanningModel(TorchModuleWrapper):
         z_motion = self.cme_motion_mlp(h_agent) # [B, d]
         z_env = self.cme_env_mlp(h_map) # [B, d]
 
-        # VICReg loss
+        ## CURL contrastive loss
+        # projected_z_motion = torch.matmul(self.bilinear_W, z_motion.T)
+        # logits = torch.matmul(z_env, projected_z_motion) # [B, B]
+        # logits = logits - torch.max(logits, dim=-1, keepdim=True).values
+        # labels = torch.arange(logits.shape[0], device=logits.device)
+        # loss = F.cross_entropy(logits, labels)
 
-        # v_loss_motion = self.variance_loss(z_motion)
-        # v_loss_env = self.variance_loss(z_env)
-        # c_loss_motion = self.covariance_loss(z_motion)
-        # c_loss_env = self.covariance_loss(z_env)
-        # inv_loss = self.invariance_loss(z_motion, z_env)
-
-        # v_loss = v_loss_motion + v_loss_env
-        # c_loss = c_loss_motion + c_loss_env
-
-        # out = {
-        #     "loss": 10*v_loss + 100*c_loss + 2.5*inv_loss, # NOTE: tuned down c_loss by 8x to make it the same as previous experiment
-        #     "v_loss": v_loss,
-        #     "c_loss": c_loss,
-        #     "inv_loss": inv_loss,
-        # }
-
-        # try curl contrastive loss?
-        projected_z_motion = torch.matmul(self.bilinear_W, z_motion.T)
-        logits = torch.matmul(z_env, projected_z_motion) # [B, B]
-        logits = logits - torch.max(logits, dim=-1, keepdim=True).values
-        labels = torch.arange(logits.shape[0], device=logits.device)
-        loss = F.cross_entropy(logits, labels)
+        loss = self.barlow_twin_loss(z_motion, z_env)
 
         out = {
             "loss": 0.1*loss,
