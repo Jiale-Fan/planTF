@@ -866,7 +866,7 @@ class PlanningModel(TorchModuleWrapper):
         return out
     
     def loss_CME_pretrain(self, x_agent, x_map, agent_padding_mask, map_padding_mask):
-        h_agent = torch.max(x_agent*(~agent_padding_mask[:,1:,None]), dim=1)[0]
+        h_agent = torch.max(x_agent[:,1:]*(~agent_padding_mask[:,1:,None]), dim=1)[0]
         h_map = torch.max(x_map*(~map_padding_mask[...,None]), dim=1)[0]
 
         z_motion = self.cme_motion_mlp(h_agent) # [B, d]
