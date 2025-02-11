@@ -856,8 +856,18 @@ class PlanningModel(TorchModuleWrapper):
         x_orig, key_padding_mask = self.embed_cme(data)
         x_agent = x_orig[:, 1:A]
         x_map = x_orig[:, A:]
-        h_agent = torch.max(x_agent*(~key_padding_mask[:,1:A,None]), dim=1)[0]
-        h_map = torch.max(x_map*(~key_padding_mask[:,A:,None]), dim=1)[0]
+        
+        loss = self.loss_CME_pretrain(x_agent, x_map, key_padding_mask[:, :A], key_padding_mask[:, A:])
+
+        out = {
+            "loss": loss,
+        }
+
+        return out
+    
+    def loss_CME_pretrain(self, x_agent, x_map, agent_padding_mask, map_padding_mask):
+        h_agent = torch.max(x_agent*(~agent_padding_mask[:,1:,None]), dim=1)[0]
+        h_map = torch.max(x_map*(~map_padding_mask[...,None]), dim=1)[0]
 
         z_motion = self.cme_motion_mlp(h_agent) # [B, d]
         z_env = self.cme_env_mlp(h_map) # [B, d]
@@ -960,7 +970,10 @@ class PlanningModel(TorchModuleWrapper):
 
         assert trajectory.isnan().any() == False
 
-        cme_loss = self.forward_CME_pretrain(data)
+
+        agent_features, agent_category, frame_valid_mask, agent_key_padding, ego_state = self.extract_agent_feature(data, include_future=True, get_critical_points=False)
+        agent_embedding_emb = self.embed_agents(agent_features, agent_category, frame_valid_mask)
+        cme_loss = self.loss_CME_pretrain(agent_embedding_emb, x[:, A:], key_padding_mask[:, :A], key_padding_mask[:, A:])
 
         out = {
             "cme_loss": cme_loss["loss"],
@@ -1071,7 +1084,10 @@ class PlanningModel(TorchModuleWrapper):
         probability = torch.zeros(bs, self.num_modes, device=trajectory.device) # B M
 
         probability[:, 0] = 1.0
-        cme_loss = self.forward_CME_pretrain(data)
+
+        agent_features, agent_category, frame_valid_mask, agent_key_padding, ego_state = self.extract_agent_feature(data, include_future=True, get_critical_points=False)
+        agent_embedding_emb = self.embed_agents(agent_features, agent_category, frame_valid_mask)
+        cme_loss = self.loss_CME_pretrain(agent_embedding_emb, x[:, A:], key_padding_mask[:, :A], key_padding_mask[:, A:])
 
         out = {
             "cme_loss": cme_loss["loss"],
