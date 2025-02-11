@@ -36,7 +36,7 @@ class LightningTrainer(pl.LightningModule):
         warmup_epochs,
         pretrain_epochs = 10,
         temperature = 0.7,
-        scaling = True,
+        scaling = False,
     ) -> None:
         super().__init__()
         self.save_hyperparameters(ignore=["model"])
