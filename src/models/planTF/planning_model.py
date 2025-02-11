@@ -154,8 +154,8 @@ class PlanningModel(TorchModuleWrapper):
         # self.multimodal_seed = nn.Parameter(torch.randn(num_modes, dim))
         self.ego_seed = nn.Parameter(torch.randn(dim))
 
-        self.seed_2s = nn.Parameter(torch.randn(1, dim)*0.3)
-        self.seed_8s = nn.Parameter(torch.randn(1, dim)*0.3)
+        self.seed_2s_mlp = build_mlp(dim, [dim * 2 , dim], norm="ln")
+        self.seed_8s_mlp = build_mlp(dim, [dim * 2 , dim], norm="ln")
 
         self.agent_projector = Projector(to_dim=dim, in_channels=11) # NOTE: make consistent to state_channel
         self.agent_type_emb = nn.Embedding(4, dim)
@@ -307,7 +307,7 @@ class PlanningModel(TorchModuleWrapper):
         return [self.pos_emb, self.tempo_net, self.TempoNet_frame_seed, self.agent_projector, self.MRM_seed,
                 self.map_encoder, self.lane_pred, self.agent_frame_predictor, self.SpaNet, self.norm_spa, self.agent_tail_predictor, 
                 # JointMotion CME 
-                self.cme_motion_mlp, self.cme_env_mlp, self.seed_2s, self.seed_8s]
+                self.cme_motion_mlp, self.cme_env_mlp, self.seed_2s_mlp, self.seed_8s_mlp]
 
     def get_finetune_modules(self):
         return [self.ego_seed, self.waypoint_decoder, self.far_future_traj_decoder, self.FFNet, self.goal_mlp,
@@ -887,8 +887,8 @@ class PlanningModel(TorchModuleWrapper):
         # intention_lane_seg = x[:, A:][torch.arange(bs), lane_intention_max]
         # assert route_key_padding_mask[torch.arange(bs), lane_intention_max].any() == False # assert the selected lane segment is on the route
 
-        intention_lane_seg_2s = x_orig[:, A:][torch.arange(bs), lane_intention_2s_gt] + self.seed_2s
-        intention_lane_seg_8s = x_orig[:, A:][torch.arange(bs), lane_intention_8s_gt] + self.seed_8s
+        intention_lane_seg_2s = self.seed_2s_mlp(x_orig[:, A:][torch.arange(bs), lane_intention_2s_gt].detach().clone())
+        intention_lane_seg_8s = self.seed_8s_mlp(x_orig[:, A:][torch.arange(bs), lane_intention_8s_gt].detach().clone())
         # assert route_key_padding_mask[torch.arange(bs), lane_intention_targets].any() == False # assert the selected lane segment is on the route
         # The above assertion would cause error, probably because there are scenarios where no route lane is known
 
@@ -992,7 +992,7 @@ class PlanningModel(TorchModuleWrapper):
 
         # for i in range(self.num_modes):
         for i in range(self.num_modes):
-            intention_lane_seg_2s = x_orig[:, A:][torch.arange(bs), lane_intention_topk_2s[:, i]] + self.seed_2s
+            intention_lane_seg_2s = self.seed_2s_mlp(x_orig[:, A:][torch.arange(bs), lane_intention_topk_2s[:, i]].detach().clone())
 
             x_wpnet = torch.cat([self.lane_emb_wp_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
                             #  self.lane_emb_wp_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
@@ -1010,7 +1010,7 @@ class PlanningModel(TorchModuleWrapper):
 
             ################ FFNet ################
             for k in range(self.num_modes):
-                intention_lane_seg_8s = x_orig[:, A:][torch.arange(bs), lane_intention_topk_8s[:, k]] + self.seed_8s
+                intention_lane_seg_8s = self.seed_8s_mlp(x_orig[:, A:][torch.arange(bs), lane_intention_topk_8s[:, k]].detach().clone())
 
                 x_ffnet = torch.cat([
                 # self.lane_emb_ff_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
@@ -1109,8 +1109,8 @@ class PlanningModel(TorchModuleWrapper):
         # Ensure indices are within bounds
         # assert lane_intention_max.max() < x[:, A:].shape[1], "Index out of bounds in lane_intention_max"
 
-        intention_lane_seg_2s = x_orig[:, A:][torch.arange(bs), lane_intention_max_2s] + self.seed_2s
-        intention_lane_seg_8s = x_orig[:, A:][torch.arange(bs), lane_intention_max_8s] + self.seed_8s
+        intention_lane_seg_2s = self.seed_2s_mlp(x_orig[:, A:][torch.arange(bs), lane_intention_max_2s].detach().clone())
+        intention_lane_seg_8s = self.seed_8s_mlp(x_orig[:, A:][torch.arange(bs), lane_intention_max_8s].detach().clone())
         # assert route_key_padding_mask[torch.arange(bs), lane_intention_max].any() == False # assert the selected lane segment is on the route
 
         ################ WpNet ################ 

@@ -154,7 +154,7 @@ python run_training.py \
   data_loader.params.batch_size=64 data_loader.params.num_workers=24 \
   lr=1e-3 epochs=40 warmup_epochs=3 weight_decay=0.0001 \
   lightning.trainer.params.check_val_every_n_epoch=10 \
-  wandb.mode=online wandb.project=nuplan wandb.name=best_1 \
+  wandb.mode=online wandb.project=nuplan wandb.name=best_1_2.0_1M \
   seed=10
   '''  
 

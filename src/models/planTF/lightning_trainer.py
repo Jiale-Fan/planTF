@@ -322,7 +322,7 @@ class LightningTrainer(pl.LightningModule):
         # ego_loss_dict = self._cal_ego_loss_term(trajectory, probability, ego_target)
         ret_dict_batch = {
             "agent_reg_loss": agent_reg_loss,
-            "rel_agent_pos_loss": loss_rel_agent,
+            # "rel_agent_pos_loss": loss_rel_agent,
             "lane_intention_loss": lane_intention_loss,
             "waypoint_loss": waypoint_loss,
             "far_future_loss": far_future_loss,
