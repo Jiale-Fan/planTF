@@ -259,7 +259,7 @@ class PlanningModel(TorchModuleWrapper):
 
         self.far_future_traj_decoder = SinglemodalTrajectoryDecoder(
             embed_dim=dim,
-            future_steps=self.future_steps-self.waypoints_number,
+            future_steps=self.future_steps,
             out_channels=4,
         )
 
@@ -955,7 +955,7 @@ class PlanningModel(TorchModuleWrapper):
         # restrict the attention to the route only in the cross attender
         # q, attn_weights = blk(query=q, key=x, value=x, key_padding_mask=route_kpmask, need_weights=True) 
 
-        trajectory = torch.cat([waypoints, far_future_traj], dim=1).unsqueeze(1) # B 1 T 4
+        trajectory = torch.cat([far_future_traj], dim=1).unsqueeze(1) # B 1 T 4
         probability = torch.ones(bs, 1, device=trajectory.device) # B 1 
 
         assert trajectory.isnan().any() == False
@@ -1064,7 +1064,7 @@ class PlanningModel(TorchModuleWrapper):
         fshape = multimodal_far_future_traj.shape
         multimodal_far_future_traj = multimodal_far_future_traj.reshape(fshape[0], self.num_modes, fshape[1]//self.num_modes, fshape[2], fshape[3])
 
-        trajectory = torch.cat([multimodal_waypoints, multimodal_far_future_traj[:, :, 0]], dim=2) # B M T 4
+        trajectory = torch.cat([multimodal_far_future_traj[:, :, 0]], dim=2) # B M T 4
         probability = torch.zeros(bs, self.num_modes, device=trajectory.device) # B M
 
         probability[:, 0] = 1.0
@@ -1170,7 +1170,7 @@ class PlanningModel(TorchModuleWrapper):
         x_ffnet = self.norm_ff(x_ffnet)
         far_future_traj = self.far_future_traj_decoder(x_ffnet[:, 0])
 
-        trajectory = torch.cat([waypoints, far_future_traj], dim=1).unsqueeze(1) # B 1 T 4
+        trajectory = torch.cat([far_future_traj], dim=1).unsqueeze(1) # B 1 T 4
         probability = torch.ones(bs, 1, device=trajectory.device) # B 1 
 
         out = {

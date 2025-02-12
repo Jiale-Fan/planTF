@@ -232,7 +232,7 @@ class LightningTrainer(pl.LightningModule):
         waypoints = res["waypoints"] # [bs, m, 20, 4]
         n_wp = self.model.waypoints_number
         bs = waypoints.shape[0]
-        far_future_traj = res["far_future_traj"] # [bs, m, m, 60, 4]
+        far_future_traj = res["trajectory"] # [bs, m, m, 60, 4]
         rel_prediction = res["rel_prediction"] # [bs, n_agents-1, n_waypoints, 2]
         
         targets = data["agent"]["target"]
@@ -272,7 +272,7 @@ class LightningTrainer(pl.LightningModule):
             # 3. waypoint loss
             best_mode_wp, waypoint_loss = self._winner_take_all_loss(waypoints, ego_target[:, :n_wp])
             # 4. far future loss
-            best_mode_ff, far_future_loss = self._winner_take_all_loss(far_future_traj[torch.arange(bs), best_mode_wp], ego_target[:, n_wp:])
+            best_mode_ff, far_future_loss = self._winner_take_all_loss(far_future_traj[torch.arange(bs), best_mode_wp], ego_target[:, :])
             # 5. relative agent prediction
             rel_agent_pos_gt = (targets[:, 1:, :n_wp, :2] - ego_target_pos[:, None, :n_wp, :]) # [bs, n_agents-1, n_waypoints, 2]
             loss_rel_agent_unweighted = F.smooth_l1_loss(rel_prediction[torch.arange(bs), best_mode_wp], rel_agent_pos_gt, reduction='none').mean((-1)) # [bs, n_agents-1, n_waypoints]
