@@ -36,7 +36,7 @@ class LightningTrainer(pl.LightningModule):
         warmup_epochs,
         pretrain_epochs = 10,
         temperature = 0.7,
-        scaling = True,
+        scaling = False,
     ) -> None:
         super().__init__()
         self.save_hyperparameters(ignore=["model"])
@@ -566,7 +566,7 @@ class LightningTrainer(pl.LightningModule):
             if module in pretrain_modules_list:
                 pretrain_modules.append((name, module))
             elif module in finetune_modules_list:
-                finetune_modules.append((name, module))
+                pretrain_modules.append((name, module))
 
         optim_groups_pretrain = self.get_optim_groups(pretrain_modules)
         optim_groups_finetune = self.get_optim_groups(finetune_modules)
