@@ -128,7 +128,7 @@ class PlanningModel(TorchModuleWrapper):
         gamma = 1.0, # VICReg standard deviation target 
         out_channels = 4,
         N_mask = 2,
-        waypoints_number = 20,
+        waypoints_number = 30,
         whether_split_lane = False,
         ori_threshold = 0.7653,
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
@@ -971,12 +971,12 @@ class PlanningModel(TorchModuleWrapper):
         assert trajectory.isnan().any() == False
 
 
-        agent_features, agent_category, frame_valid_mask, agent_key_padding, ego_state = self.extract_agent_feature(data, include_future=True, get_critical_points=False)
-        agent_embedding_emb = self.embed_agents(agent_features, agent_category, frame_valid_mask)
-        cme_loss = self.loss_CME_pretrain(agent_embedding_emb, x[:, A:], key_padding_mask[:, :A], key_padding_mask[:, A:])
+        # agent_features, agent_category, frame_valid_mask, agent_key_padding, ego_state = self.extract_agent_feature(data, include_future=True, get_critical_points=False)
+        # agent_embedding_emb = self.embed_agents(agent_features, agent_category, frame_valid_mask)
+        # cme_loss = self.loss_CME_pretrain(agent_embedding_emb, x[:, A:], key_padding_mask[:, :A], key_padding_mask[:, A:])
 
         out = {
-            "cme_loss": cme_loss["loss"],
+            # "cme_loss": cme_loss["loss"],
             "trajectory": trajectory,
             "probability": probability,
             "prediction": abs_prediction,
@@ -1085,12 +1085,12 @@ class PlanningModel(TorchModuleWrapper):
 
         probability[:, 0] = 1.0
 
-        agent_features, agent_category, frame_valid_mask, agent_key_padding, ego_state = self.extract_agent_feature(data, include_future=True, get_critical_points=False)
-        agent_embedding_emb = self.embed_agents(agent_features, agent_category, frame_valid_mask)
-        cme_loss = self.loss_CME_pretrain(agent_embedding_emb, x[:, A:], key_padding_mask[:, :A], key_padding_mask[:, A:])
+        # agent_features, agent_category, frame_valid_mask, agent_key_padding, ego_state = self.extract_agent_feature(data, include_future=True, get_critical_points=False)
+        # agent_embedding_emb = self.embed_agents(agent_features, agent_category, frame_valid_mask)
+        # cme_loss = self.loss_CME_pretrain(agent_embedding_emb, x[:, A:], key_padding_mask[:, :A], key_padding_mask[:, A:])
 
         out = {
-            "cme_loss": cme_loss["loss"],
+            # "cme_loss": cme_loss["loss"],
             "trajectory": trajectory,
             "probability": probability,
             "prediction": abs_prediction,
