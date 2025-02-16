@@ -925,29 +925,32 @@ class PlanningModel(TorchModuleWrapper):
         # attraction_point = attraction_point_gt
         # q = (self.attraction_point_projector(attraction_point)+self.lane_emb_cr_mlp(intention_lane_seg)).unsqueeze(1)
         x_wpnet = torch.cat([self.lane_emb_wp_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
-                            #  self.lane_emb_wp_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
+                             self.lane_emb_wp_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
                               x_orig[:,1:]], dim=1)
-        key_padding_mask_wp = torch.cat([torch.zeros((bs, 1), dtype=torch.bool, device=key_padding_mask.device),
+        key_padding_mask_wp = torch.cat([torch.zeros((bs, 2), dtype=torch.bool, device=key_padding_mask.device),
                                           key_padding_mask[:, 1:]], dim=1)
         for blk in self.WpNet:
             x_wpnet = blk(x_wpnet, key_padding_mask=key_padding_mask_wp)
         x_wpnet = self.norm_wp(x_wpnet)
-        rel_prediction = self.rel_agent_predictor(x_wpnet[:, 1:A]).view(bs, -1, self.waypoints_number, 2)
+        # rel_prediction = self.rel_agent_predictor(x_wpnet[:, 1:A]).view(bs, -1, self.waypoints_number, 2)
         waypoints = self.waypoint_decoder(x_wpnet[:, 0]) # B T_wp 4
+        far_future_traj = self.far_future_traj_decoder(x_wpnet[:, 1])
+        rel_prediction = self.rel_agent_predictor(x_wpnet[:, 2:A+1]).view(bs, -1, self.waypoints_number, 2)
+
 
         ################ FFNet ################
-        x_ffnet = torch.cat([
-            # self.lane_emb_ff_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
-                            self.lane_emb_ff_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
-                            self.waypoints_embedder(waypoints_gt.view(bs, -1)).unsqueeze(1),
-                            x_orig], dim=1)
+        # x_ffnet = torch.cat([
+        #     # self.lane_emb_ff_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
+        #                     self.lane_emb_ff_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
+        #                     self.waypoints_embedder(waypoints_gt.view(bs, -1)).unsqueeze(1),
+        #                     x_orig], dim=1)
         
-        key_padding_mask_ff = torch.cat([torch.zeros((bs, 2), dtype=torch.bool, device=key_padding_mask.device),
-                                          key_padding_mask], dim=1)
-        for blk in self.FFNet:
-            x_ffnet = blk(x_ffnet, key_padding_mask=key_padding_mask_ff)
-        x_ffnet = self.norm_ff(x_ffnet)
-        far_future_traj = self.far_future_traj_decoder(x_ffnet[:, 0])
+        # key_padding_mask_ff = torch.cat([torch.zeros((bs, 2), dtype=torch.bool, device=key_padding_mask.device),
+        #                                   key_padding_mask], dim=1)
+        # for blk in self.FFNet:
+        #     x_ffnet = blk(x_ffnet, key_padding_mask=key_padding_mask_ff)
+        # x_ffnet = self.norm_ff(x_ffnet)
+        # far_future_traj = self.far_future_traj_decoder(x_ffnet[:, 0])
 
         # decode the far-future trajectory
         # attraction_point = waypoints[:, -1] 
@@ -1015,67 +1018,53 @@ class PlanningModel(TorchModuleWrapper):
         lane_intention_topk_2s = lane_intention_2s_prob.topk(k=self.num_modes, dim=-1, largest=True, sorted=False).indices # [B, M]
         lane_intention_topk_8s = lane_intention_8s_prob.topk(k=self.num_modes, dim=-1, largest=True, sorted=False).indices
 
-        waypoints_list = []
-        far_future_traj_list = []
-        rel_prediction_list = []
+        intention_lane_seg_2s = x_orig[:, A:][torch.arange(bs), lane_intention_topk_2s[:, 0]] + self.seed_2s
+        intention_lane_seg_8s = x_orig[:, A:][torch.arange(bs), lane_intention_topk_8s[:, 0]] + self.seed_8s
 
-        # for i in range(self.num_modes):
-        for i in range(self.num_modes):
-            intention_lane_seg_2s = x_orig[:, A:][torch.arange(bs), lane_intention_topk_2s[:, i]] + self.seed_2s
-
-            x_wpnet = torch.cat([self.lane_emb_wp_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
-                            #  self.lane_emb_wp_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
+        x_wpnet = torch.cat([self.lane_emb_wp_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
+                             self.lane_emb_wp_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
                               x_orig[:,1:]], dim=1)
-            key_padding_mask_wp = torch.cat([torch.zeros((bs, 1), dtype=torch.bool, device=key_padding_mask.device),
-                                            key_padding_mask[:, 1:]], dim=1)
-            for blk in self.WpNet:
-                x_wpnet = blk(x_wpnet, key_padding_mask=key_padding_mask_wp)
-            x_wpnet = self.norm_wp(x_wpnet)
-            rel_prediction = self.rel_agent_predictor(x_wpnet[:, 1:A]).view(bs, -1, self.waypoints_number, 2)
-            waypoints = self.waypoint_decoder(x_wpnet[:, 0]) # B T_wp 4
+        key_padding_mask_wp = torch.cat([torch.zeros((bs, 2), dtype=torch.bool, device=key_padding_mask.device),
+                                          key_padding_mask[:, 1:]], dim=1)
+        for blk in self.WpNet:
+            x_wpnet = blk(x_wpnet, key_padding_mask=key_padding_mask_wp)
+        x_wpnet = self.norm_wp(x_wpnet)
+        # rel_prediction = self.rel_agent_predictor(x_wpnet[:, 1:A]).view(bs, -1, self.waypoints_number, 2)
+        waypoints = self.waypoint_decoder(x_wpnet[:, 0]) # B T_wp 4
+        far_future_traj = self.far_future_traj_decoder(x_wpnet[:, 1])
+        rel_prediction = self.rel_agent_predictor(x_wpnet[:, 2:A+1]).view(bs, -1, self.waypoints_number, 2)
 
-            waypoints_list.append(waypoints)
-            rel_prediction_list.append(rel_prediction)
 
-            ################ FFNet ################
-            for k in range(self.num_modes):
-                intention_lane_seg_8s = x_orig[:, A:][torch.arange(bs), lane_intention_topk_8s[:, k]] + self.seed_8s
-
-                x_ffnet = torch.cat([
-                # self.lane_emb_ff_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
-                            self.lane_emb_ff_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
-                            self.waypoints_embedder(waypoints.detach().clone().view(bs, -1)).unsqueeze(1),
-                            x_orig], dim=1)
+        ################ FFNet ################
+        # x_ffnet = torch.cat([
+        #     # self.lane_emb_ff_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
+        #                     self.lane_emb_ff_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
+        #                     self.waypoints_embedder(waypoints_gt.view(bs, -1)).unsqueeze(1),
+        #                     x_orig], dim=1)
         
-                key_padding_mask_ff = torch.cat([torch.zeros((bs, 2), dtype=torch.bool, device=key_padding_mask.device),
-                                                key_padding_mask], dim=1)
-                for blk in self.FFNet:
-                    x_ffnet = blk(x_ffnet, key_padding_mask=key_padding_mask_ff)
-                x_ffnet = self.norm_ff(x_ffnet)
-                far_future_traj = self.far_future_traj_decoder(x_ffnet[:, 0])
+        # key_padding_mask_ff = torch.cat([torch.zeros((bs, 2), dtype=torch.bool, device=key_padding_mask.device),
+        #                                   key_padding_mask], dim=1)
+        # for blk in self.FFNet:
+        #     x_ffnet = blk(x_ffnet, key_padding_mask=key_padding_mask_ff)
+        # x_ffnet = self.norm_ff(x_ffnet)
+        # far_future_traj = self.far_future_traj_decoder(x_ffnet[:, 0])
 
-                far_future_traj_list.append(far_future_traj)
+        # decode the far-future trajectory
+        # attraction_point = waypoints[:, -1] 
 
+        # restrict the attention to the route only in the cross attender
+        # q, attn_weights = blk(query=q, key=x, value=x, key_padding_mask=route_kpmask, need_weights=True) 
 
-        multimodal_waypoints = torch.stack(waypoints_list, dim=1) # B M T_wp 4
-        multimodal_rel_prediction = torch.stack(rel_prediction_list, dim=1) # B M A T_wp 2
-
-        multimodal_far_future_traj = torch.stack(far_future_traj_list, dim=1)
-        fshape = multimodal_far_future_traj.shape
-        multimodal_far_future_traj = multimodal_far_future_traj.reshape(fshape[0], self.num_modes, fshape[1]//self.num_modes, fshape[2], fshape[3])
-
-        trajectory = torch.cat([multimodal_waypoints, multimodal_far_future_traj[:, :, 0]], dim=2) # B M T 4
-        probability = torch.zeros(bs, self.num_modes, device=trajectory.device) # B M
-
-        probability[:, 0] = 1.0
+        trajectory = torch.cat([waypoints, far_future_traj], dim=1).unsqueeze(1) # B 1 T 4
+        probability = torch.ones(bs, 1, device=trajectory.device) # B 1 
 
         out = {
             "trajectory": trajectory,
             "probability": probability,
             "prediction": abs_prediction,
-            "rel_prediction" : multimodal_rel_prediction,
-            "waypoints": multimodal_waypoints,
-            "far_future_traj": multimodal_far_future_traj,
+            "rel_prediction" : rel_prediction,
+            "waypoints": waypoints,
+            "far_future_traj": far_future_traj,
             "lane_intention_2s_prob": lane_intention_2s_prob,
             "lane_intention_8s_prob": lane_intention_8s_prob,
             "lane_intention_topk_2s": lane_intention_topk_2s,
@@ -1142,33 +1131,18 @@ class PlanningModel(TorchModuleWrapper):
         intention_lane_seg_8s = x_orig[:, A:][torch.arange(bs), lane_intention_max_8s] + self.seed_8s
         # assert route_key_padding_mask[torch.arange(bs), lane_intention_max].any() == False # assert the selected lane segment is on the route
 
-        ################ WpNet ################ 
-        # attraction_point = attraction_point_gt
-        # q = (self.attraction_point_projector(attraction_point)+self.lane_emb_cr_mlp(intention_lane_seg)).unsqueeze(1)
         x_wpnet = torch.cat([self.lane_emb_wp_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
-                            #  self.lane_emb_wp_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
+                             self.lane_emb_wp_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
                               x_orig[:,1:]], dim=1)
-        key_padding_mask_wp = torch.cat([torch.zeros((bs, 1), dtype=torch.bool, device=key_padding_mask.device),
+        key_padding_mask_wp = torch.cat([torch.zeros((bs, 2), dtype=torch.bool, device=key_padding_mask.device),
                                           key_padding_mask[:, 1:]], dim=1)
         for blk in self.WpNet:
             x_wpnet = blk(x_wpnet, key_padding_mask=key_padding_mask_wp)
         x_wpnet = self.norm_wp(x_wpnet)
-        rel_prediction = self.rel_agent_predictor(x_wpnet[:, 1:A]).view(bs, -1, self.waypoints_number, 2)
+        rel_prediction = self.rel_agent_predictor(x_wpnet[:, 2:A+1]).view(bs, -1, self.waypoints_number, 2)
         waypoints = self.waypoint_decoder(x_wpnet[:, 0]) # B T_wp 4
+        far_future_traj = self.far_future_traj_decoder(x_wpnet[:, 1])
 
-        ################ FFNet ################
-        x_ffnet = torch.cat([
-            # self.lane_emb_ff_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
-                            self.lane_emb_ff_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
-                            self.waypoints_embedder(waypoints.view(bs, -1).detach().clone()).unsqueeze(1),
-                            x_orig], dim=1)
-        
-        key_padding_mask_ff = torch.cat([torch.zeros((bs, 2), dtype=torch.bool, device=key_padding_mask.device),
-                                          key_padding_mask], dim=1)
-        for blk in self.FFNet:
-            x_ffnet = blk(x_ffnet, key_padding_mask=key_padding_mask_ff)
-        x_ffnet = self.norm_ff(x_ffnet)
-        far_future_traj = self.far_future_traj_decoder(x_ffnet[:, 0])
 
         trajectory = torch.cat([waypoints, far_future_traj], dim=1).unsqueeze(1) # B 1 T 4
         probability = torch.ones(bs, 1, device=trajectory.device) # B 1 
