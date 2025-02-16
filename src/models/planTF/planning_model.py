@@ -926,16 +926,16 @@ class PlanningModel(TorchModuleWrapper):
         # q = (self.attraction_point_projector(attraction_point)+self.lane_emb_cr_mlp(intention_lane_seg)).unsqueeze(1)
         x_wpnet = torch.cat([self.lane_emb_wp_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
                              self.lane_emb_wp_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
-                              x_orig[:,1:]], dim=1)
+                              x_orig[:,0:]], dim=1)
         key_padding_mask_wp = torch.cat([torch.zeros((bs, 2), dtype=torch.bool, device=key_padding_mask.device),
-                                          key_padding_mask[:, 1:]], dim=1)
+                                          key_padding_mask[:, 0:]], dim=1)
         for blk in self.WpNet:
             x_wpnet = blk(x_wpnet, key_padding_mask=key_padding_mask_wp)
         x_wpnet = self.norm_wp(x_wpnet)
         # rel_prediction = self.rel_agent_predictor(x_wpnet[:, 1:A]).view(bs, -1, self.waypoints_number, 2)
         waypoints = self.waypoint_decoder(x_wpnet[:, 0]) # B T_wp 4
         far_future_traj = self.far_future_traj_decoder(x_wpnet[:, 1])
-        rel_prediction = self.rel_agent_predictor(x_wpnet[:, 2:A+1]).view(bs, -1, self.waypoints_number, 2)
+        rel_prediction = self.rel_agent_predictor(x_wpnet[:, 3:A+2]).view(bs, -1, self.waypoints_number, 2)
 
 
         ################ FFNet ################
@@ -1023,16 +1023,16 @@ class PlanningModel(TorchModuleWrapper):
 
         x_wpnet = torch.cat([self.lane_emb_wp_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
                              self.lane_emb_wp_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
-                              x_orig[:,1:]], dim=1)
+                              x_orig[:,0:]], dim=1)
         key_padding_mask_wp = torch.cat([torch.zeros((bs, 2), dtype=torch.bool, device=key_padding_mask.device),
-                                          key_padding_mask[:, 1:]], dim=1)
+                                          key_padding_mask[:, 0:]], dim=1)
         for blk in self.WpNet:
             x_wpnet = blk(x_wpnet, key_padding_mask=key_padding_mask_wp)
         x_wpnet = self.norm_wp(x_wpnet)
         # rel_prediction = self.rel_agent_predictor(x_wpnet[:, 1:A]).view(bs, -1, self.waypoints_number, 2)
         waypoints = self.waypoint_decoder(x_wpnet[:, 0]) # B T_wp 4
         far_future_traj = self.far_future_traj_decoder(x_wpnet[:, 1])
-        rel_prediction = self.rel_agent_predictor(x_wpnet[:, 2:A+1]).view(bs, -1, self.waypoints_number, 2)
+        rel_prediction = self.rel_agent_predictor(x_wpnet[:, 3:A+2]).view(bs, -1, self.waypoints_number, 2)
 
 
         ################ FFNet ################
@@ -1133,13 +1133,13 @@ class PlanningModel(TorchModuleWrapper):
 
         x_wpnet = torch.cat([self.lane_emb_wp_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
                              self.lane_emb_wp_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
-                              x_orig[:,1:]], dim=1)
+                              x_orig[:,0:]], dim=1)
         key_padding_mask_wp = torch.cat([torch.zeros((bs, 2), dtype=torch.bool, device=key_padding_mask.device),
-                                          key_padding_mask[:, 1:]], dim=1)
+                                          key_padding_mask[:, 0:]], dim=1)
         for blk in self.WpNet:
             x_wpnet = blk(x_wpnet, key_padding_mask=key_padding_mask_wp)
         x_wpnet = self.norm_wp(x_wpnet)
-        rel_prediction = self.rel_agent_predictor(x_wpnet[:, 2:A+1]).view(bs, -1, self.waypoints_number, 2)
+        rel_prediction = self.rel_agent_predictor(x_wpnet[:, 3:A+2]).view(bs, -1, self.waypoints_number, 2)
         waypoints = self.waypoint_decoder(x_wpnet[:, 0]) # B T_wp 4
         far_future_traj = self.far_future_traj_decoder(x_wpnet[:, 1])
 
