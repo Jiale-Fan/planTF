@@ -19,7 +19,9 @@ from torchmetrics import MetricCollection
 from src.metrics import MR, minADE, minFDE
 from src.optim.warmup_cos_lr import WarmupCosLR
 from src.models.planTF.planning_model import Stage
+from src.models.planTF.famo import FAMO
 from src.feature_builders.nuplan_feature_builder import SCENARIO_MAPPING_IDS
+
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +38,7 @@ class LightningTrainer(pl.LightningModule):
         warmup_epochs,
         pretrain_epochs = 10,
         temperature = 0.7,
-        scaling = True,
+        scaling = False,
     ) -> None:
         super().__init__()
         self.save_hyperparameters(ignore=["model"])
@@ -49,6 +51,8 @@ class LightningTrainer(pl.LightningModule):
         self.pretrain_epochs = pretrain_epochs
         self.temperature = temperature
         self.scaling = scaling
+
+        self.famo = FAMO(n_tasks=2, device="cuda")
 
         self.rel_weighting_sigma = 8
 
@@ -127,7 +131,9 @@ class LightningTrainer(pl.LightningModule):
             elif self.model.get_stage(self.current_epoch) == Stage.DEFAULT or self.model.get_stage(self.current_epoch) == Stage.ANT_MASK_FINETUNE: 
                 opt_pre.zero_grad()
                 opt_fine.zero_grad()
-                self.manual_backward(res["loss"])
+
+                # self.manual_backward(res["loss"])
+                self.famo.backward(torch.stack([res["loss"], res["cme_loss"]]), self)
                 self.clip_gradients(opt_pre, gradient_clip_val=5.0, gradient_clip_algorithm="norm") 
                 self.clip_gradients(opt_fine, gradient_clip_val=5.0, gradient_clip_algorithm="norm") 
                 opt_pre.step()
@@ -337,10 +343,9 @@ class LightningTrainer(pl.LightningModule):
             loss = loss_mat.mean()
 
         ret_dict_mean = {key: value.mean() for key, value in ret_dict_batch.items()}
+        ret_dict_mean["loss"] = loss
         if "cme_loss" in res:
-            ret_dict_mean["loss"] = loss + res["cme_loss"]
-        else:
-            ret_dict_mean["loss"] = loss
+            ret_dict_mean["cme_loss"] = res["cme_loss"]
         ret_dict_mean.update(lane_intention_dict)
 
         return ret_dict_mean
