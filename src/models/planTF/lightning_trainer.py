@@ -52,7 +52,7 @@ class LightningTrainer(pl.LightningModule):
         self.temperature = temperature
         self.scaling = scaling
 
-        self.famo = FAMO(n_tasks=2, device="cuda")
+        self.famo = FAMO(n_tasks=2, device='cuda:0')
 
         self.rel_weighting_sigma = 8
 
