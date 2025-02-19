@@ -128,7 +128,7 @@ class PlanningModel(TorchModuleWrapper):
         gamma = 1.0, # VICReg standard deviation target 
         out_channels = 4,
         N_mask = 2,
-        waypoints_number = 30,
+        waypoints_number = 20,
         whether_split_lane = False,
         ori_threshold = 0.7653,
         feature_builder: NuplanFeatureBuilder = NuplanFeatureBuilder(),
