@@ -52,7 +52,7 @@ class LightningTrainer(pl.LightningModule):
         self.temperature = temperature
         self.scaling = scaling
 
-        self.famo = FAMO(n_tasks=2, device='cuda:0')
+        self.famo = FAMO(n_tasks=5, device='cuda:0')
 
         self.rel_weighting_sigma = 8
 
@@ -94,6 +94,7 @@ class LightningTrainer(pl.LightningModule):
         if 'trajectory' in res and 'probability' in res:
         # if they are present, this suggests that the model is not in pretrain mode
             planning_loss = self._compute_objectives(res, features["feature"].data)
+            total_loss = planning_loss["loss"]
             if res["trajectory"].dim() == 5:
                 res = {key: res[key][:, 0] for key in res.keys()}
             metrics = self._compute_metrics(res, features["feature"].data, prefix)
@@ -101,58 +102,40 @@ class LightningTrainer(pl.LightningModule):
 
         else:
         # the model should be in pretrain mode, loss has already been calculated
-            assert 'loss' in res
+            total_loss = res["loss"]
 
         opts = self.optimizers()
         schs = self.lr_schedulers()
         opt_pre, opt_fine = opts
 
         if self.training:
-            if self.model.get_stage(self.current_epoch) == Stage.PRETRAIN_SEP:
-                opt_pre.zero_grad()
-                self.manual_backward(res["loss"]) 
-                self.clip_gradients(opt_pre, gradient_clip_val=5.0, gradient_clip_algorithm="norm")
-                opt_pre.step()
-                schs[0].step(self.current_epoch)
+            opt_pre.zero_grad()
+            opt_fine.zero_grad()
 
-            elif self.model.get_stage(self.current_epoch) == Stage.PRETRAIN_REPRESENTATION: 
-                opt_pre.zero_grad()
-                opt_fine.zero_grad()
-                self.manual_backward(res["loss"]) 
-                self.clip_gradients(opt_pre, gradient_clip_val=5.0, gradient_clip_algorithm="norm")
-                self.clip_gradients(opt_fine, gradient_clip_val=5.0, gradient_clip_algorithm="norm")
-                opt_pre.step()
-                opt_fine.step()
-                schs[0].step(self.current_epoch)
-                schs[1].step(self.current_epoch)
-                
-                # self.model.EMA_update() # update the teacher model with EMA
+            stacked_multitask_loss_tensor = torch.stack(
+                [planning_loss["SpaNet_loss"], planning_loss["waypoint_loss"], planning_loss["far_future_loss"], 
+                 planning_loss["cme_loss"], planning_loss["rel_agent_pos_loss"]], dim=-1)
+            self.famo.backward(stacked_multitask_loss_tensor, self)
 
-            elif self.model.get_stage(self.current_epoch) == Stage.DEFAULT or self.model.get_stage(self.current_epoch) == Stage.ANT_MASK_FINETUNE: 
-                opt_pre.zero_grad()
-                opt_fine.zero_grad()
-
-                # self.manual_backward(res["loss"])
-                self.famo.backward(torch.stack([res["loss"], res["cme_loss"]]), self)
-                self.clip_gradients(opt_pre, gradient_clip_val=5.0, gradient_clip_algorithm="norm") 
-                self.clip_gradients(opt_fine, gradient_clip_val=5.0, gradient_clip_algorithm="norm") 
-                opt_pre.step()
-                opt_fine.step()
-                schs[0].step(self.current_epoch)
-                schs[1].step(self.current_epoch)
+            self.clip_gradients(opt_pre, gradient_clip_val=5.0, gradient_clip_algorithm="norm") 
+            self.clip_gradients(opt_fine, gradient_clip_val=5.0, gradient_clip_algorithm="norm") 
+            opt_pre.step()
+            opt_fine.step()
+            schs[0].step(self.current_epoch)
+            schs[1].step(self.current_epoch)
 
 
         # for sch in self.lr_schedulers():
         #     sch.step(self.current_epoch)
 
         logged_loss = {k: v for k, v in res.items() if v.dim() == 0}
-        self._log_step(res["loss"], logged_loss, metrics, prefix)
+        self._log_step(total_loss, logged_loss, metrics, prefix)
 
         # count scenario type:
         # type_count = torch.bincount(features["feature"].data["scenario_type"].flatten().to(torch.int64), minlength=SCENARIO_TYPE_NUM).to('cpu')
         # self.scenario_type_count = self.scenario_type_count + (type_count)
 
-        return res["loss"]
+        return total_loss
     
 
     def _cal_ego_loss_term_goal_wp(self, trajectory, probability, goal, waypoints, ego_target):
@@ -327,9 +310,8 @@ class LightningTrainer(pl.LightningModule):
 
         # ego_loss_dict = self._cal_ego_loss_term(trajectory, probability, ego_target)
         ret_dict_batch = {
-            "agent_reg_loss": agent_reg_loss,
+            "SpaNet_loss": agent_reg_loss+lane_intention_loss,
             "rel_agent_pos_loss": loss_rel_agent,
-            "lane_intention_loss": lane_intention_loss,
             "waypoint_loss": waypoint_loss,
             "far_future_loss": far_future_loss,
         }
