@@ -52,7 +52,7 @@ class LightningTrainer(pl.LightningModule):
         self.temperature = temperature
         self.scaling = scaling
 
-        self.famo = FAMO(n_tasks=5, device='cuda:0')
+        self.famo = FAMO(n_tasks=3, device='cuda:0')
 
         self.rel_weighting_sigma = 8
 
@@ -114,7 +114,7 @@ class LightningTrainer(pl.LightningModule):
 
             stacked_multitask_loss_tensor = torch.stack(
                 [planning_loss["SpaNet_loss"], planning_loss["waypoint_loss"], planning_loss["far_future_loss"], 
-                 planning_loss["cme_loss"], planning_loss["rel_agent_pos_loss"]], dim=-1)
+                 ], dim=-1)
             self.famo.backward(stacked_multitask_loss_tensor, self)
 
             self.clip_gradients(opt_pre, gradient_clip_val=5.0, gradient_clip_algorithm="norm") 

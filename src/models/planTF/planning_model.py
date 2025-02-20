@@ -960,10 +960,10 @@ class PlanningModel(TorchModuleWrapper):
 
         assert trajectory.isnan().any() == False
 
-        cme_loss = self.forward_CME_pretrain(data)
+        # cme_loss = self.forward_CME_pretrain(data)
 
         out = {
-            "cme_loss": cme_loss["loss"],
+            # "cme_loss": cme_loss["loss"],
             "trajectory": trajectory,
             "probability": probability,
             "prediction": abs_prediction,
@@ -1071,10 +1071,10 @@ class PlanningModel(TorchModuleWrapper):
         probability = torch.zeros(bs, self.num_modes, device=trajectory.device) # B M
 
         probability[:, 0] = 1.0
-        cme_loss = self.forward_CME_pretrain(data)
+        # cme_loss = self.forward_CME_pretrain(data)
 
         out = {
-            "cme_loss": cme_loss["loss"],
+            # "cme_loss": cme_loss["loss"],
             "trajectory": trajectory,
             "probability": probability,
             "prediction": abs_prediction,
