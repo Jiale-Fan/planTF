@@ -5,7 +5,8 @@ scenario_types: null                # List of scenario types to include
 scenario_tokens: null               # List of scenario tokens to include
 
 log_names: null                     # Filter scenarios by log names
-map_names: 'us-nv-las-vegas-strip'                     # Filter scenarios by map names
+map_names: 
+  - us-nv-las-vegas-strip                     # Filter scenarios by map names
 
 # MAP_LOCATIONS = {'sg-one-north', 'us-ma-boston', 'us-nv-las-vegas-strip', 'us-pa-pittsburgh-hazelwood'}
 
