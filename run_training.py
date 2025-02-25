@@ -152,9 +152,11 @@ python run_training.py \
   worker=single_machine_thread_pool worker.max_workers=24 \
   scenario_builder=nuplan cache.cache_path=/media/jiale/Jiale_SSD1/cache_1M  cache.use_cache_without_dataset=true \
   data_loader.params.batch_size=64 data_loader.params.num_workers=24 \
-  lr=1e-3 epochs=40 warmup_epochs=3 weight_decay=0.0001 \
+  lr=1e-3 epochs=10 warmup_epochs=3 weight_decay=0.0001 \
   lightning.trainer.params.check_val_every_n_epoch=10 \
-  wandb.mode=online wandb.project=nuplan wandb.name=best_1 \
+  wandb.mode=online wandb.project=nuplan wandb.name=famo_v1.0_1M_finetune \
+  checkpoint=/home/jiale/Documents/exp/exp/training/planTF/2025.02.22.15.17.30/checkpoints/first_stage.ckpt \
+  output_dir=/home/jiale/Documents/exp/exp/training/planTF/2025.02.22.15.17.30 \
   seed=10
   '''  
 

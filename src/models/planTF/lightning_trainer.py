@@ -58,7 +58,8 @@ class LightningTrainer(pl.LightningModule):
 
         self.automatic_optimization=False
 
-        self.initial_finetune_flag = False
+        self.initial_finetune_flag = True
+
 
         self.scenario_type_count = torch.zeros(SCENARIO_TYPE_NUM, dtype=torch.int64, device=self.device)
 
@@ -129,11 +130,16 @@ class LightningTrainer(pl.LightningModule):
                 # self.model.EMA_update() # update the teacher model with EMA
 
             elif self.model.get_stage(self.current_epoch) == Stage.DEFAULT or self.model.get_stage(self.current_epoch) == Stage.ANT_MASK_FINETUNE: 
+                
+                # if self.initial_finetune_flag:
+                #     self.configure_optimizers()
+                #     self.initial_finetune_flag = False
+                
                 opt_pre.zero_grad()
                 opt_fine.zero_grad()
 
-                # self.manual_backward(res["loss"])
-                self.famo.backward(torch.stack([res["loss"], res["cme_loss"]]), self)
+                self.manual_backward(res["loss"])
+                # self.famo.backward(torch.stack([res["loss"], res["cme_loss"]]), self)
                 self.clip_gradients(opt_pre, gradient_clip_val=5.0, gradient_clip_algorithm="norm") 
                 self.clip_gradients(opt_fine, gradient_clip_val=5.0, gradient_clip_algorithm="norm") 
                 opt_pre.step()
@@ -154,6 +160,9 @@ class LightningTrainer(pl.LightningModule):
 
         return res["loss"]
     
+    # def on_load_checkpoint(self, checkpoint):
+    #     if "optimizer_states" in checkpoint:
+    #         del checkpoint["optimizer_states"]
 
     def _cal_ego_loss_term_goal_wp(self, trajectory, probability, goal, waypoints, ego_target):
         ego_goal_target = ego_target[:, -1, :] # [bs, 4]
@@ -328,7 +337,7 @@ class LightningTrainer(pl.LightningModule):
         # ego_loss_dict = self._cal_ego_loss_term(trajectory, probability, ego_target)
         ret_dict_batch = {
             "agent_reg_loss": agent_reg_loss,
-            "rel_agent_pos_loss": loss_rel_agent,
+            # "rel_agent_pos_loss": loss_rel_agent,
             "lane_intention_loss": lane_intention_loss,
             "waypoint_loss": waypoint_loss,
             "far_future_loss": far_future_loss,
@@ -578,13 +587,13 @@ class LightningTrainer(pl.LightningModule):
 
         # Get optimizers
         optimizer_pretrain = torch.optim.AdamW(
-            optim_groups_pretrain, lr=self.lr, weight_decay=self.weight_decay
+            optim_groups_pretrain, lr=self.lr, weight_decay=self.weight_decay, capturable=True
         )
         # optimizer_finetune_p = torch.optim.AdamW(
         #     optim_groups_pretrain, lr=self.lr, weight_decay=self.weight_decay
         # )
         optimizer_finetune_f = torch.optim.AdamW(
-            optim_groups_finetune, lr=self.lr, weight_decay=self.weight_decay
+            optim_groups_finetune, lr=self.lr, weight_decay=self.weight_decay, capturable=True
         )
 
         # Get lr_schedulers
