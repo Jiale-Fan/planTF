@@ -1,6 +1,7 @@
 import logging
 import os
 from typing import Dict, Tuple, Union
+from collections import OrderedDict
 
 import pytorch_lightning as pl
 import torch
@@ -60,6 +61,16 @@ class LightningTrainer(pl.LightningModule):
 
         self.initial_finetune_flag = True
 
+        checkpoint = torch.load("/home/jiale/Documents/exp/exp/training/planTF/2025.02.22.15.17.30/checkpoints/first_stage.ckpt", map_location="cuda")
+        # Extract only the model's state dictionary
+        new_state_dict = OrderedDict()
+        for k, v in checkpoint["state_dict"].items():
+            new_key = k.replace("model.", "")  # Remove prefix
+            new_state_dict[new_key] = v
+
+        model.load_state_dict(new_state_dict, strict=True)
+        # self.model.load_state_dict(new_state_dict)
+
 
         self.scenario_type_count = torch.zeros(SCENARIO_TYPE_NUM, dtype=torch.int64, device=self.device)
 
@@ -114,6 +125,10 @@ class LightningTrainer(pl.LightningModule):
                 self.manual_backward(res["loss"]) 
                 self.clip_gradients(opt_pre, gradient_clip_val=5.0, gradient_clip_algorithm="norm")
                 opt_pre.step()
+                for state in opt_pre.state.values():
+                    for k, v in state.items():
+                        if isinstance(v, torch.Tensor):
+                            state[k] = v.cpu()
                 schs[0].step(self.current_epoch)
 
             elif self.model.get_stage(self.current_epoch) == Stage.PRETRAIN_REPRESENTATION: 
@@ -132,7 +147,11 @@ class LightningTrainer(pl.LightningModule):
             elif self.model.get_stage(self.current_epoch) == Stage.DEFAULT or self.model.get_stage(self.current_epoch) == Stage.ANT_MASK_FINETUNE: 
                 
                 # if self.initial_finetune_flag:
-                #     self.configure_optimizers()
+                #     for opt in opts:
+                #         for state in opt.state.values():
+                #             for k, v in state.items():
+                #                 if isinstance(v, torch.Tensor):
+                #                     state[k] = v.cpu()
                 #     self.initial_finetune_flag = False
                 
                 opt_pre.zero_grad()
