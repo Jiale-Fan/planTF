@@ -322,11 +322,14 @@ class LightningTrainer(pl.LightningModule):
         # ego_loss_dict = self._cal_ego_loss_term(trajectory, probability, ego_target)
         ret_dict_batch = {
             "agent_reg_loss": agent_reg_loss,
-            "rel_agent_pos_loss": loss_rel_agent,
+            # "rel_agent_pos_loss": loss_rel_agent,
             "lane_intention_loss": lane_intention_loss,
-            "waypoint_loss": waypoint_loss,
+            # "waypoint_loss": waypoint_loss,
             "far_future_loss": far_future_loss,
         }
+
+        if self.current_epoch < 10:
+            ret_dict_batch["waypoint_loss"] = waypoint_loss
         # loss = torch.mean(torch.stack([ret_dict[key] for key in ret_dict.keys()]))
         loss_mat = torch.stack(list(ret_dict_batch.values()), dim=-1) # [bs, 5]
         if self.scaling == True:
@@ -341,6 +344,23 @@ class LightningTrainer(pl.LightningModule):
             ret_dict_mean["loss"] = loss + res["cme_loss"]
         else:
             ret_dict_mean["loss"] = loss
+
+        if "progress_estimate_loss" in res:
+            ret_dict_mean["loss"] = loss + res["progress_estimate_loss"]
+        else:
+            ret_dict_mean["loss"] = loss
+
+        if "loss_critic_for_planner" in res and self.current_epoch >= 10:
+            ret_dict_mean["loss"] = loss + res["loss_critic_for_planner"]
+        else:
+            ret_dict_mean["loss"] = loss
+
+        if "loss_critic_for_critic" in res:
+            ret_dict_mean["loss"] = loss + res["loss_critic_for_critic"]
+        else:
+            ret_dict_mean["loss"] = loss
+
+
         ret_dict_mean.update(lane_intention_dict)
 
         return ret_dict_mean
@@ -566,7 +586,7 @@ class LightningTrainer(pl.LightningModule):
             if module in pretrain_modules_list:
                 pretrain_modules.append((name, module))
             elif module in finetune_modules_list:
-                pretrain_modules.append((name, module))
+                finetune_modules.append((name, module))
 
         optim_groups_pretrain = self.get_optim_groups(pretrain_modules)
         optim_groups_finetune = self.get_optim_groups(finetune_modules)

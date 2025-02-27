@@ -207,6 +207,7 @@ class PlanningModel(TorchModuleWrapper):
             for i in range(encoder_depth)
         )
         self.norm_spa = nn.LayerNorm(dim)
+        self.criterion = nn.BCELoss()
 
         self.WpNet = nn.ModuleList(
             Block(
@@ -253,7 +254,7 @@ class PlanningModel(TorchModuleWrapper):
 
         self.waypoint_decoder = SinglemodalTrajectoryDecoder(
             embed_dim=dim,
-            future_steps=self.waypoints_number,
+            future_steps=self.waypoints_number - 1,
             out_channels=4,
         )
 
@@ -287,6 +288,29 @@ class PlanningModel(TorchModuleWrapper):
         # self.trajectory_mlp = build_mlp(dim, [512, future_steps * out_channels], norm=None)
         # self.score_mlp = build_mlp(dim, [512, 1], norm=None)
 
+        class ScoreNet(nn.Module):
+            def __init__(self):
+                super(ScoreNet, self).__init__()
+                self.conv1 = nn.Conv1d(in_channels=4, out_channels=16, kernel_size=3, padding=1)
+                self.conv2 = nn.Conv1d(in_channels=16, out_channels=32, kernel_size=3, padding=1)
+                self.conv3 = nn.Conv1d(in_channels=32, out_channels=64, kernel_size=3, padding=1)
+                self.fc1 = nn.Linear(64 * 20, 128)
+                self.fc2 = nn.Linear(128, 1)
+                self.sigmoid = nn.Sigmoid()
+
+            def forward(self, x):
+                x = x.permute(0, 2, 1)  # Change shape to [batch_size, 4, 20]
+                x = F.relu(self.conv1(x))
+                x = F.relu(self.conv2(x))
+                x = F.relu(self.conv3(x))
+                x = x.view(x.size(0), -1)  # Flatten
+                x = F.relu(self.fc1(x))
+                x = self.fc2(x)
+                x = self.sigmoid(x)
+                return x
+
+        self.score_net = ScoreNet()
+
         # coarse to fine planning
         self.goal_mlp = build_mlp(dim, [512, out_channels], norm=None)
         self.score_mlp = nn.Sequential(
@@ -303,6 +327,11 @@ class PlanningModel(TorchModuleWrapper):
         self.lane_emb_ff_2s_mlp = build_mlp(dim, [dim * 2 , dim], norm="ln")
         self.lane_emb_wp_8s_mlp = build_mlp(dim, [dim * 2 , dim], norm="ln")
         self.lane_emb_ff_8s_mlp = build_mlp(dim, [dim * 2 , dim], norm="ln")
+        self.attraction_point_pos = nn.Sequential(
+            build_mlp(dim, [dim, 1], norm="ln"),
+            nn.Sigmoid()
+        )
+        self.attraction_point_emb = build_mlp(4, [dim , dim], norm="ln")
         self.waypoints_embedder = build_mlp(self.waypoints_number * 4, [dim*2, dim], norm=None)
 
         self.lane_intention_2s_predictor = Projector(to_dim=1, in_channels=dim)
@@ -339,15 +368,16 @@ class PlanningModel(TorchModuleWrapper):
         return [self.pos_emb, self.tempo_net, self.TempoNet_frame_seed, self.agent_projector, self.MRM_seed,
                 self.map_encoder, self.lane_pred, self.agent_frame_predictor, self.SpaNet, self.norm_spa, self.agent_tail_predictor, 
                 # JointMotion CME 
-                self.cme_motion_mlp, self.cme_env_mlp, self.seed_2s, self.seed_8s, self.bilinear_W]
-
-    def get_finetune_modules(self):
-        return [self.ego_seed, self.waypoint_decoder, self.far_future_traj_decoder, self.FFNet, self.goal_mlp,
+                self.cme_motion_mlp, self.cme_env_mlp, self.seed_2s, self.seed_8s, self.bilinear_W, self.attraction_point_pos, 
+                self.attraction_point_emb] + [self.ego_seed, self.waypoint_decoder, self.far_future_traj_decoder, self.FFNet, self.goal_mlp,
                 self.abs_agent_predictor, self.rel_agent_predictor, self.lane_intention_2s_predictor, self.attraction_point_projector,
                 self.lane_intention_8s_predictor, 
                 self.vel_token_projector, self.WpNet, self.norm_wp, self.norm_ff, 
                 self.lane_emb_wp_2s_mlp, self.lane_emb_ff_2s_mlp, self.lane_emb_wp_8s_mlp, self.lane_emb_ff_8s_mlp, self.score_mlp, 
                 self.waypoints_embedder]
+
+    def get_finetune_modules(self):
+        return [self.score_net]
 
 
     def get_stage(self, current_epoch):
@@ -382,10 +412,8 @@ class PlanningModel(TorchModuleWrapper):
         else:
             # if self.training and current_epoch <= 5:
             #     return self.forward_CME_pretrain(data)
-            if self.training and current_epoch <= 20:
+            if self.training:
                 return self.forward_teacher_enforcing(data)
-            elif self.training and current_epoch > 20:
-                return self.forward_multimodal_finetune(data)
             else:
                 return self.forward_inference(data)
             # stage = self.get_stage(current_epoch)
@@ -891,7 +919,7 @@ class PlanningModel(TorchModuleWrapper):
     def forward_teacher_enforcing(self, data):
         bs, A = data["agent"]["heading"].shape[0:2]
         # x_orig, key_padding_mask = self.embed(data, torch.cat((self.plan_seed, self.rep_seed)))
-        x_orig, key_padding_mask, route_key_padding_mask, lane_intention_2s_gt, lane_intention_8s_gt, waypoints_gt = self.embed(data, training=True)
+        x_orig, key_padding_mask, route_key_padding_mask, polygon_pos, lane_intention_2s_gt, lane_intention_8s_gt, waypoints_gt, progress_on_intention_seg = self.embed(data, training=True)
 
         # no need to remove the ego token here. Right?
 
@@ -926,24 +954,35 @@ class PlanningModel(TorchModuleWrapper):
         # intention_lane_seg = x[:, A:][torch.arange(bs), lane_intention_max]
         # assert route_key_padding_mask[torch.arange(bs), lane_intention_max].any() == False # assert the selected lane segment is on the route
 
-        intention_lane_seg_2s = x_orig[:, A:][torch.arange(bs), lane_intention_2s_gt] + self.seed_2s
-        intention_lane_seg_8s = x_orig[:, A:][torch.arange(bs), lane_intention_8s_gt] + self.seed_8s
+        intention_lane_seg_after_2s = x[:, A:][torch.arange(bs), lane_intention_2s_gt]
+        progress_estimate = self.attraction_point_pos(intention_lane_seg_after_2s).squeeze() # B
+
+        intention_lane_seg_2s = x_orig[:, A:][torch.arange(bs), lane_intention_2s_gt]
+        intention_lane_seg_8s = x_orig[:, A:][torch.arange(bs), lane_intention_8s_gt]
         # assert route_key_padding_mask[torch.arange(bs), lane_intention_targets].any() == False # assert the selected lane segment is on the route
         # The above assertion would cause error, probably because there are scenarios where no route lane is known
+
+        intention_lane_seg_2s_pos = polygon_pos[torch.arange(bs), lane_intention_2s_gt] # B P 2
+        attraction_point_lane = intention_lane_seg_2s_pos[torch.arange(bs), progress_on_intention_seg]
+
+        attraction_emb = self.attraction_point_emb(attraction_point_lane) # B D
 
         ################ WpNet ################ 
         # attraction_point = attraction_point_gt
         # q = (self.attraction_point_projector(attraction_point)+self.lane_emb_cr_mlp(intention_lane_seg)).unsqueeze(1)
-        x_wpnet = torch.cat([self.lane_emb_wp_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
+        x_wpnet = torch.cat([
+            attraction_emb.unsqueeze(1),
+            self.lane_emb_wp_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
                             #  self.lane_emb_wp_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
                               x_orig[:,1:]], dim=1)
-        key_padding_mask_wp = torch.cat([torch.zeros((bs, 1), dtype=torch.bool, device=key_padding_mask.device),
+        key_padding_mask_wp = torch.cat([torch.zeros((bs, 2), dtype=torch.bool, device=key_padding_mask.device),
                                           key_padding_mask[:, 1:]], dim=1)
         for blk in self.WpNet:
             x_wpnet = blk(x_wpnet, key_padding_mask=key_padding_mask_wp)
         x_wpnet = self.norm_wp(x_wpnet)
         rel_prediction = self.rel_agent_predictor(x_wpnet[:, 1:A]).view(bs, -1, self.waypoints_number, 2)
-        waypoints = self.waypoint_decoder(x_wpnet[:, 0]) # B T_wp 4
+        waypoints_ = self.waypoint_decoder(x_wpnet[:, 0]) # B T_wp 4
+        waypoints = torch.cat([waypoints_, attraction_point_lane.unsqueeze(1)], dim=1)
 
         ################ FFNet ################
         x_ffnet = torch.cat([
@@ -968,6 +1007,19 @@ class PlanningModel(TorchModuleWrapper):
         trajectory = torch.cat([waypoints, far_future_traj], dim=1).unsqueeze(1) # B 1 T 4
         probability = torch.ones(bs, 1, device=trajectory.device) # B 1 
 
+
+
+        pe_loss = F.smooth_l1_loss(progress_estimate, progress_on_intention_seg*1.0/20, reduction="mean", beta=0.1)
+
+        with torch.no_grad():
+            score_plan = self.score_net(waypoints) 
+            score_gt_waypoints = self.score_net(data["waypoints"])
+            loss_critic_for_planner = self.loss_critic(bs, score_gt_waypoints, score_plan, self.criterion)
+        
+        score_plan = self.score_net(waypoints.detach()) 
+        score_gt_waypoints = self.score_net(data["waypoints"])
+        loss_critic_for_critic = -self.loss_critic(bs, score_gt_waypoints, score_plan, self.criterion)
+
         assert trajectory.isnan().any() == False
 
 
@@ -978,6 +1030,9 @@ class PlanningModel(TorchModuleWrapper):
         out = {
             # "cme_loss": cme_loss["loss"],
             "trajectory": trajectory,
+            "loss_critic_for_planner": loss_critic_for_planner,
+            "loss_critic_for_critic": loss_critic_for_critic,
+            "progress_estimate_loss": pe_loss,
             "probability": probability,
             "prediction": abs_prediction,
             "rel_prediction" : rel_prediction,
@@ -1005,6 +1060,22 @@ class PlanningModel(TorchModuleWrapper):
             self.inference_counter += 1
 
         return out
+    
+    def loss_critic(self, batch_size, output_real, output_fake, criterion):
+        # Real and fake labels
+        real_labels = torch.ones(batch_size, 1, device=output_real.device)
+        fake_labels = torch.zeros(batch_size, 1, device=output_fake.device)
+
+        # Loss for real samples
+        loss_real = criterion(output_real, real_labels)
+
+        # Loss for fake samples
+        loss_fake = criterion(output_fake, fake_labels)
+
+        # Total loss for the critic
+        loss_critic = loss_real + loss_fake
+
+        return loss_critic
 
     def forward_multimodal_finetune(self, data):
         bs, A = data["agent"]["heading"].shape[0:2]
@@ -1037,7 +1108,7 @@ class PlanningModel(TorchModuleWrapper):
 
         # for i in range(self.num_modes):
         for i in range(self.num_modes):
-            intention_lane_seg_2s = x_orig[:, A:][torch.arange(bs), lane_intention_topk_2s[:, i]] + self.seed_2s
+            intention_lane_seg_2s = x_orig[:, A:][torch.arange(bs), lane_intention_topk_2s[:, i]]
 
             x_wpnet = torch.cat([self.lane_emb_wp_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
                             #  self.lane_emb_wp_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
@@ -1055,7 +1126,7 @@ class PlanningModel(TorchModuleWrapper):
 
             ################ FFNet ################
             for k in range(self.num_modes):
-                intention_lane_seg_8s = x_orig[:, A:][torch.arange(bs), lane_intention_topk_8s[:, k]] + self.seed_8s
+                intention_lane_seg_8s = x_orig[:, A:][torch.arange(bs), lane_intention_topk_8s[:, k]]
 
                 x_ffnet = torch.cat([
                 # self.lane_emb_ff_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
@@ -1133,7 +1204,7 @@ class PlanningModel(TorchModuleWrapper):
     def forward_inference(self, data):
         bs, A = data["agent"]["heading"].shape[0:2]
         # x_orig, key_padding_mask = self.embed(data, torch.cat((self.plan_seed, self.rep_seed)))
-        x_orig, key_padding_mask, route_key_padding_mask = self.embed(data, training=False)
+        x_orig, key_padding_mask, route_key_padding_mask, polygon_pos = self.embed(data, training=False)
 
         # no need to remove the ego token here. Right?
 
@@ -1159,23 +1230,34 @@ class PlanningModel(TorchModuleWrapper):
         # Ensure indices are within bounds
         # assert lane_intention_max.max() < x[:, A:].shape[1], "Index out of bounds in lane_intention_max"
 
-        intention_lane_seg_2s = x_orig[:, A:][torch.arange(bs), lane_intention_max_2s] + self.seed_2s
-        intention_lane_seg_8s = x_orig[:, A:][torch.arange(bs), lane_intention_max_8s] + self.seed_8s
+        intention_lane_seg_after_2s = x[:, A:][torch.arange(bs), lane_intention_max_2s]
+        progress_estimate = self.attraction_point_pos(intention_lane_seg_after_2s).squeeze() # B
+
+        intention_lane_seg_2s = x_orig[:, A:][torch.arange(bs), lane_intention_max_2s]
+        intention_lane_seg_8s = x_orig[:, A:][torch.arange(bs), lane_intention_max_8s]
         # assert route_key_padding_mask[torch.arange(bs), lane_intention_max].any() == False # assert the selected lane segment is on the route
+
+        intention_lane_seg_2s_pos = polygon_pos[torch.arange(bs), lane_intention_max_2s] # B P 2
+        attraction_point_lane = intention_lane_seg_2s_pos[torch.arange(bs), torch.clip(progress_estimate*20, 1, 19).to(torch.long)]
+
+        attraction_emb = self.attraction_point_emb(attraction_point_lane) # B D
 
         ################ WpNet ################ 
         # attraction_point = attraction_point_gt
         # q = (self.attraction_point_projector(attraction_point)+self.lane_emb_cr_mlp(intention_lane_seg)).unsqueeze(1)
-        x_wpnet = torch.cat([self.lane_emb_wp_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
+        x_wpnet = torch.cat([
+            attraction_emb.unsqueeze(1),
+            self.lane_emb_wp_2s_mlp(intention_lane_seg_2s).unsqueeze(1),
                             #  self.lane_emb_wp_8s_mlp(intention_lane_seg_8s).unsqueeze(1),
                               x_orig[:,1:]], dim=1)
-        key_padding_mask_wp = torch.cat([torch.zeros((bs, 1), dtype=torch.bool, device=key_padding_mask.device),
+        key_padding_mask_wp = torch.cat([torch.zeros((bs, 2), dtype=torch.bool, device=key_padding_mask.device),
                                           key_padding_mask[:, 1:]], dim=1)
         for blk in self.WpNet:
             x_wpnet = blk(x_wpnet, key_padding_mask=key_padding_mask_wp)
         x_wpnet = self.norm_wp(x_wpnet)
         rel_prediction = self.rel_agent_predictor(x_wpnet[:, 1:A]).view(bs, -1, self.waypoints_number, 2)
-        waypoints = self.waypoint_decoder(x_wpnet[:, 0]) # B T_wp 4
+        waypoints_ = self.waypoint_decoder(x_wpnet[:, 0]) # B T_wp 4
+        waypoints = torch.cat([waypoints_, attraction_point_lane.unsqueeze(1)], dim=1)
 
         ################ FFNet ################
         x_ffnet = torch.cat([
@@ -1367,11 +1449,12 @@ class PlanningModel(TorchModuleWrapper):
         x = torch.cat([ego_vel_token, agent_embedding_emb[:, 1:], lane_embedding_pos], dim=1) # drop the ego history token here
         key_padding_mask = torch.cat([agent_key_padding, polygon_key_padding], dim=-1)
 
-        res = [x, key_padding_mask, route_kp_mask]
+        polygon_pos_and_ori = torch.cat([polygon_pos[..., :2], polygon_ori.cos(), polygon_ori.sin()], dim=-1)
+
+        res = [x, key_padding_mask, route_kp_mask, polygon_pos_and_ori]
 
         if training:
 
-            polygon_pos_and_ori = torch.cat([polygon_pos[..., :2], polygon_ori.cos(), polygon_ori.sin()], dim=-1)
             # lane_intention_target 2s
             dist = torch.norm( polygon_pos_and_ori - attraction_point[:, None, None, :], dim=-1) # [B, M, S]
             ori_diff_2s = torch.norm(polygon_pos_and_ori[..., 2:] - attraction_point[:, None, None, 2:], dim=-1) # [B, M]
@@ -1379,6 +1462,11 @@ class PlanningModel(TorchModuleWrapper):
             dist[polygon_key_padding] = torch.inf
             dist[diff_above_threshold] = torch.inf
             lane_intention_2s = dist.min(dim=-1)[0].argmin(dim=-1) # B
+
+            dist_seg, nearest_point_id = dist.min(dim=-1)
+            lane_intention_2s = dist_seg.argmin(dim=-1) # B
+            progress_on_intention_seg = nearest_point_id.gather(1, lane_intention_2s[:, None]).squeeze(-1) # B
+
             # lane_intention_target 8s
             dist = torch.norm(polygon_pos_and_ori - horizon_point[:, None, None, :], dim=-1) # [B, M, S]
             ori_diff_8s = torch.norm(polygon_pos_and_ori[..., 2:] - horizon_point[:, None, None, 2:], dim=-1) # [B, M]
@@ -1387,7 +1475,7 @@ class PlanningModel(TorchModuleWrapper):
             dist[diff_above_threshold] = torch.inf
             lane_intention_8s = dist.min(dim=-1)[0].argmin(dim=-1) # B
 
-            res.extend([lane_intention_2s, lane_intention_8s, waypoints_gt])
+            res.extend([lane_intention_2s, lane_intention_8s, waypoints_gt, progress_on_intention_seg])
         
         return res
     

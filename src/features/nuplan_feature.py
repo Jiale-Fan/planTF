@@ -27,8 +27,9 @@ class NuplanFeature(AbstractModelFeature):
                 )
                 for k in feature_list[0].data[key].keys()
             }
-        for key in ["current_state", "origin", "angle", "scenario_type"]:
-            batch_data[key] = torch.stack([f.data[key] for f in feature_list], dim=0)
+        for key in ["current_state", "origin", "angle", "scenario_type", "waypoints"]:
+            if key in feature_list[0].data:
+                batch_data[key] = torch.stack([f.data[key] for f in feature_list], dim=0)
 
         return NuplanFeature(data=batch_data)
 

@@ -100,6 +100,15 @@ class StatePerturbation(AbstractAugmentor):
         scenario: Optional[AbstractScenario] = None,
     ) -> Tuple[FeaturesType, TargetsType]:
         """Inherited, see superclass."""
+
+        features["feature"].data["waypoints"] = np.concatenate([
+            features["feature"].data["agent"]["position"][0, self._hist_len:self._hist_len+20],
+            np.stack([
+            np.cos(features["feature"].data["agent"]["heading"][0, self._hist_len:self._hist_len+20]),
+            np.sin(features["feature"].data["agent"]["heading"][0, self._hist_len:self._hist_len+20])
+            ], axis=-1)
+        ], axis=-1)  # [20, 4]
+            
         if np.random.rand() >= self._augment_prob:
             return features, targets
 
