@@ -110,9 +110,10 @@ if __name__ == "__main__":
  python run_training.py \
     py_func=cache +training=train_planTF \
     scenario_builder=nuplan \
-    cache.cache_path=/data1/nuplan/jiale2/exp/cache_plantf_1M_correct \
+    cache.cache_path=/media/jiale/Jiale_SSD/cache/cache_plantf_aug \
     cache.cleanup_cache=true \
     scenario_filter=training_scenarios_1M \
+    scenario_filter.limit_total_scenarios=100000 \
     worker.threads_per_node=24
 '''
 
@@ -122,10 +123,11 @@ if __name__ == "__main__":
  python run_training.py \
     py_func=cache +training=train_planTF \
     scenario_builder=nuplan \
-    cache.cache_path=/data1/nuplan/jiale2/exp/cache_plantf_hundred\
+    cache.cache_path=/data1/nuplan/jiale2/exp/cache_plantf_recontest\
     cache.cleanup_cache=true \
     scenario_filter=training_scenarios_hundred \
-    worker.threads_per_node=2
+    scenario_filter.limit_total_scenarios=1000 \
+    worker.threads_per_node=16
 '''
 
 # command to train
@@ -144,13 +146,15 @@ python run_training.py \
 # command to debug train
 
 '''
+export PYTHONPATH=$PYTHONPATH:$(pwd)
+ulimit -n 102400
 export CUDA_VISIBLE_DEVICES=0,1,2
 python run_training.py \
   py_func=train +training=train_planTF \
-  worker=single_machine_thread_pool worker.max_workers=2 \
-  scenario_builder=nuplan cache.cache_path=/data1/nuplan/jiale2/exp/cache_plantf_hundred cache.use_cache_without_dataset=true \
-  data_loader.params.batch_size=4 data_loader.params.num_workers=2 \
-  lr=1e-3 epochs=5 warmup_epochs=3 weight_decay=0.0001 \
-  lightning.trainer.params.check_val_every_n_epoch=5 \
-  wandb.mode=online wandb.project=nuplan wandb.name=plantf_100k
+  worker=single_machine_thread_pool worker.max_workers=16 \
+  scenario_builder=nuplan cache.cache_path=/media/jiale/Jiale_SSD/cache_plantf_1M_reconstructable cache.use_cache_without_dataset=true \
+  data_loader.params.batch_size=42 data_loader.params.num_workers=16 \
+  lr=1e-3 epochs=25 warmup_epochs=3 weight_decay=0.0001 \
+  lightning.trainer.params.check_val_every_n_epoch=2 \
+  wandb.mode=online wandb.project=nuplan wandb.name=plantf_1M_6modes
   '''  

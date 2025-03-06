@@ -2,7 +2,9 @@ imitation_planner:
   _target_: src.planners.imitation_planner.ImitationPlanner
   _convert_: "all"
 
+
   replan_interval: 1
+  use_gpu: false
 
   planner:
     _target_: src.models.planTF.planning_model.PlanningModel
