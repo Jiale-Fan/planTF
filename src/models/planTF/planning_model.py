@@ -122,7 +122,7 @@ class PlanningModel(TorchModuleWrapper):
         trajectory_mask_ratio=0.7,
         # pretrain_epoch_stages = [0, 10, 20, 25, 30, 35], # SEPT, ft, ant, ft, ant, ft
         # pretrain_epoch_stages = [0, 0],
-        pretrain_epochs = 10,
+        pretrain_epochs = 40,
         lane_split_threshold=20,
         alpha=0.999,
         expanded_dim = 2048,
