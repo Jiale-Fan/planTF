@@ -9,4 +9,4 @@ python run_simulation.py \
     scenario_filter=single_right_turn \
     worker=sequential \
     verbose=true \
-    planner.imitation_planner.planner_ckpt="$CKPT_ROOT/$PLANNER.ckpt"
+    planner.imitation_planner.planner_ckpt="/home/jiale/Documents/checkpoints/famo_ft_40.ckpt"

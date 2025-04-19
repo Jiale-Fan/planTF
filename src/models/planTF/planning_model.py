@@ -121,7 +121,8 @@ class PlanningModel(TorchModuleWrapper):
         lane_mask_ratio=0.5,
         trajectory_mask_ratio=0.7,
         # pretrain_epoch_stages = [0, 10, 20, 25, 30, 35], # SEPT, ft, ant, ft, ant, ft
-        pretrain_epoch_stages = [0, 0],
+        # pretrain_epoch_stages = [0, 0],
+        pretrain_epochs = 10,
         lane_split_threshold=20,
         alpha=0.999,
         expanded_dim = 2048,
@@ -152,7 +153,8 @@ class PlanningModel(TorchModuleWrapper):
 
         self.lane_mask_ratio = lane_mask_ratio
         self.trajectory_mask_ratio = trajectory_mask_ratio
-        self.pretrain_epoch_stages = pretrain_epoch_stages
+        # self.pretrain_epoch_stages = pretrain_epoch_stages
+        self.pretrain_epochs = pretrain_epochs
 
         self.no_lane_segment_points = 20
         self.lane_split_threshold = lane_split_threshold
@@ -380,12 +382,12 @@ class PlanningModel(TorchModuleWrapper):
             return self.forward_inference(data)
             # return self.forward_antagonistic_mask_finetune(data, current_epoch)
         else:
-            return self.forward_multimodal_finetune(data)
+            # return self.forward_multimodal_finetune(data)
             # if self.training and current_epoch <= 5:
             #     return self.forward_CME_pretrain(data)
-            if self.training and current_epoch <= 20:
+            if self.training and current_epoch <= self.pretrain_epochs:
                 return self.forward_teacher_enforcing(data)
-            elif self.training and current_epoch > 20:
+            elif self.training and current_epoch > self.pretrain_epochs:
                 return self.forward_multimodal_finetune(data)
             else:
                 return self.forward_inference(data)
@@ -762,7 +764,7 @@ class PlanningModel(TorchModuleWrapper):
         map_points = polygon_pos[i]
         plot_scene_attention(agent_features[i], frame_valid_mask[i], map_points, lane_intention_score[i],
                              key_padding_mask[i, :], 
-                              output_trajectory[i], agent_score[i], filename=self.inference_counter, prefix=k)
+                              output_trajectory[i], agent_score[i] if agent_score is not None else None, filename=self.inference_counter, prefix=k)
         
 
     # def attention_guided_mask_generation(self, attn_weights, key_padding_mask):
@@ -997,7 +999,8 @@ class PlanningModel(TorchModuleWrapper):
     def forward_multimodal_finetune(self, data):
         bs, A = data["agent"]["heading"].shape[0:2]
         # x_orig, key_padding_mask = self.embed(data, torch.cat((self.plan_seed, self.rep_seed)))
-        x_orig, key_padding_mask, route_key_padding_mask = self.embed(data, training=False)
+        # x_orig, key_padding_mask, route_key_padding_mask = self.embed(data, training=False)
+        x_orig, key_padding_mask, route_key_padding_mask, lane_intention_2s_gt, lane_intention_8s_gt, waypoints_gt = self.embed(data, training=True)
 
         # no need to remove the ego token here. Right?
 
@@ -1016,8 +1019,22 @@ class PlanningModel(TorchModuleWrapper):
         lane_intention_2s_prob = F.softmax(lane_intention_2s, dim=-1)
         lane_intention_8s_prob = F.softmax(lane_intention_8s, dim=-1)
 
+        loss_lane_intention_2s = F.cross_entropy(lane_intention_2s_prob, lane_intention_2s_gt, reduction="none")
+        loss_lane_intention_8s = F.cross_entropy(lane_intention_8s_prob, lane_intention_8s_gt, reduction="none")
+
         lane_intention_topk_2s = lane_intention_2s_prob.topk(k=self.num_modes, dim=-1, largest=True, sorted=False).indices # [B, M]
         lane_intention_topk_8s = lane_intention_8s_prob.topk(k=self.num_modes, dim=-1, largest=True, sorted=False).indices
+
+        # find the lane segment with the highest probability
+        lane_intention_max_2s = lane_intention_2s_prob.argmax(dim=-1)
+        lane_intention_correct_rates_2s = (lane_intention_max_2s == lane_intention_2s_gt).float().mean()
+        lane_intention_topk_2s = lane_intention_2s_prob.topk(k=6, dim=-1, largest=True, sorted=False).indices
+        lane_intention_topk_correct_rate_2s = (lane_intention_topk_2s == lane_intention_2s_gt.unsqueeze(-1)).any(-1).float().mean()
+
+        lane_intention_max_8s = lane_intention_8s_prob.argmax(dim=-1)
+        lane_intention_correct_rates_8s = (lane_intention_max_8s == lane_intention_8s_gt).float().mean()
+        lane_intention_topk_8s = lane_intention_8s_prob.topk(k=6, dim=-1, largest=True, sorted=False).indices
+        lane_intention_topk_correct_rate_8s = (lane_intention_topk_8s == lane_intention_8s_gt.unsqueeze(-1)).any(-1).float().mean()
 
         waypoints_list = []
         far_future_traj_list = []
@@ -1072,20 +1089,25 @@ class PlanningModel(TorchModuleWrapper):
         probability = torch.zeros(bs, self.num_modes, device=trajectory.device) # B M
 
         probability[:, 0] = 1.0
-        cme_loss = self.forward_CME_pretrain(data)
+        # cme_loss = self.forward_CME_pretrain(data)
 
         out = {
-            "cme_loss": cme_loss["loss"],
+            # "cme_loss": cme_loss["loss"],
             "trajectory": trajectory,
             "probability": probability,
             "prediction": abs_prediction,
             "rel_prediction" : multimodal_rel_prediction,
             "waypoints": multimodal_waypoints,
             "far_future_traj": multimodal_far_future_traj,
+            "lane_intention_loss": loss_lane_intention_2s+loss_lane_intention_8s,
             "lane_intention_2s_prob": lane_intention_2s_prob,
             "lane_intention_8s_prob": lane_intention_8s_prob,
             "lane_intention_topk_2s": lane_intention_topk_2s,
             "lane_intention_topk_8s": lane_intention_topk_8s,
+            "lane_intention_correct_rates": lane_intention_correct_rates_2s,
+            "lane_intention_topk_correct_rate": lane_intention_topk_correct_rate_2s,
+            "lane_intention_correct_rates_8s": lane_intention_correct_rates_8s,
+            "lane_intention_topk_correct_rate_8s": lane_intention_topk_correct_rate_8s,
         }
 
         if not self.training:
@@ -1206,11 +1228,11 @@ class PlanningModel(TorchModuleWrapper):
             # self.inference_counter += 1
 
             ## visualize FFNet
-            attn_weights = self.FFNet[-1].attn_mat[:, 0].detach()
+            attn_weights = self.WpNet[-1].attn_mat[:, 0].detach()
             # score_to_visualize = lane_intention_prob_2s
-            score_to_visualize = attn_weights[:, 3+A:]
+            score_to_visualize = attn_weights[:, A:]
             # visualize the scene using the attention weights
-            self.plot_lane_intention(data, score_to_visualize, output_trajectory, key_padding_mask, attn_weights[:, 3:3+A], 0)
+            self.plot_lane_intention(data, score_to_visualize, output_trajectory, key_padding_mask, None, 0)
             self.inference_counter += 1
 
         return out

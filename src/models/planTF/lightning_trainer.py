@@ -53,7 +53,8 @@ class LightningTrainer(pl.LightningModule):
         self.temperature = temperature
         self.scaling = scaling
 
-        self.famo = FAMO(n_tasks=2, device='cuda:0')
+        self.famo_4 = FAMO(n_tasks=4, device='cuda:0')
+        self.famo_5 = FAMO(n_tasks=5, device='cuda:0')
 
         self.rel_weighting_sigma = 8
 
@@ -105,11 +106,12 @@ class LightningTrainer(pl.LightningModule):
 
         if 'trajectory' in res and 'probability' in res:
         # if they are present, this suggests that the model is not in pretrain mode
-            planning_loss = self._compute_objectives(res, features["feature"].data)
+            objectives_and_lane_correction_rates = self._compute_objectives(res, features["feature"].data)
             if res["trajectory"].dim() == 5:
                 res = {key: res[key][:, 0] for key in res.keys()}
             metrics = self._compute_metrics(res, features["feature"].data, prefix)
-            res.update(planning_loss) 
+            res.update(objectives_and_lane_correction_rates) 
+            loss_objectives = {k:v for k, v in objectives_and_lane_correction_rates.items() if "loss" in k}
 
         else:
         # the model should be in pretrain mode, loss has already been calculated
@@ -157,8 +159,13 @@ class LightningTrainer(pl.LightningModule):
                 opt_pre.zero_grad()
                 opt_fine.zero_grad()
 
-                self.manual_backward(res["loss"])
-                # self.famo.backward(torch.stack([res["loss"], res["cme_loss"]]), self)
+                # self.manual_backward(res["loss"])
+                if len(loss_objectives) == 4:
+                    self.famo_4.backward(torch.stack(list(loss_objectives.values())), self)
+                elif len(loss_objectives) == 5:
+                    self.famo_5.backward(torch.stack(list(loss_objectives.values())), self)
+                else:
+                    raise ValueError("The number of objectives should be 4 or 5")
                 self.clip_gradients(opt_pre, gradient_clip_val=5.0, gradient_clip_algorithm="norm") 
                 self.clip_gradients(opt_fine, gradient_clip_val=5.0, gradient_clip_algorithm="norm") 
                 opt_pre.step()
@@ -170,14 +177,16 @@ class LightningTrainer(pl.LightningModule):
         # for sch in self.lr_schedulers():
         #     sch.step(self.current_epoch)
 
+        loss_sum = sum(loss_objectives.values())
+
         logged_loss = {k: v for k, v in res.items() if v.dim() == 0}
-        self._log_step(res["loss"], logged_loss, metrics, prefix)
+        self._log_step(loss_sum, logged_loss, metrics, prefix)
 
         # count scenario type:
         # type_count = torch.bincount(features["feature"].data["scenario_type"].flatten().to(torch.int64), minlength=SCENARIO_TYPE_NUM).to('cpu')
         # self.scenario_type_count = self.scenario_type_count + (type_count)
 
-        return res["loss"]
+        return loss_sum
     
     # def on_load_checkpoint(self, checkpoint):
     #     if "optimizer_states" in checkpoint:
@@ -335,7 +344,7 @@ class LightningTrainer(pl.LightningModule):
         if "lane_intention_loss" in res:
         # if True:
             lane_intention_loss = res["lane_intention_loss"]
-            lane_intention_dict = {k: res[k] for k in res.keys() if k.startswith("lane_intention")}
+            # lane_intention_dict = {k: res[k] for k in res.keys() if k.startswith("lane_intention")}
 
         # elif "lane_intention_2s_prob" in res: 
         #     lane_intention_2s_prob = res["lane_intention_2s_prob"]
@@ -351,7 +360,7 @@ class LightningTrainer(pl.LightningModule):
         
         else:
             lane_intention_loss = torch.zeros(bs, device=agent_reg_loss.device)
-            lane_intention_dict = {}
+            # lane_intention_dict = {}
 
         # ego_loss_dict = self._cal_ego_loss_term(trajectory, probability, ego_target)
         ret_dict_batch = {
@@ -371,10 +380,10 @@ class LightningTrainer(pl.LightningModule):
             loss = loss_mat.mean()
 
         ret_dict_mean = {key: value.mean() for key, value in ret_dict_batch.items()}
-        ret_dict_mean["loss"] = loss
+        # ret_dict_mean["loss"] = loss
         if "cme_loss" in res:
             ret_dict_mean["cme_loss"] = res["cme_loss"]
-        ret_dict_mean.update(lane_intention_dict)
+        # ret_dict_mean.update(lane_intention_dict)
 
         return ret_dict_mean
 
@@ -620,7 +629,8 @@ class LightningTrainer(pl.LightningModule):
             optimizer=optimizer_pretrain,
             lr=self.lr,
             min_lr=1e-6,
-            starting_epoch=self.model.pretrain_epoch_stages[0:1],
+            # starting_epoch=self.model.pretrain_epoch_stages[0:1],
+            starting_epoch=[0],
             epochs=self.epochs,
             warmup_epochs=self.warmup_epochs,
         )
@@ -638,7 +648,8 @@ class LightningTrainer(pl.LightningModule):
             optimizer=optimizer_finetune_f,
             lr=self.lr,
             min_lr=1e-6,
-            starting_epoch=self.model.pretrain_epoch_stages[1:2],
+            # starting_epoch=self.model.pretrain_epoch_stages[1:2],
+            starting_epoch=[0],
             epochs=self.epochs,
             warmup_epochs=self.warmup_epochs,
         )
