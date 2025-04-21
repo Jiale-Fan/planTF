@@ -53,8 +53,10 @@ class LightningTrainer(pl.LightningModule):
         self.temperature = temperature
         self.scaling = scaling
 
-        self.famo_4 = FAMO(n_tasks=4, device='cuda:0')
-        self.famo_5 = FAMO(n_tasks=5, device='cuda:0')
+        device = torch.cuda.current_device()
+
+        self.famo_4 = FAMO(n_tasks=4, device=device)
+        self.famo_5 = FAMO(n_tasks=5, device=device)
 
         self.rel_weighting_sigma = 8
 
@@ -62,16 +64,16 @@ class LightningTrainer(pl.LightningModule):
 
         self.initial_finetune_flag = True
 
-        checkpoint = torch.load("/home/jiale/Documents/exp/exp/training/planTF/2025.02.22.15.17.30/checkpoints/first_stage.ckpt", map_location="cuda")
-        # Extract only the model's state dictionary
-        new_state_dict = OrderedDict()
-        for k, v in checkpoint["state_dict"].items():
-            new_key = k.replace("model.", "")  # Remove prefix
-            new_state_dict[new_key] = v
+        #### following code is for resume training
+        # checkpoint = torch.load("/home/jiale/Documents/exp/exp/training/planTF/2025.02.22.15.17.30/checkpoints/first_stage.ckpt", map_location="cuda")
+        # # Extract only the model's state dictionary
+        # new_state_dict = OrderedDict()
+        # for k, v in checkpoint["state_dict"].items():
+        #     new_key = k.replace("model.", "")  # Remove prefix
+        #     new_state_dict[new_key] = v
 
-        model.load_state_dict(new_state_dict, strict=True)
+        # model.load_state_dict(new_state_dict, strict=True)
         # self.model.load_state_dict(new_state_dict)
-
 
         self.scenario_type_count = torch.zeros(SCENARIO_TYPE_NUM, dtype=torch.int64, device=self.device)
 
