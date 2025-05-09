@@ -866,13 +866,13 @@ class PlanningModel(TorchModuleWrapper):
         z_env = self.cme_env_mlp(h_map) # [B, d]
 
         ## CURL contrastive loss
-        projected_z_motion = torch.matmul(self.bilinear_W, z_motion.T)
-        logits = torch.matmul(z_env, projected_z_motion) # [B, B]
-        logits = logits - torch.max(logits, dim=-1, keepdim=True).values
-        labels = torch.arange(logits.shape[0], device=logits.device)
-        loss = F.cross_entropy(logits, labels)
+        # projected_z_motion = torch.matmul(self.bilinear_W, z_motion.T)
+        # logits = torch.matmul(z_env, projected_z_motion) # [B, B]
+        # logits = logits - torch.max(logits, dim=-1, keepdim=True).values
+        # labels = torch.arange(logits.shape[0], device=logits.device)
+        # loss = F.cross_entropy(logits, labels)
 
-        # loss = self.barlow_twin_loss(z_motion, z_env)
+        loss = self.barlow_twin_loss(z_motion, z_env)
 
         out = {
             "loss": loss,
