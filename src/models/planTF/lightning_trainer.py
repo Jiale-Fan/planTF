@@ -161,13 +161,13 @@ class LightningTrainer(pl.LightningModule):
                 opt_pre.zero_grad()
                 opt_fine.zero_grad()
 
-                # self.manual_backward(res["loss"])
-                if len(loss_objectives) == 4:
-                    self.famo_4.backward(torch.stack(list(loss_objectives.values())), self)
-                elif len(loss_objectives) == 5:
-                    self.famo_5.backward(torch.stack(list(loss_objectives.values())), self)
-                else:
-                    raise ValueError("The number of objectives should be 4 or 5")
+                self.manual_backward(torch.sum(torch.stack(list(loss_objectives.values()))))
+                # if len(loss_objectives) == 4:
+                #     self.famo_4.backward(torch.stack(list(loss_objectives.values())), self)
+                # elif len(loss_objectives) == 5:
+                #     self.famo_5.backward(torch.stack(list(loss_objectives.values())), self)
+                # else:
+                #     raise ValueError("The number of objectives should be 4 or 5")
                 self.clip_gradients(opt_pre, gradient_clip_val=5.0, gradient_clip_algorithm="norm") 
                 self.clip_gradients(opt_fine, gradient_clip_val=5.0, gradient_clip_algorithm="norm") 
                 opt_pre.step()
