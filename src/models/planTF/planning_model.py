@@ -963,10 +963,10 @@ class PlanningModel(TorchModuleWrapper):
 
         assert trajectory.isnan().any() == False
 
-        cme_loss = self.forward_CME_pretrain(data)
+        # cme_loss = self.forward_CME_pretrain(data)
 
         out = {
-            "cme_loss": cme_loss["loss"],
+            # "cme_loss": cme_loss["loss"],
             "trajectory": trajectory,
             "probability": probability,
             "prediction": abs_prediction,

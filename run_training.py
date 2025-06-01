@@ -154,7 +154,7 @@ python run_training.py \
   data_loader.params.batch_size=64 data_loader.params.num_workers=24 \
   lr=1e-3 epochs=40 warmup_epochs=3 weight_decay=0.0001 \
   lightning.trainer.params.check_val_every_n_epoch=5 \
-  wandb.mode=online wandb.project=nuplan wandb.name=famo_ft_may_100k \
+  wandb.mode=online wandb.project=nuplan wandb.name=famo_ft_may_famo_abla \
 #   checkpoint=/home/jiale/Documents/exp/exp/training/planTF/2025.02.22.15.17.30/checkpoints/first_stage.ckpt \
 #   output_dir=/home/jiale/Documents/exp/exp/training/planTF/2025.02.22.15.17.30 \
   seed=10
