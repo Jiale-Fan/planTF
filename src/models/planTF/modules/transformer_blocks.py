@@ -87,6 +87,7 @@ class Block(nn.Module):
             attn_mask=mask,
             key_padding_mask=key_padding_mask,
             need_weights=True,
+            average_attn_weights=False,
         )
         self.attn_mat = attn_mat
         src = src + self.drop_path1(src2)

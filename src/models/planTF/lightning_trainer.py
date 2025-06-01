@@ -57,6 +57,7 @@ class LightningTrainer(pl.LightningModule):
 
         self.famo_4 = FAMO(n_tasks=4, device=device)
         self.famo_5 = FAMO(n_tasks=5, device=device)
+        self.famo_6 = FAMO(n_tasks=6, device=device)
 
         self.rel_weighting_sigma = 8
 
@@ -166,6 +167,8 @@ class LightningTrainer(pl.LightningModule):
                     self.famo_4.backward(torch.stack(list(loss_objectives.values())), self)
                 elif len(loss_objectives) == 5:
                     self.famo_5.backward(torch.stack(list(loss_objectives.values())), self)
+                elif len(loss_objectives) == 6:
+                    self.famo_6.backward(torch.stack(list(loss_objectives.values())), self)
                 else:
                     raise ValueError("The number of objectives should be 4 or 5")
                 self.clip_gradients(opt_pre, gradient_clip_val=5.0, gradient_clip_algorithm="norm") 
@@ -395,25 +398,26 @@ class LightningTrainer(pl.LightningModule):
 
             return (loss*labels_valid).sum() / labels_valid.sum()
         
-        # j25: relative attention loss.
-        attn_mat_subset = res["attn_mat_subset"]
-        attn_score_losses = []
-        for i in range(4):
-            score_target = get_score_target(agent_target, ego_target_pos, (i+1)*10)
-            attn_score_loss_term = attention_score_loss(attn_mat_subset[:, i], agent_mask[:, 0], score_target)
-            attn_score_losses.append(attn_score_loss_term)
-        attn_score_loss = torch.sum(attn_score_losses)
-
         # ego_loss_dict = self._cal_ego_loss_term(trajectory, probability, ego_target)
         ret_dict_batch = {
             "agent_reg_loss": agent_reg_loss,
             # "rel_agent_pos_loss": loss_rel_agent,
             "lane_intention_loss": lane_intention_loss,
             "waypoint_loss": waypoint_loss,
-            "far_future_loss": far_future_loss,
-            "attn_score_loss": attn_score_loss
+            "far_future_loss": far_future_loss,        }
+        
+        # j25: relative attention loss.
+        if "attn_mat_subset" in res:
+            attn_mat_subset = res["attn_mat_subset"]
+            attn_score_losses = []
+            for i in range(4):
+                score_target = get_score_target(agent_target, ego_target_pos, (i+1)*10)
+                attn_score_loss_term = attention_score_loss(attn_mat_subset[:, i], agent_mask[:, :, (i+1)*10], score_target)
+                attn_score_losses.append(attn_score_loss_term)
+            attn_score_loss = torch.sum(attn_score_losses)
+            ret_dict_batch["attn_score_loss"] = attn_score_loss
 
-        }
+
         # loss = torch.mean(torch.stack([ret_dict[key] for key in ret_dict.keys()]))
         loss_mat = torch.stack(list(ret_dict_batch.values()), dim=-1) # [bs, 5]
         if self.scaling == True:
