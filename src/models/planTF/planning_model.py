@@ -166,6 +166,8 @@ class PlanningModel(TorchModuleWrapper):
         self.whether_split_lane = whether_split_lane
         self.ori_threshold = ori_threshold
 
+        self.att_sup_depth = encoder_depth // 2
+
         # modules begin
         self.pe = PositionalEncoding(dim, dropout=0.1, max_len=1000)
         self.pos_emb = build_mlp(4, [dim] * 2)
@@ -316,6 +318,7 @@ class PlanningModel(TorchModuleWrapper):
         self.cme_env_mlp = build_mlp(dim, [2048, 256], norm="ln")
 
         self.bilinear_W = nn.Parameter(torch.randn(256, 256))
+        self.attention_weight_rescale = nn.Linear(in_features=1, out_features=1)
 
         self.apply(self._init_weights)
 
@@ -341,7 +344,7 @@ class PlanningModel(TorchModuleWrapper):
         return [self.pos_emb, self.tempo_net, self.TempoNet_frame_seed, self.agent_projector, self.MRM_seed,
                 self.map_encoder, self.lane_pred, self.agent_frame_predictor, self.SpaNet, self.norm_spa, self.agent_tail_predictor, 
                 # JointMotion CME 
-                self.cme_motion_mlp, self.cme_env_mlp, self.seed_2s, self.seed_8s, self.bilinear_W]
+                self.cme_motion_mlp, self.cme_env_mlp, self.seed_2s, self.seed_8s, self.bilinear_W, self.attention_weight_rescale]
 
     def get_finetune_modules(self):
         return [self.ego_seed, self.waypoint_decoder, self.far_future_traj_decoder, self.FFNet, self.goal_mlp,
@@ -932,8 +935,14 @@ class PlanningModel(TorchModuleWrapper):
                               x_orig[:,1:]], dim=1)
         key_padding_mask_wp = torch.cat([torch.zeros((bs, 1), dtype=torch.bool, device=key_padding_mask.device),
                                           key_padding_mask[:, 1:]], dim=1)
-        for blk in self.WpNet:
+        for (i, blk) in enumerate(self.WpNet):
             x_wpnet = blk(x_wpnet, key_padding_mask=key_padding_mask_wp)
+            if i == self.att_sup_depth:
+                attn_mat = blk.attn_mat # [N, num_heads, L, L]
+
+        attn_mat_subset = attn_mat[:, :4, 0, 1:A] # [N, 4, A-1] # the ego's attention on other agents
+        attn_mat_subset = self.attention_weight_rescale(attn_mat_subset.unsqueeze(-1)).squeeze(-1)
+        
         x_wpnet = self.norm_wp(x_wpnet)
         rel_prediction = self.rel_agent_predictor(x_wpnet[:, 1:A]).view(bs, -1, self.waypoints_number, 2)
         waypoints = self.waypoint_decoder(x_wpnet[:, 0]) # B T_wp 4
@@ -966,6 +975,7 @@ class PlanningModel(TorchModuleWrapper):
         cme_loss = self.forward_CME_pretrain(data)
 
         out = {
+            "attn_mat_subset": attn_mat_subset, 
             "cme_loss": cme_loss["loss"],
             "trajectory": trajectory,
             "probability": probability,

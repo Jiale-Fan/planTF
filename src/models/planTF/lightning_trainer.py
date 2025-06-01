@@ -364,6 +364,46 @@ class LightningTrainer(pl.LightningModule):
             lane_intention_loss = torch.zeros(bs, device=agent_reg_loss.device)
             # lane_intention_dict = {}
 
+                ######################### j25 prototype #################################
+        def get_score_target(agent_target, ego_target_pos, timestep_index):
+            """
+            agent_target: [N, A-1, T, 3]
+            ego_target_pos: [N, T, 4]
+            timestep_index: int
+            """
+            dist_at_future_t = torch.norm(agent_target[:, :, timestep_index, :2] - ego_target_pos[:, None, timestep_index, :2], dim=-1) # [N, A-1]
+            return -dist_at_future_t # IMPORTANT: put minus to the dist, because the shorter the distance is, the higher attention score should be for it
+
+        def attention_score_loss(score_pred, mask, score_target):
+            """
+            loss_pred: [N, L, 1]
+            mask: [N, L], 0 is keep, 1 is to remove.
+            loss_target: [N, L]
+            """
+            N, L = score_target.shape
+            mask_ = ~mask
+
+            # binary classification for LxL
+            labels_positive = score_target.unsqueeze(1) > score_target.unsqueeze(2)
+            labels_negative = score_target.unsqueeze(1) < score_target.unsqueeze(2)
+            # labels_valid = (~repeat(mask, "N D -> N L D", L=L)) & (~repeat(mask, "N D -> N D L", L=L))
+            labels_valid = mask_.unsqueeze(1) & mask_.unsqueeze(2)
+
+            loss_matrix = score_pred.unsqueeze(1) - score_pred.unsqueeze(2)
+            loss = - labels_positive.int() * torch.log(torch.sigmoid(loss_matrix) + 1e-6) \
+                    - labels_negative.int() * torch.log(1 - torch.sigmoid(loss_matrix) + 1e-6)
+
+            return (loss*labels_valid).sum() / labels_valid.sum()
+        
+        # j25: relative attention loss.
+        attn_mat_subset = res["attn_mat_subset"]
+        attn_score_losses = []
+        for i in range(4):
+            score_target = get_score_target(agent_target, ego_target_pos, (i+1)*10)
+            attn_score_loss_term = attention_score_loss(attn_mat_subset[:, i], agent_mask[:, 0], score_target)
+            attn_score_losses.append(attn_score_loss_term)
+        attn_score_loss = torch.sum(attn_score_losses)
+
         # ego_loss_dict = self._cal_ego_loss_term(trajectory, probability, ego_target)
         ret_dict_batch = {
             "agent_reg_loss": agent_reg_loss,
@@ -371,6 +411,8 @@ class LightningTrainer(pl.LightningModule):
             "lane_intention_loss": lane_intention_loss,
             "waypoint_loss": waypoint_loss,
             "far_future_loss": far_future_loss,
+            "attn_score_loss": attn_score_loss
+
         }
         # loss = torch.mean(torch.stack([ret_dict[key] for key in ret_dict.keys()]))
         loss_mat = torch.stack(list(ret_dict_batch.values()), dim=-1) # [bs, 5]
