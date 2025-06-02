@@ -1059,8 +1059,16 @@ class PlanningModel(TorchModuleWrapper):
                               x_orig[:,1:]], dim=1)
             key_padding_mask_wp = torch.cat([torch.zeros((bs, 1), dtype=torch.bool, device=key_padding_mask.device),
                                             key_padding_mask[:, 1:]], dim=1)
-            for blk in self.WpNet:
+            #########
+            for (i, blk) in enumerate(self.WpNet):
                 x_wpnet = blk(x_wpnet, key_padding_mask=key_padding_mask_wp)
+                if i == self.att_sup_depth:
+                    attn_mat = blk.attn_mat # [N, num_heads, L, L]
+
+            attn_mat_subset = attn_mat[:, :4, 0, 1:A] # [N, 4, A-1] # the ego's attention on other agents
+            attn_mat_subset = self.attention_weight_rescale(attn_mat_subset.unsqueeze(-1)).squeeze(-1)
+            #########
+
             x_wpnet = self.norm_wp(x_wpnet)
             rel_prediction = self.rel_agent_predictor(x_wpnet[:, 1:A]).view(bs, -1, self.waypoints_number, 2)
             waypoints = self.waypoint_decoder(x_wpnet[:, 0]) # B T_wp 4
@@ -1102,6 +1110,8 @@ class PlanningModel(TorchModuleWrapper):
         # cme_loss = self.forward_CME_pretrain(data)
 
         out = {
+            "attn_mat_subset": attn_mat_subset, 
+
             # "cme_loss": cme_loss["loss"],
             "trajectory": trajectory,
             "probability": probability,

@@ -384,19 +384,19 @@ class LightningTrainer(pl.LightningModule):
             loss_target: [N, L]
             """
             N, L = score_target.shape
-            mask_ = ~mask
+
 
             # binary classification for LxL
             labels_positive = score_target.unsqueeze(1) > score_target.unsqueeze(2)
             labels_negative = score_target.unsqueeze(1) < score_target.unsqueeze(2)
             # labels_valid = (~repeat(mask, "N D -> N L D", L=L)) & (~repeat(mask, "N D -> N D L", L=L))
-            labels_valid = mask_.unsqueeze(1) & mask_.unsqueeze(2)
+            labels_valid = mask.unsqueeze(1) & mask.unsqueeze(2)
 
             loss_matrix = score_pred.unsqueeze(1) - score_pred.unsqueeze(2)
             loss = - labels_positive.int() * torch.log(torch.sigmoid(loss_matrix) + 1e-6) \
                     - labels_negative.int() * torch.log(1 - torch.sigmoid(loss_matrix) + 1e-6)
 
-            return (loss*labels_valid).sum() / labels_valid.sum()
+            return (loss*labels_valid).sum() / (labels_valid.sum() + 0.01)
         
         # ego_loss_dict = self._cal_ego_loss_term(trajectory, probability, ego_target)
         ret_dict_batch = {
@@ -414,9 +414,7 @@ class LightningTrainer(pl.LightningModule):
                 score_target = get_score_target(agent_target, ego_target_pos, (i+1)*10)
                 attn_score_loss_term = attention_score_loss(attn_mat_subset[:, i], agent_mask[:, :, (i+1)*10], score_target)
                 attn_score_losses.append(attn_score_loss_term)
-            attn_score_loss = torch.sum(attn_score_losses)
-            ret_dict_batch["attn_score_loss"] = attn_score_loss
-
+            attn_score_loss = torch.mean(torch.stack(attn_score_losses))
 
         # loss = torch.mean(torch.stack([ret_dict[key] for key in ret_dict.keys()]))
         loss_mat = torch.stack(list(ret_dict_batch.values()), dim=-1) # [bs, 5]
@@ -431,6 +429,9 @@ class LightningTrainer(pl.LightningModule):
         # ret_dict_mean["loss"] = loss
         if "cme_loss" in res:
             ret_dict_mean["cme_loss"] = res["cme_loss"]
+        if "attn_mat_subset" in res:
+            ret_dict_mean["attn_score_loss"] = attn_score_loss
+        
         # ret_dict_mean.update(lane_intention_dict)
 
         return ret_dict_mean
